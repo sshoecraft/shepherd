@@ -423,6 +423,29 @@ I've stored that your favorite color is blue.
 Your favorite color is blue!
 ```
 
+### Direct Memory Storage
+
+Store question/answer pairs directly to long-term memory:
+
+```bash
+> Store this information: "What is the project deadline?" Answer: "March 15, 2024"
+[Tool Call: store_memory(question="What is the project deadline?", answer="March 15, 2024")]
+[Tool Result: {"success": true}]
+
+Stored to long-term memory.
+
+... later in conversation or new session ...
+
+> Search for information about the deadline
+[Tool Call: search_memory(query="project deadline", max_results=3)]
+[Tool Result: "Found 1 archived conversation(s):
+Result 1 [Relevance: 0.95]:
+User: What is the project deadline?
+Assistant: March 15, 2024"]
+
+The project deadline is March 15, 2024.
+```
+
 ---
 
 ## Hardware Recommendations

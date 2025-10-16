@@ -1,0 +1,398 @@
+#include "ollama.h"
+#include "../logger.h"
+#include <sstream>
+#include <algorithm>
+
+// OllamaTokenizer implementation
+OllamaTokenizer::OllamaTokenizer(const std::string& model_name)
+    : model_name_(model_name) {
+    LOG_DEBUG("Ollama tokenizer initialized for model: " + model_name);
+}
+
+int OllamaTokenizer::count_tokens(const std::string& text) {
+    // Approximate token count (roughly 4 chars per token)
+    return static_cast<int>(text.length() / 4.0 + 0.5);
+}
+
+std::vector<int> OllamaTokenizer::encode(const std::string& text) {
+    // Placeholder implementation
+    std::vector<int> tokens;
+    for (size_t i = 0; i < text.length(); i += 4) {
+        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
+    }
+    return tokens;
+}
+
+std::string OllamaTokenizer::decode(const std::vector<int>& tokens) {
+    return "Ollama tokenizer decode not implemented";
+}
+
+std::string OllamaTokenizer::get_tokenizer_name() const {
+    return "ollama-" + model_name_;
+}
+
+// OllamaContextManager implementation
+OllamaContextManager::OllamaContextManager(size_t max_context_tokens)
+    : ContextManager(max_context_tokens) {
+    LOG_DEBUG("Ollama context manager initialized");
+}
+
+std::string OllamaContextManager::get_context_for_inference() {
+    // Build JSON in OpenAI format
+    std::ostringstream json_builder;
+    json_builder << "[";
+
+    bool first = true;
+    for (const auto& msg : messages_) {
+        if (!first) {
+            json_builder << ",";
+        }
+        first = false;
+
+        json_builder << "{\"role\":\"" << role_to_openai(msg.type) << "\","
+                    << "\"content\":\"";
+
+        // Escape JSON content
+        for (char c : msg.content) {
+            switch (c) {
+                case '"': json_builder << "\\\""; break;
+                case '\\': json_builder << "\\\\"; break;
+                case '\n': json_builder << "\\n"; break;
+                case '\r': json_builder << "\\r"; break;
+                case '\t': json_builder << "\\t"; break;
+                default: json_builder << c; break;
+            }
+        }
+        json_builder << "\"";
+
+        // Add tool-specific fields if present
+        if (!msg.tool_name.empty()) {
+            json_builder << ",\"name\":\"" << msg.tool_name << "\"";
+        }
+        if (!msg.tool_call_id.empty()) {
+            json_builder << ",\"tool_call_id\":\"" << msg.tool_call_id << "\"";
+        }
+
+        json_builder << "}";
+    }
+
+    json_builder << "]";
+    return json_builder.str();
+}
+
+int OllamaContextManager::count_tokens(const std::string& text) {
+    // Approximate tokenization (roughly 4 chars per token)
+    return static_cast<int>(text.length() / 4.0 + 0.5);
+}
+
+int OllamaContextManager::calculate_json_overhead() const {
+    // OpenAI format overhead
+    int overhead_chars = 10; // Array brackets and base structure
+
+    for (const auto& message : messages_) {
+        overhead_chars += 24; // Base JSON fields per message
+        overhead_chars += message.get_role().length();
+
+        if (!message.tool_name.empty()) {
+            overhead_chars += 30 + message.tool_name.length();
+        }
+        if (!message.tool_call_id.empty()) {
+            overhead_chars += 20 + message.tool_call_id.length();
+        }
+
+        if (!messages_.empty() && &message != &messages_.back()) {
+            overhead_chars += 1; // Comma separator
+        }
+    }
+
+    // Convert chars to tokens
+    return static_cast<int>(overhead_chars / 4.0 + 0.5);
+}
+
+// OllamaBackend implementation
+OllamaBackend::OllamaBackend(size_t max_context_tokens)
+    : ApiBackend(max_context_tokens) {
+    tokenizer_ = std::make_unique<OllamaTokenizer>("llama3.1:8b"); // Default model
+    LOG_DEBUG("OllamaBackend created");
+}
+
+OllamaBackend::~OllamaBackend() {
+    shutdown();
+}
+
+void OllamaBackend::set_api_base(const std::string& api_base) {
+#ifdef ENABLE_API_BACKENDS
+    if (!api_base.empty()) {
+        // Ensure it ends with /v1/chat/completions
+        if (api_base.find("/v1/chat/completions") == std::string::npos) {
+            if (api_base.find("/v1") == std::string::npos) {
+                api_endpoint_ = api_base + "/v1/chat/completions";
+            } else {
+                api_endpoint_ = api_base + "/chat/completions";
+            }
+        } else {
+            api_endpoint_ = api_base;
+        }
+        LOG_INFO("Ollama API endpoint set to: " + api_endpoint_);
+    }
+#endif
+}
+
+bool OllamaBackend::initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path) {
+#ifdef ENABLE_API_BACKENDS
+    if (initialized_) {
+        LOG_WARN("OllamaBackend already initialized");
+        return true;
+    }
+
+    // Ollama doesn't require an API key, but we accept it for compatibility
+    model_name_ = model_name.empty() ? "llama3.1:8b" : model_name;
+    api_key_ = api_key.empty() ? "dummy" : api_key;
+
+    // Update tokenizer with correct model name
+    tokenizer_ = std::make_unique<OllamaTokenizer>(model_name_);
+
+    // Query the actual context size for this model
+    size_t actual_context_size = query_model_context_size(model_name_);
+    if (actual_context_size > 0) {
+        max_context_size_ = actual_context_size;
+        LOG_INFO("Ollama model " + model_name_ + " context size: " + std::to_string(actual_context_size));
+    } else {
+        LOG_WARN("Failed to query context size for " + model_name_ + ", using default: " + std::to_string(max_context_size_));
+    }
+
+    // Create the context manager with the correct size
+    context_manager_ = std::make_unique<OllamaContextManager>(max_context_size_);
+
+    LOG_INFO("OllamaBackend initialized with model: " + model_name_);
+    initialized_ = true;
+    return true;
+#else
+    LOG_ERROR("API backends not compiled in");
+    return false;
+#endif
+}
+
+std::string OllamaBackend::generate(int max_tokens) {
+    if (!is_ready()) {
+        throw BackendManagerError("Ollama backend not initialized");
+    }
+
+    // Get current context for API call
+    std::string context_json = context_manager_->get_context_for_inference();
+    LOG_DEBUG("Ollama generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
+
+    // Build API request JSON
+    std::ostringstream request_json;
+    request_json << "{\"model\":\"" << model_name_ << "\",\"messages\":" << context_json;
+
+    if (max_tokens > 0) {
+        request_json << ",\"max_tokens\":" << max_tokens;
+    }
+
+    request_json << ",\"stream\":false}";
+
+    // Make API call
+    std::string response_body = make_api_request(request_json.str());
+
+    if (response_body.empty()) {
+        throw BackendManagerError("API request failed or returned empty response");
+    }
+
+    // Parse response to extract content
+    std::string response = parse_ollama_response(response_body);
+
+    // Return response directly - main will add it to context
+    return response;
+}
+
+std::string OllamaBackend::get_backend_name() const {
+    return "ollama";
+}
+
+std::string OllamaBackend::get_model_name() const {
+    return model_name_;
+}
+
+size_t OllamaBackend::get_max_context_size() const {
+#ifdef ENABLE_API_BACKENDS
+    return max_context_size_;
+#else
+    return 8192;
+#endif
+}
+
+bool OllamaBackend::is_ready() const {
+#ifdef ENABLE_API_BACKENDS
+    return initialized_;
+#else
+    return false;
+#endif
+}
+
+void OllamaBackend::shutdown() {
+    if (!initialized_) {
+        return;
+    }
+
+#ifdef ENABLE_API_BACKENDS
+    // HttpClient destructor will handle cleanup
+    http_client_.reset();
+#endif
+
+    initialized_ = false;
+    LOG_DEBUG("OllamaBackend shutdown complete");
+}
+
+std::string OllamaBackend::make_api_request(const std::string& json_payload) {
+#ifdef ENABLE_API_BACKENDS
+    if (!http_client_.get()) {
+        LOG_ERROR("HTTP client not initialized");
+        return "";
+    }
+
+    // Prepare headers
+    std::map<std::string, std::string> headers;
+    headers["Content-Type"] = "application/json";
+    if (!api_key_.empty() && api_key_ != "dummy") {
+        headers["Authorization"] = "Bearer " + api_key_;
+    }
+
+    // Make POST request
+    HttpResponse response = http_client_->post(api_endpoint_, json_payload, headers);
+
+    if (!response.is_success()) {
+        LOG_ERROR("Ollama API request failed with status " + std::to_string(response.status_code) +
+                  ": " + response.error_message);
+        return "";
+    }
+
+    return response.body;
+#else
+    return "";
+#endif
+}
+
+std::string OllamaBackend::make_get_request(const std::string& endpoint) {
+#ifdef ENABLE_API_BACKENDS
+    if (!http_client_.get()) {
+        LOG_ERROR("HTTP client not initialized");
+        return "";
+    }
+
+    // Build full URL
+    std::string base_url = api_endpoint_;
+    // Extract base (remove /v1/chat/completions if present)
+    size_t pos = base_url.find("/v1/chat/completions");
+    if (pos != std::string::npos) {
+        base_url = base_url.substr(0, pos);
+    }
+    std::string full_url = base_url + endpoint;
+
+    // Prepare headers
+    std::map<std::string, std::string> headers;
+    if (!api_key_.empty() && api_key_ != "dummy") {
+        headers["Authorization"] = "Bearer " + api_key_;
+    }
+
+    // Make GET request
+    HttpResponse response = http_client_->get(full_url, headers);
+
+    if (!response.is_success()) {
+        LOG_ERROR("Ollama GET request failed with status " + std::to_string(response.status_code) +
+                  ": " + response.error_message);
+        return "";
+    }
+
+    return response.body;
+#else
+    return "";
+#endif
+}
+
+size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
+#ifdef ENABLE_API_BACKENDS
+    // Try to query from Ollama API
+    // Ollama endpoint: GET /api/show with model name
+    // For now, use reasonable defaults based on model name
+
+    if (model_name.find("llama3.1") != std::string::npos) {
+        if (model_name.find("70b") != std::string::npos) {
+            return 128000; // Llama 3.1 70B
+        }
+        return 128000; // Llama 3.1 8B also has 128k context
+    } else if (model_name.find("llama3") != std::string::npos) {
+        return 8192; // Llama 3 base
+    } else if (model_name.find("llama2") != std::string::npos) {
+        return 4096; // Llama 2
+    } else if (model_name.find("mistral") != std::string::npos) {
+        return 8192; // Mistral models
+    } else if (model_name.find("mixtral") != std::string::npos) {
+        return 32768; // Mixtral
+    } else if (model_name.find("codellama") != std::string::npos) {
+        if (model_name.find("34b") != std::string::npos) {
+            return 16384; // Code Llama 34B
+        }
+        return 4096; // Code Llama base
+    }
+
+    // Default fallback
+    LOG_WARN("Unknown Ollama model: " + model_name + ", using default context size");
+    return 8192;
+#else
+    return 8192;
+#endif
+}
+
+std::string OllamaBackend::parse_ollama_response(const std::string& response_json) {
+    // Simple JSON parsing to extract choices[0].message.content
+    // Response format: {"choices":[{"message":{"content":"..."}}]}
+
+    size_t content_pos = response_json.find("\"content\":");
+    if (content_pos == std::string::npos) {
+        LOG_ERROR("Could not find 'content' in Ollama API response");
+        return "";
+    }
+
+    // Find the opening quote after "content":
+    size_t quote_start = response_json.find("\"", content_pos + 10);
+    if (quote_start == std::string::npos) {
+        LOG_ERROR("Malformed content field in Ollama API response");
+        return "";
+    }
+
+    // Find the closing quote, handling escaped quotes
+    size_t quote_end = quote_start + 1;
+    while (quote_end < response_json.length()) {
+        if (response_json[quote_end] == '"' && response_json[quote_end - 1] != '\\') {
+            break;
+        }
+        quote_end++;
+    }
+
+    if (quote_end >= response_json.length()) {
+        LOG_ERROR("Could not find end of content in Ollama API response");
+        return "";
+    }
+
+    std::string content = response_json.substr(quote_start + 1, quote_end - quote_start - 1);
+
+    // Unescape JSON string
+    std::string unescaped;
+    for (size_t i = 0; i < content.length(); i++) {
+        if (content[i] == '\\' && i + 1 < content.length()) {
+            switch (content[i + 1]) {
+                case 'n': unescaped += '\n'; i++; break;
+                case 'r': unescaped += '\r'; i++; break;
+                case 't': unescaped += '\t'; i++; break;
+                case '"': unescaped += '"'; i++; break;
+                case '\\': unescaped += '\\'; i++; break;
+                default: unescaped += content[i]; break;
+            }
+        } else {
+            unescaped += content[i];
+        }
+    }
+
+    return unescaped;
+}

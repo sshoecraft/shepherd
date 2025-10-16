@@ -1,0 +1,38 @@
+# Build directories
+build/
+cmake-build-*/
+
+# Executables
+shepherd
+*.exe
+
+# Object files
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Models and data
+*.gguf
+*.bin
+models/
+data/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp

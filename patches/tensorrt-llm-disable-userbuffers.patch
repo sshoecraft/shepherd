@@ -1,0 +1,118 @@
+diff --git a/cpp/CMakeLists.txt b/cpp/CMakeLists.txt
+index 851a87b09..63ab59935 100644
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -553,7 +553,8 @@ if(ENABLE_UCX)
+       RESULT_VARIABLE UCXX_BUILD_RESULT)
+     if(UCXX_BUILD_RESULT)
+       message(${UCXX_BUILD_OUTPUT})
+-      message(FATAL_ERROR "ucxx build failed")
++      message(WARNING "ucxx build failed - disabling UCX support")
++      set(ENABLE_UCX OFF)
+     endif()
+     find_package(ucxx REQUIRED PATHS ${CMAKE_BINARY_DIR}/ucxx/build
+                  NO_DEFAULT_PATH)
+diff --git a/cpp/tensorrt_llm/CMakeLists.txt b/cpp/tensorrt_llm/CMakeLists.txt
+index 4c97c8c18..9fbcc32cb 100644
+--- a/cpp/tensorrt_llm/CMakeLists.txt
++++ b/cpp/tensorrt_llm/CMakeLists.txt
+@@ -210,7 +210,7 @@ set(TRTLLM_LINK_LIBS
+     layers_src
+     runtime_src
+     testing_src
+-    userbuffers_src
++    # userbuffers_src  # Disabled due to NCCL 2.22+ API incompatibility
+     ${DECODER_SHARED_TARGET_0}
+     ${DECODER_SHARED_TARGET_1})
+ if(USING_OSS_CUTLASS_LOW_LATENCY_GEMM)
+diff --git a/cpp/tensorrt_llm/kernels/CMakeLists.txt b/cpp/tensorrt_llm/kernels/CMakeLists.txt
+index 746803181..970e385db 100644
+--- a/cpp/tensorrt_llm/kernels/CMakeLists.txt
++++ b/cpp/tensorrt_llm/kernels/CMakeLists.txt
+@@ -79,7 +79,8 @@ add_subdirectory(flashMLA)
+ add_subdirectory(contextFusedMultiHeadAttention)
+ add_subdirectory(decoderMaskedMultiheadAttention)
+ add_subdirectory(selectiveScan)
+-add_subdirectory(userbuffers)
++# Disabled userbuffers due to NCCL 2.22+ API incompatibility
++# add_subdirectory(userbuffers)
+ add_subdirectory(trtllmGenKernels)
+ add_subdirectory(fusedLayernormKernels)
+ add_subdirectory(groupRmsNormKernels)
+diff --git a/cpp/tensorrt_llm/plugins/ncclPlugin/allreducePlugin.cpp b/cpp/tensorrt_llm/plugins/ncclPlugin/allreducePlugin.cpp
+index 4241cf8d8..74685f951 100644
+--- a/cpp/tensorrt_llm/plugins/ncclPlugin/allreducePlugin.cpp
++++ b/cpp/tensorrt_llm/plugins/ncclPlugin/allreducePlugin.cpp
+@@ -20,7 +20,9 @@
+ #include "tensorrt_llm/common/customAllReduceUtils.h"
+ #include "tensorrt_llm/common/dataType.h"
+ #include "tensorrt_llm/kernels/customAllReduceKernels.h"
++#if 0  // Disabled userbuffers due to NCCL 2.22+ API incompatibility
+ #include "tensorrt_llm/kernels/userbuffers/ub_interface.h"
++#endif
+ #include "tensorrt_llm/runtime/utils/mpiUtils.h"
+ 
+ #include <nccl.h>
+@@ -410,6 +412,7 @@ int AllreducePlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc, nvinfe
+     }
+     else if (runtimeStrategy == AllReduceStrategyType::UB)
+     {
++#if 0  // Disabled userbuffers due to NCCL 2.22+ API incompatibility
+         TLLM_CHECK(!mBias);
+ 
+         size_t dtype_size = tensorrt_llm::common::getDTypeSize(mType);
+@@ -468,6 +471,9 @@ int AllreducePlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc, nvinfe
+         {
+             TLLM_CHECK_WITH_INFO(false, "Unsupported UB allreduce fusion op");
+         }
++#else
++        TLLM_CHECK_WITH_INFO(false, "UserBuffer support disabled - NCCL 2.22+ API incompatibility");
++#endif
+     }
+     else
+     {
+diff --git a/cpp/tensorrt_llm/runtime/tllmRuntime.cpp b/cpp/tensorrt_llm/runtime/tllmRuntime.cpp
+index 7c2ca4747..fa2031a18 100644
+--- a/cpp/tensorrt_llm/runtime/tllmRuntime.cpp
++++ b/cpp/tensorrt_llm/runtime/tllmRuntime.cpp
+@@ -20,7 +20,9 @@
+ #include "tensorrt_llm/common/nvtxUtils.h"
+ #include "tensorrt_llm/common/safetensors.h"
+ #include "tensorrt_llm/executor/tensor.h"
++#if 0  // Disabled userbuffers due to NCCL 2.22+ API incompatibility
+ #include "tensorrt_llm/kernels/userbuffers/ub_interface.h"
++#endif
+ #include "tensorrt_llm/runtime/utils/mpiUtils.h"
+ #include "tllmLogger.h"
+ #include "tllmStreamReaders.h"
+@@ -681,6 +683,7 @@ void TllmRuntime::setOutputTensors(SizeType32 contextIndex, TensorMap& tensorMap
+ 
+ void TllmRuntime::setUserBufferTensors(SizeType32 contextIndex, TensorMap& tensorMap)
+ {
++#if 0  // Disabled userbuffers due to NCCL 2.22+ API incompatibility
+     auto startsWith = [](std::string const& str, std::string const& prefix) -> bool
+     { return str.size() > prefix.size() && str.compare(0, prefix.size(), prefix) == 0; };
+     std::string const prefix(tensorrt_llm::runtime::ub::tensor_prefix);
+@@ -715,12 +718,14 @@ void TllmRuntime::setUserBufferTensors(SizeType32 contextIndex, TensorMap& tenso
+         tensorMap.insert(pos, std::make_pair(name, tensor));
+         context.setTensorAddress(name.c_str(), ubBuffer);
+     }
++#endif
+ }
+ 
+ void TllmRuntime::initializeUserBuffer(tensorrt_llm::runtime::WorldConfig const& world_config, SizeType32 maxBatchSize,
+     SizeType32 maxBeamWidth, SizeType32 maxSequenceLength, SizeType32 hiddenSize,
+     std::optional<SizeType32> maxNumTokens)
+ {
++#if 0  // Disabled userbuffers due to NCCL 2.22+ API incompatibility
+     auto startsWith = [](std::string const& str, std::string const& prefix) -> bool
+     { return str.size() > prefix.size() && str.compare(0, prefix.size(), prefix) == 0; };
+     std::string const prefix(tensorrt_llm::runtime::ub::tensor_prefix);
+@@ -756,6 +761,7 @@ void TllmRuntime::initializeUserBuffer(tensorrt_llm::runtime::WorldConfig const&
+     {
+         tensorrt_llm::runtime::ub::ub_allocate(elemNum * sizeof(uint8_t) / 16);
+     }
++#endif
+ }
+ 
+ CudaStream const& TllmRuntime::getStream() const

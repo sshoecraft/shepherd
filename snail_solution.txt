@@ -1,0 +1,25 @@
+Snail Climbing Problem Solution:
+
+Problem: A snail climbs a 20-foot wall. Each day it climbs up 3 feet, but each night it slides down 2 feet. On which day does it reach the top?
+
+Solution:
+- After (n-1) full cycles: net progress = (n-1)*(3-2) = n-1 feet
+- On day n: climbs 3 feet to reach (n-1)+3 = n+2 feet  
+- Need: n+2 ≥ 20, so n ≥ 18
+- Answer: Day 18
+
+General Formula:
+For wall height H, daily climb C, nightly slide S:
+
+If C ≥ H: reaches on day 1
+Else if C ≤ S and H > 0: impossible to reach (no progress)
+Else:
+    n = ceil(1 + (H-C)/(C-S))
+    Answer: day n
+
+Edge Cases Analysis:
+1. If C ≥ H, reaches immediately on day 1
+2. If C ≤ S and H > 0, impossible (no net progress)
+3. The problem assumes the snail can make progress each day (C > S)
+
+Computational Complexity: O(1) - constant time operations

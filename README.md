@@ -23,11 +23,11 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 - **Position Shift Management**: Maintains KV cache consistency during eviction
 
 ### 📚 RAG System (Retrieval-Augmented Generation)
-- **SQLite-Backed Storage**: Persistent conversation memory with FTS5 full-text search
-- **Semantic Search**: Find relevant past conversations by content similarity
+- **Memory-Mapped SQLite Storage**: Persistent conversation memory with mmap I/O optimization
+- **FTS5 Full-Text Search**: Fast semantic search with BM25 ranking algorithm
 - **Fact Storage**: Persistent key-value store for long-term knowledge
 - **Automatic Archival**: Seamless integration with eviction system
-- **Configurable Retention**: Database size limits and auto-pruning
+- **Configurable Retention**: Database size limits and auto-pruning (default 10GB)
 
 ### 🛠️ Comprehensive Tools System
 - **10+ Built-in Tools** across 6 categories:

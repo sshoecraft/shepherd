@@ -1,7 +1,10 @@
 #include "gemini.h"
 #include "../logger.h"
+#include "../nlohmann/json.hpp"
 #include <sstream>
 #include <algorithm>
+
+using json = nlohmann::json;
 
 // GeminiTokenizer implementation
 GeminiTokenizer::GeminiTokenizer(const std::string& model_name)
@@ -200,4 +203,188 @@ std::string GeminiBackend::parse_gemini_response(const std::string& response_jso
     // TODO: Parse Gemini response format
     // Extract candidates[0].content.parts[0].text
     return "TODO: Parse response";
+}
+std::string GeminiBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+    if (!is_ready()) {
+        throw BackendManagerError("Gemini backend not initialized");
+    }
+
+    LOG_DEBUG("Gemini generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // Build Gemini API request JSON from SessionContext
+    // Gemini format: https://ai.google.dev/api/generate-content
+    try {
+        json request;
+
+        // System instruction (if present)
+        for (const auto& msg : session.messages) {
+            if (msg.role == "system") {
+                request["system_instruction"] = {
+                    {"parts", json::array({
+                        {{"text", msg.content}}
+                    })}
+                };
+                break; // Only first system message
+            }
+        }
+
+        // Build contents array (user/assistant messages)
+        request["contents"] = json::array();
+
+        for (const auto& msg : session.messages) {
+            if (msg.role == "user") {
+                // Check if this is a tool result
+                if (!msg.tool_call_id.empty()) {
+                    // Gemini tool results go in function_response format
+                    request["contents"].push_back({
+                        {"role", "user"},
+                        {"parts", json::array({
+                            {
+                                {"function_response", {
+                                    {"name", msg.name},
+                                    {"response", {
+                                        {"content", msg.content}
+                                    }}
+                                }}
+                            }
+                        })}
+                    });
+                } else {
+                    // Regular user message
+                    request["contents"].push_back({
+                        {"role", "user"},
+                        {"parts", json::array({
+                            {{"text", msg.content}}
+                        })}
+                    });
+                }
+            } else if (msg.role == "assistant") {
+                // Gemini uses "model" role for assistant
+                // Check if this is a tool call
+                try {
+                    json parsed = json::parse(msg.content);
+                    if (parsed.contains("name") && parsed.contains("parameters")) {
+                        // Format as function_call for Gemini
+                        request["contents"].push_back({
+                            {"role", "model"},
+                            {"parts", json::array({
+                                {
+                                    {"function_call", {
+                                        {"name", parsed["name"]},
+                                        {"args", parsed["parameters"]}
+                                    }}
+                                }
+                            })}
+                        });
+                    } else {
+                        // Regular text content
+                        request["contents"].push_back({
+                            {"role", "model"},
+                            {"parts", json::array({
+                                {{"text", msg.content}}
+                            })}
+                        });
+                    }
+                } catch (const json::exception&) {
+                    // Not JSON, treat as regular text
+                    request["contents"].push_back({
+                        {"role", "model"},
+                        {"parts", json::array({
+                            {{"text", msg.content}}
+                        })}
+                    });
+                }
+            } else if (msg.role == "tool") {
+                // Tool results in Gemini format
+                request["contents"].push_back({
+                    {"role", "user"},
+                    {"parts", json::array({
+                        {
+                            {"function_response", {
+                                {"name", msg.name},
+                                {"response", {
+                                    {"content", msg.content}
+                                }}
+                            }}
+                        }
+                    })}
+                });
+            }
+            // Skip system messages (already handled above)
+        }
+
+        // Format tools from SessionContext for Gemini API
+        if (!session.tools.empty()) {
+            json function_declarations = json::array();
+
+            for (const auto& tool_def : session.tools) {
+                json function_decl;
+                function_decl["name"] = tool_def.name;
+                function_decl["description"] = tool_def.description;
+
+                // Parse parameters JSON or use default schema
+                if (!tool_def.parameters_json.empty()) {
+                    try {
+                        function_decl["parameters"] = json::parse(tool_def.parameters_json);
+                    } catch (const json::exception& e) {
+                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
+                        function_decl["parameters"] = {
+                            {"type", "object"},
+                            {"properties", json::object()},
+                            {"required", json::array()}
+                        };
+                    }
+                } else {
+                    function_decl["parameters"] = {
+                        {"type", "object"},
+                        {"properties", json::object()},
+                        {"required", json::array()}
+                    };
+                }
+
+                function_declarations.push_back(function_decl);
+            }
+
+            request["tools"] = json::array({
+                {{"function_declarations", function_declarations}}
+            });
+            LOG_DEBUG("Added " + std::to_string(function_declarations.size()) + " tools to Gemini request from SessionContext");
+        }
+
+        // Generation config
+        if (max_tokens > 0) {
+            request["generation_config"] = {
+                {"max_output_tokens", max_tokens}
+            };
+        }
+
+        // Convert to string
+        std::string request_json = request.dump();
+
+        // Log request for debugging
+        if (request_json.length() <= 2000) {
+            LOG_DEBUG("Full Gemini API request: " + request_json);
+        } else {
+            LOG_DEBUG("Gemini API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
+            LOG_DEBUG("Gemini API request length: " + std::to_string(request_json.length()) + " bytes");
+        }
+
+        // Make API call (currently stubbed)
+        std::string response_json = make_api_request(request_json);
+        if (response_json.empty()) {
+            throw BackendManagerError("Gemini API request failed");
+        }
+
+        LOG_DEBUG("Gemini API response: " + response_json.substr(0, 500));
+
+        // Parse response (currently stubbed)
+        std::string response_text = parse_gemini_response(response_json);
+        if (response_text.empty()) {
+            throw BackendManagerError("Failed to parse Gemini response");
+        }
+
+        return response_text;
+    } catch (const json::exception& e) {
+        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    }
 }

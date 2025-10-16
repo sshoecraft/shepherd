@@ -218,6 +218,100 @@ std::string OpenAIBackend::generate(int max_tokens) {
     return response;
 }
 
+std::string OpenAIBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+    if (!is_ready()) {
+        throw BackendManagerError("OpenAI backend not initialized");
+    }
+
+    LOG_DEBUG("OpenAI generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // Build API request JSON from SessionContext
+    json request;
+    request["model"] = model_name_;
+
+    if (max_tokens > 0) {
+        request["max_tokens"] = max_tokens;
+    }
+
+    // Format messages for OpenAI API from SessionContext
+    request["messages"] = json::array();
+
+    for (const auto& msg : session.messages) {
+        json message_obj;
+        message_obj["role"] = msg.role;
+        message_obj["content"] = msg.content;
+
+        // Add optional fields
+        if (!msg.name.empty()) {
+            message_obj["name"] = msg.name;
+        }
+        if (!msg.tool_call_id.empty()) {
+            message_obj["tool_call_id"] = msg.tool_call_id;
+        }
+
+        request["messages"].push_back(message_obj);
+    }
+
+    // Format tools for OpenAI API from SessionContext
+    if (!session.tools.empty()) {
+        json tools_array = json::array();
+
+        for (const auto& tool_def : session.tools) {
+            json tool;
+            tool["type"] = "function";
+
+            json function;
+            function["name"] = tool_def.name;
+            function["description"] = tool_def.description;
+
+            // Parse parameters JSON or use default schema
+            if (!tool_def.parameters_json.empty()) {
+                try {
+                    function["parameters"] = json::parse(tool_def.parameters_json);
+                } catch (const json::exception& e) {
+                    LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
+                    function["parameters"] = {
+                        {"type", "object"},
+                        {"properties", json::object()},
+                        {"required", json::array()}
+                    };
+                }
+            } else {
+                function["parameters"] = {
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                };
+            }
+
+            tool["function"] = function;
+            tools_array.push_back(tool);
+        }
+
+        request["tools"] = tools_array;
+        LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to OpenAI request from SessionContext");
+    }
+
+    // Make API call
+    std::string request_json = request.dump();
+    if (request_json.length() <= 2000) {
+        LOG_DEBUG("Full OpenAI API request: " + request_json);
+    } else {
+        LOG_DEBUG("OpenAI API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
+        LOG_DEBUG("OpenAI API request length: " + std::to_string(request_json.length()) + " bytes");
+    }
+    std::string response_body = make_api_request(request_json);
+
+    if (response_body.empty()) {
+        throw BackendManagerError("API request failed or returned empty response");
+    }
+
+    // Parse response to extract content
+    std::string response = parse_openai_response(response_body);
+
+    return response;
+}
+
 std::string OpenAIBackend::get_backend_name() const {
     return "openai";
 }
@@ -320,8 +414,9 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
 
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
 #ifdef ENABLE_API_BACKENDS
-    if (!is_ready()) {
-        LOG_ERROR("OpenAI backend not ready for model query");
+    // Check prerequisites for making API call
+    if (!http_client_ || api_key_.empty()) {
+        LOG_ERROR("HTTP client or API key not available for model query");
         return 0;
     }
 
@@ -352,8 +447,9 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     }
 
     // Default fallback
-    LOG_WARN("Unknown OpenAI model: " + model_name + ", using default context size");
-    return 4096;
+    size_t default_context = 4096;
+    LOG_WARN("Unknown OpenAI model: " + model_name + ", using default context size of " + std::to_string(default_context));
+    return default_context;
 #else
     return 4096;
 #endif
@@ -395,14 +491,27 @@ std::string OpenAIBackend::parse_openai_response(const std::string& response_jso
             auto tool_call = message["tool_calls"][0];
 
             json tool_call_json;
+
+            // Check if function name exists and is not null
+            if (!tool_call.contains("function") || !tool_call["function"].contains("name") ||
+                tool_call["function"]["name"].is_null()) {
+                LOG_ERROR("Tool call missing function name");
+                return "";
+            }
             tool_call_json["name"] = tool_call["function"]["name"];
 
             // Parse arguments string to JSON
-            std::string arguments_str = tool_call["function"]["arguments"];
-            try {
-                tool_call_json["parameters"] = json::parse(arguments_str);
-            } catch (const json::exception& e) {
-                LOG_WARN("Failed to parse tool call arguments: " + std::string(e.what()));
+            // Handle case where arguments might be null or empty
+            if (tool_call["function"].contains("arguments") && !tool_call["function"]["arguments"].is_null()) {
+                try {
+                    std::string arguments_str = tool_call["function"]["arguments"].get<std::string>();
+                    tool_call_json["parameters"] = json::parse(arguments_str);
+                } catch (const json::exception& e) {
+                    LOG_WARN("Failed to parse tool call arguments: " + std::string(e.what()));
+                    tool_call_json["parameters"] = json::object();
+                }
+            } else {
+                // No arguments or null arguments
                 tool_call_json["parameters"] = json::object();
             }
 

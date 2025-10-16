@@ -5,6 +5,7 @@
 #include "../nlohmann/json.hpp"
 #include "../global_args.h"
 #include "../model_config.h"
+#include "../rag.h"
 #include "tokenizers_cpp.h"
 
 #ifdef ENABLE_TENSORRT
@@ -196,6 +197,20 @@ size_t TensorRTContextManager::get_tokens_before_message(int msg_index) const {
         return 0;
     }
     return message_token_positions_[msg_index];
+}
+
+void TensorRTContextManager::remove_message_at_index(int index) {
+    if (index < 0 || static_cast<size_t>(index) >= messages_.size()) {
+        LOG_ERROR("Invalid message index: " + std::to_string(index));
+        return;
+    }
+
+    // Update token count
+    current_token_count_ -= messages_[index].token_count;
+
+    // Remove message and its token position
+    messages_.erase(messages_.begin() + index);
+    message_token_positions_.erase(message_token_positions_.begin() + index);
 }
 
 std::string TensorRTContextManager::get_context_for_inference() {
@@ -713,6 +728,34 @@ std::string TensorRTBackend::generate(int max_tokens) {
         outputConfig.returnContextLogits = false;
         outputConfig.returnGenerationLogits = false;
 
+        // Create KV cache retention config
+        // System message (index 0): Priority 100 (never evict)
+        // Everything else: Priority 35 (LRU eviction)
+        auto* trt_ctx_mgr = dynamic_cast<TensorRTContextManager*>(context_manager_.get());
+        size_t system_msg_tokens = 0;
+        if (trt_ctx_mgr && !context_manager_->get_messages().empty()) {
+            // Get token count of first message (system message)
+            system_msg_tokens = trt_ctx_mgr->get_tokens_before_message(1);
+        }
+
+        std::vector<tle::KvCacheRetentionConfig::TokenRangeRetentionConfig> token_ranges;
+        if (system_msg_tokens > 0) {
+            // Protect system message tokens with priority 100
+            token_ranges.push_back(
+                tle::KvCacheRetentionConfig::TokenRangeRetentionConfig(
+                    0,
+                    system_msg_tokens,
+                    100
+                )
+            );
+        }
+
+        // Create retention config with system message protected and decode at priority 35
+        tle::KvCacheRetentionConfig retention(
+            token_ranges,
+            35  // decodeRetentionPriority
+        );
+
         // Create request
         int actual_max_tokens = (max_tokens > 0) ? max_tokens : 512;
         tle::Request request(
@@ -720,7 +763,21 @@ std::string TensorRTBackend::generate(int max_tokens) {
             actual_max_tokens,
             true,  // streaming
             samplingConfig,
-            outputConfig
+            outputConfig,
+            std::nullopt,  // endId
+            std::nullopt,  // padId
+            std::nullopt,  // positionIds
+            std::nullopt,  // badWords
+            std::nullopt,  // stopWords
+            std::nullopt,  // embeddingBias
+            std::nullopt,  // externalDraftTokensConfig
+            std::nullopt,  // pTuningConfig
+            std::nullopt,  // multimodalInput
+            std::nullopt,  // multimodalEmbedding
+            std::nullopt,  // mRopeConfig
+            std::nullopt,  // loraConfig
+            std::nullopt,  // lookaheadConfig
+            retention       // kvCacheRetentionConfig
         );
 
         // Enqueue request
@@ -991,43 +1048,206 @@ void TensorRTBackend::handle_kv_cache_removed(const std::vector<uint64_t>& block
         return;
     }
 
-    // Try to determine which messages were affected
-    // This is a simplified approach - we don't have perfect block->token mapping yet
-    // So we'll estimate based on block count and evict oldest messages
-
     std::lock_guard<std::mutex> lock(block_map_mutex_);
 
-    // Estimate tokens evicted (rough approximation)
-    // TensorRT typically uses 64-128 tokens per block
-    size_t estimated_tokens_evicted = block_hashes.size() * 64;
+    // Step 1: Calculate tokens removed (TensorRT typically uses 64 tokens per block)
+    const size_t TOKENS_PER_BLOCK = 64;
+    size_t tokens_removed = block_hashes.size() * TOKENS_PER_BLOCK;
 
-    LOG_INFO("Estimated " + std::to_string(estimated_tokens_evicted) +
-             " tokens evicted based on " + std::to_string(block_hashes.size()) + " blocks");
+    LOG_INFO("KV cache eviction: " + std::to_string(block_hashes.size()) +
+             " blocks removed (~" + std::to_string(tokens_removed) + " tokens)");
 
-    // Calculate which messages to evict from our tracking
-    auto [start_msg, end_msg] = context_manager_->calculate_messages_to_evict(
-        static_cast<uint32_t>(estimated_tokens_evicted)
-    );
-
-    if (start_msg == -1 || end_msg == -1) {
-        LOG_WARN("Could not determine messages to evict");
+    // Step 2: Identify which messages were evicted using token counting
+    // TensorRT uses LRU eviction, so oldest messages (after system) are evicted first
+    auto& messages = context_manager_->get_messages();
+    if (messages.empty()) {
+        LOG_WARN("No messages in context manager");
         return;
     }
 
-    // Use the shared eviction logic - this will:
-    // 1. Archive to RAG
-    // 2. Remove messages from deque
-    // 3. Insert NOTICE message
-    if (!context_manager_->evict_messages_by_index(start_msg, end_msg)) {
-        LOG_ERROR("Failed to evict messages from context manager");
+    // Calculate which messages were evicted by summing token counts
+    // Start at index 1 (skip system message at index 0, it's priority 100)
+    size_t token_sum = 0;
+    int last_evicted_msg = 0;  // Index of last evicted message
+
+    for (size_t i = 1; i < messages.size(); ++i) {
+        token_sum += messages[i].token_count;
+        if (token_sum >= tokens_removed) {
+            last_evicted_msg = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (last_evicted_msg == 0) {
+        LOG_WARN("Could not determine evicted messages (token sum mismatch)");
         return;
     }
+
+    LOG_INFO("Identified messages 1-" + std::to_string(last_evicted_msg) + " as evicted");
+
+    // Step 3: Handle open_user_question_ if it exists
+    // Check if assistant response is in the evicted range
+    if (open_user_question_.has_value()) {
+        LOG_DEBUG("Checking for assistant response to orphaned user question");
+
+        for (int i = 1; i <= last_evicted_msg; ++i) {
+            if (messages[i].type == Message::ASSISTANT) {
+                // Found assistant response! RAG the complete turn
+                LOG_INFO("Found assistant response for orphaned user question, archiving to RAG");
+                ConversationTurn turn(open_user_question_->content, messages[i].content);
+                RAGManager::archive_turn(turn);
+                open_user_question_.reset();
+                break;
+            }
+        }
+    }
+
+    // Step 4: Scan evicted messages for user→assistant pairs
+    for (int i = 1; i <= last_evicted_msg; ++i) {
+        if (messages[i].type != Message::USER) {
+            continue;
+        }
+
+        // Found a user message, look for matching assistant response
+        bool found_assistant = false;
+
+        // First, check in evicted range (i+1 to last_evicted_msg)
+        for (int j = i + 1; j <= last_evicted_msg; ++j) {
+            if (messages[j].type == Message::ASSISTANT) {
+                // Complete turn in evicted range
+                LOG_INFO("Found complete turn (user + assistant) in evicted range, archiving to RAG");
+                ConversationTurn turn(messages[i].content, messages[j].content);
+                RAGManager::archive_turn(turn);
+                found_assistant = true;
+                break;
+            }
+        }
+
+        if (found_assistant) {
+            continue;
+        }
+
+        // Second, check in remaining messages (last_evicted_msg+1 onwards)
+        for (size_t j = last_evicted_msg + 1; j < messages.size(); ++j) {
+            if (messages[j].type == Message::ASSISTANT) {
+                // Complete turn spanning eviction boundary
+                LOG_INFO("Found complete turn spanning eviction boundary, archiving to RAG");
+                ConversationTurn turn(messages[i].content, messages[j].content);
+                RAGManager::archive_turn(turn);
+                found_assistant = true;
+                break;
+            }
+        }
+
+        if (!found_assistant) {
+            // No assistant response found anywhere - store as orphaned question
+            LOG_INFO("User message has no assistant response yet, storing as orphaned");
+            open_user_question_ = messages[i];
+        }
+    }
+
+    // Step 5: Remove evicted messages from deque
+    // Remove messages 1 through last_evicted_msg (indices start at 1, skip system at 0)
+    for (int i = 0; i < last_evicted_msg; ++i) {
+        // Always remove index 1 (first message after system)
+        trt_ctx_mgr->remove_message_at_index(1);
+    }
+
+    LOG_INFO("Removed " + std::to_string(last_evicted_msg) +
+             " messages from context, " + std::to_string(messages.size()) + " remaining");
 
     // Clear block mappings for evicted blocks
     for (uint64_t hash : block_hashes) {
         block_to_tokens_.erase(hash);
     }
-
-    LOG_INFO("Successfully handled KV cache eviction, added notice to context");
 }
 #endif
+
+std::string TensorRTBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+#ifdef ENABLE_TENSORRT
+    if (!is_ready()) {
+        throw BackendManagerError("TensorRT backend not initialized");
+    }
+
+    LOG_DEBUG("TensorRT generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // PREFIX CACHING: Compare SessionContext with what's already cached
+    // Only add NEW messages that aren't already in block cache
+    auto& cached_messages = context_manager_->get_messages();
+    size_t cached_count = cached_messages.size();
+
+    LOG_DEBUG("TensorRT context contains " + std::to_string(cached_count) + " messages, session has " +
+              std::to_string(session.messages.size()) + " messages");
+
+    // Find how many messages match (prefix caching)
+    size_t matching_prefix = 0;
+    for (size_t i = 0; i < std::min(cached_count, session.messages.size()); i++) {
+        const auto& cached_msg = cached_messages[i];
+        const auto& session_msg = session.messages[i];
+
+        // Compare role and content to see if they match
+        if (cached_msg.get_role() == session_msg.role &&
+            cached_msg.content == session_msg.content) {
+            matching_prefix++;
+        } else {
+            // Messages diverged - need to clear from here
+            break;
+        }
+    }
+
+    LOG_DEBUG("Prefix match: " + std::to_string(matching_prefix) + " messages already cached");
+
+    // If the cached messages diverged, we need to clear from the divergence point
+    if (matching_prefix < cached_count) {
+        LOG_WARN("Conversation diverged at message " + std::to_string(matching_prefix) +
+                 " - clearing " + std::to_string(cached_count - matching_prefix) + " cached messages");
+
+        // For TensorRT, we need to clear the block cache appropriately
+        // This is simplified - just clear everything for now
+        // TODO: Implement partial cache clearing based on block hashes
+        context_manager_->clear();
+        block_to_tokens_.clear();
+        matching_prefix = 0;  // Start from scratch
+        LOG_DEBUG("Cleared TensorRT context (simplified divergence handling)");
+    }
+
+    // Now add only NEW messages (from matching_prefix onward)
+    size_t new_messages = session.messages.size() - matching_prefix;
+    if (new_messages > 0) {
+        LOG_DEBUG("Adding " + std::to_string(new_messages) + " new messages to TensorRT context");
+
+        for (size_t i = matching_prefix; i < session.messages.size(); i++) {
+            const auto& msg = session.messages[i];
+
+            if (msg.role == "system") {
+                // Add system message directly
+                int token_count = context_manager_->count_tokens(msg.content);
+                Message system_msg(Message::SYSTEM, msg.content, token_count);
+                context_manager_->add_message(system_msg);
+            } else if (msg.role == "user") {
+                if (!msg.tool_call_id.empty()) {
+                    // This is a tool result
+                    add_tool_result(msg.name, msg.content, msg.tool_call_id);
+                } else {
+                    // Regular user message
+                    add_user_message(msg.content);
+                }
+            } else if (msg.role == "assistant") {
+                add_assistant_message(msg.content);
+            } else if (msg.role == "tool") {
+                add_tool_result(msg.name, msg.content, msg.tool_call_id);
+            }
+        }
+
+        LOG_DEBUG("Prefix caching: " + std::to_string(matching_prefix) + " cached, " +
+                  std::to_string(new_messages) + " new, total " + std::to_string(session.messages.size()));
+    } else {
+        LOG_DEBUG("All messages already in TensorRT cache (100% prefix cache hit)");
+    }
+
+    // Now call regular generate() which will use the populated context
+    return generate(max_tokens);
+#else
+    throw BackendManagerError("TensorRT backend not compiled in");
+#endif
+}

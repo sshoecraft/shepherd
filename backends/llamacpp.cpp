@@ -1012,16 +1012,8 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     LOG_DEBUG("Running generation (messages already cached)");
 
     // Before generation, we need to add the generation prompt to KV cache
-    // For Qwen models: "<|im_start|>assistant\n"
-    std::string generation_prompt;
-    if (model_config_.family == ModelFamily::QWEN_2_X) {
-        generation_prompt = "<|im_start|>assistant\n";
-    } else if (model_config_.family == ModelFamily::LLAMA_3_X) {
-        generation_prompt = "<|start_header_id|>assistant<|end_header_id|>\n\n";
-    } else {
-        // Generic fallback
-        generation_prompt = "assistant: ";
-    }
+    // Use model-specific tag from config (no hardcoded model family checks!)
+    std::string generation_prompt = model_config_.assistant_start_tag;
 
     // Tokenize and decode the generation prompt into KV cache
     llama_context* ctx = static_cast<llama_context*>(model_ctx_);
@@ -1046,11 +1038,34 @@ std::string LlamaCppBackend::generate(int max_tokens) {
         }
     }
 
-    // Suppress streaming when tools are available to avoid showing JSON tool calls
-    bool suppress_stream = !available_tools.empty();
+    // Suppress streaming when tools are available OR in server mode
+    // Server mode should NEVER stream output (it goes to server.log)
+    bool suppress_stream = server_mode_ || !available_tools.empty();
     std::string raw_response = run_inference("", max_tokens, suppress_stream);  // Empty prompt since everything is cached
     LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
     LOG_DEBUG("Raw response: " + raw_response);
+
+    // CRITICAL FIX: After generation, add the closing tag to KV cache
+    // The generation prompt added assistant_start_tag, and run_inference() generated tokens,
+    // but we never added the assistant_end_tag closing tag! This causes malformed context on next generate()
+    if (!model_config_.assistant_end_tag.empty()) {
+        // Tokenize and add the closing tag to KV cache
+        const llama_vocab* vocab = llama_model_get_vocab(static_cast<llama_model*>(model_));
+        std::vector<llama_token> closing_tokens(16);
+        int n_closing = llama_tokenize(vocab, model_config_.assistant_end_tag.c_str(),
+                                        model_config_.assistant_end_tag.length(),
+                                        closing_tokens.data(), closing_tokens.size(), false, true);
+
+        if (n_closing > 0) {
+            closing_tokens.resize(n_closing);
+            llama_batch closing_batch = llama_batch_get_one(closing_tokens.data(), n_closing);
+            if (llama_decode(ctx, closing_batch) != 0) {
+                LOG_WARN("Failed to decode closing tag into KV cache");
+            } else {
+                LOG_DEBUG("Added closing tag to KV cache: " + model_config_.assistant_end_tag);
+            }
+        }
+    }
 
     // Return response directly - main will handle tool parsing and cleanup
     return raw_response;
@@ -1423,3 +1438,164 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 
 
 
+
+std::string LlamaCppBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+#ifdef ENABLE_LLAMACPP
+    if (!is_ready()) {
+        throw BackendManagerError("LlamaCpp backend not initialized");
+    }
+
+    LOG_DEBUG("LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // Set server mode flag to suppress ALL streaming output
+    server_mode_ = true;
+
+    // PREFIX CACHING: Compare SessionContext with what's already cached
+    // Only add NEW messages that aren't already in KV cache
+    auto& cached_messages = context_manager_->get_messages();
+    size_t cached_count = cached_messages.size();
+
+    LOG_DEBUG("KV cache contains " + std::to_string(cached_count) + " messages, session has " +
+              std::to_string(session.messages.size()) + " messages");
+
+    // Find how many messages match (prefix caching)
+    size_t matching_prefix = 0;
+    for (size_t i = 0; i < std::min(cached_count, session.messages.size()); i++) {
+        const auto& cached_msg = cached_messages[i];
+        const auto& session_msg = session.messages[i];
+
+        // Compare role and content to see if they match
+        if (cached_msg.get_role() == session_msg.role &&
+            cached_msg.content == session_msg.content) {
+            matching_prefix++;
+        } else {
+            // Messages diverged - need to clear from here
+            break;
+        }
+    }
+
+    LOG_DEBUG("Prefix match: " + std::to_string(matching_prefix) + " messages already cached");
+
+    // If the cached messages diverged, we need to clear from the divergence point
+    if (matching_prefix < cached_count) {
+        LOG_WARN("Conversation diverged at message " + std::to_string(matching_prefix) +
+                 " - clearing " + std::to_string(cached_count - matching_prefix) + " cached messages");
+
+        // Clear KV cache from divergence point onward
+        llama_context* ctx = static_cast<llama_context*>(model_ctx_);
+        llama_memory_t mem = llama_get_memory(ctx);
+
+        // Calculate token position to clear from
+        int clear_from_pos = 0;
+        for (size_t i = 0; i < matching_prefix; i++) {
+            clear_from_pos += cached_messages[i].token_count;
+        }
+
+        llama_memory_seq_rm(mem, 0, clear_from_pos, -1);  // Clear from divergence to end
+        LOG_DEBUG("Cleared KV cache from token position " + std::to_string(clear_from_pos));
+
+        // Remove diverged messages from context_manager
+        while (cached_messages.size() > matching_prefix) {
+            context_manager_->get_messages().pop_back();
+        }
+    }
+
+    // Now add only NEW messages (from matching_prefix onward)
+    size_t new_messages = session.messages.size() - matching_prefix;
+    if (new_messages > 0) {
+        LOG_DEBUG("Adding " + std::to_string(new_messages) + " new messages to KV cache");
+
+        for (size_t i = matching_prefix; i < session.messages.size(); i++) {
+            const auto& msg = session.messages[i];
+
+            if (msg.role == "system") {
+                // In server mode: Create temporary ToolRegistry from session.tools
+                // This allows us to reuse ModelManager::format_system_message() logic
+
+                // Define a lightweight Tool wrapper for formatting (no execute() needed)
+                class DummyTool : public Tool {
+                    std::string name_, desc_, params_json_;
+                public:
+                    DummyTool(const std::string& n, const std::string& d, const std::string& p)
+                        : name_(n), desc_(d), params_json_(p) {
+                        set_sanitized_name(n); // Set the actual name
+                    }
+                    std::string unsanitized_name() const override { return name_; }
+                    std::string description() const override { return desc_; }
+                    std::string parameters() const override { return params_json_; }
+                    std::map<std::string, std::any> execute(const std::map<std::string, std::any>&) override {
+                        return {}; // Never called during formatting
+                    }
+                };
+
+                // Create temporary registry and populate with session tools
+                ToolRegistry temp_registry;
+                for (const auto& tool_def : session.tools) {
+                    auto dummy_tool = std::make_unique<DummyTool>(
+                        tool_def.name,
+                        tool_def.description,
+                        tool_def.parameters_json
+                    );
+                    temp_registry.register_tool(std::move(dummy_tool));
+                }
+
+                // Now use ModelManager with the temporary registry (same as interactive mode!)
+                std::string formatted_content = ModelManager::format_system_message(
+                    model_config_,
+                    msg.content,
+                    temp_registry,
+                    template_node_
+                );
+
+                LOG_DEBUG("Formatted system message with " + std::to_string(session.tools.size()) +
+                          " tools using ModelManager");
+
+                int token_count = context_manager_->count_tokens(formatted_content);
+                Message system_msg(Message::SYSTEM, formatted_content, token_count);
+                system_msg.in_kv_cache = false;
+                context_manager_->add_message(system_msg);
+
+                // Decode to KV cache
+                auto& messages = context_manager_->get_messages();
+                if (!messages.empty()) {
+                    format_and_decode_message(messages.back());
+                }
+            } else if (msg.role == "user") {
+                if (!msg.tool_call_id.empty()) {
+                    // This is a tool result
+                    add_tool_result(msg.name, msg.content, msg.tool_call_id);
+                } else {
+                    // Regular user message
+                    add_user_message(msg.content);
+                }
+            } else if (msg.role == "assistant") {
+                // Assistant message - add to context but DON'T decode (it will be generated)
+                int token_count = context_manager_->count_tokens(msg.content);
+                Message assistant_msg(Message::ASSISTANT, msg.content, token_count);
+                assistant_msg.in_kv_cache = false;
+                context_manager_->add_message(assistant_msg);
+
+                // Decode to KV cache
+                format_and_decode_message(context_manager_->get_messages().back());
+            } else if (msg.role == "tool") {
+                add_tool_result(msg.name, msg.content, msg.tool_call_id);
+            }
+        }
+
+        LOG_DEBUG("Prefix caching: " + std::to_string(matching_prefix) + " cached, " +
+                  std::to_string(new_messages) + " new, total " + std::to_string(session.messages.size()));
+    } else {
+        LOG_DEBUG("All messages already in KV cache (100% prefix cache hit)");
+    }
+
+    // Now call regular generate() which will use the populated KV cache
+    std::string result = generate(max_tokens);
+
+    // Reset server mode flag for future interactive use
+    server_mode_ = false;
+
+    return result;
+#else
+    throw BackendManagerError("LlamaCpp backend not compiled in");
+#endif
+}

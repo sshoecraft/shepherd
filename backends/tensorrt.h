@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <optional>
 
 #ifdef ENABLE_TENSORRT
 #include <vector>
@@ -58,6 +59,9 @@ public:
     /// @brief Get total tokens before a given message index
     size_t get_tokens_before_message(int msg_index) const;
 
+    /// @brief Remove message at specific index and update token positions
+    void remove_message_at_index(int index);
+
     /// @brief Set the minja template node for message rendering
     void set_template_node(void* template_node) { template_node_ = template_node; }
 
@@ -86,6 +90,7 @@ public:
 
     bool initialize(const std::string& model_path, const std::string& api_key = "", const std::string& template_path = "") override;
     std::string generate(int max_tokens = 0) override;
+    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
     void add_user_message(const std::string& content) override;
     void add_tool_result(const std::string& tool_name, const std::string& content, const std::string& tool_call_id = "") override;
     void add_assistant_message(const std::string& content) override;
@@ -124,6 +129,9 @@ private:
     // block_hash -> (start_token, end_token)
     std::map<uint64_t, std::pair<size_t, size_t>> block_to_tokens_;
     std::mutex block_map_mutex_;
+
+    // Track orphaned user question waiting for assistant response
+    std::optional<Message> open_user_question_;
 
     // Chat template support
     void* template_node_ = nullptr; // std::shared_ptr<minja::TemplateNode>*

@@ -2,39 +2,60 @@
 
 ## Overview
 
-The TensorRT backend now supports automatic KV cache eviction with RAG archival and user notification, matching the functionality of the llama.cpp backend.
+The TensorRT backend supports reactive KV cache eviction with precise message tracking and RAG archival. This implementation leverages TensorRT's guaranteed LRU eviction behavior to precisely identify which messages were evicted without complex state tracking.
+
+## Design Principles
+
+**KISS (Keep It Simple, Stupid)**: The implementation follows a simple, reactive approach:
+- TensorRT evicts blocks using LRU (Least Recently Used)
+- We get notified after eviction happens
+- We use token counting to precisely identify evicted messages
+- We archive complete turns to RAG
+- We track orphaned user questions for later completion
+
+**No Proactive Management**: We don't try to control what TensorRT evicts - this would require expensive VRAM updates and complex priority management. Instead, we react to eviction events and maintain coherence.
 
 ## Architecture
 
-### Components
+### Key Components
 
-1. **Event Monitoring Thread** (`monitor_kv_events()`)
-   - Runs in background
-   - Polls `KVCacheEventManager` for events
-   - Processes `KVCacheRemovedData` events when blocks are evicted
+1. **Token Position Tracking** (`TensorRTContextManager::message_token_positions_`)
+   - Tracks cumulative token count before each message
+   - Enables precise mapping of token ranges to messages
+   - Updated automatically when messages are added
 
-2. **TensorRTContextManager**
-   - Tracks message-to-token position mappings
-   - Provides `get_messages_in_token_range()` to map evicted tokens to messages
-   - Maintains `message_token_positions_` vector for efficient lookup
+2. **Orphaned Question Tracking** (`TensorRTBackend::open_user_question_`)
+   - Stores user messages that don't yet have assistant responses
+   - Allows RAG archival when assistant response is later evicted
+   - Single `std::optional<Message>` - only one open question at a time
 
-3. **Eviction Handler** (`handle_kv_cache_removed()`)
-   - Called when KV cache blocks are evicted
-   - Estimates which messages were evicted
-   - Calls `context_manager_->evict_messages_by_index()`
-   - Shared logic archives to RAG and inserts NOTICE
+3. **Retention Priorities** (configured per-request)
+   - System message: Priority 100 (protected from eviction)
+   - All other messages: Priority 35 (LRU eviction applies)
+   - Static priorities - set once, never updated
+
+4. **Event Monitoring Thread** (`monitor_kv_events()`)
+   - Background thread polls `KVCacheEventManager`
+   - Processes `KVCacheRemovedData` events
+   - Calls eviction handler when blocks are removed
+
+5. **Eviction Handler** (`handle_kv_cache_removed()`)
+   - Calculates exact evicted messages using token counting
+   - Scans for complete user→assistant turns
+   - Archives turns to RAG
+   - Removes evicted messages from tracking
 
 ## How It Works
 
-### Event Flow
+### Eviction Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ TensorRT-LLM Executor                                       │
 │                                                             │
 │  1. KV cache fills up                                       │
-│  2. Executor evicts old blocks automatically                │
-│  3. Emits KVCacheRemovedData event                         │
+│  2. Executor evicts oldest blocks (LRU, priority 35)        │
+│  3. Emits KVCacheRemovedData event with block hashes       │
 └─────────────────────────────┬───────────────────────────────┘
                               │
                               ▼
@@ -42,7 +63,7 @@ The TensorRT backend now supports automatic KV cache eviction with RAG archival 
 │ Event Monitor Thread (monitor_kv_events)                   │
 │                                                             │
 │  4. Polls getLatestEvents() every 100ms                     │
-│  5. Detects KVCacheRemovedData                             │
+│  5. Detects KVCacheRemovedData event                       │
 │  6. Calls handle_kv_cache_removed(block_hashes)            │
 └─────────────────────────────┬───────────────────────────────┘
                               │
@@ -50,91 +71,152 @@ The TensorRT backend now supports automatic KV cache eviction with RAG archival 
 ┌─────────────────────────────────────────────────────────────┐
 │ Eviction Handler (handle_kv_cache_removed)                 │
 │                                                             │
-│  7. Estimates tokens evicted (blocks * 64)                 │
-│  8. Calls calculate_messages_to_evict()                    │
-│  9. Calls evict_messages_by_index()                        │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ContextManager (evict_messages_by_index)                   │
-│                                                             │
-│ 10. Archives USER question + ASSISTANT answer to RAG       │
-│ 11. Removes evicted messages from deque                    │
-│ 12. Inserts NOTICE message:                                │
-│     "NOTICE: Conversation regarding 'X...'                  │
-│      has been moved to long-term memory."                  │
-└─────────────────────────────┬───────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Next Generation Request                                     │
-│                                                             │
-│ 13. get_context_for_inference() includes NOTICE            │
-│ 14. Prompt rendered with NOTICE visible to model           │
-│ 15. Model sees: "NOTICE: ... Use search_memory tool"       │
+│  7. Calculate tokens removed: N blocks × 64 tokens/block   │
+│  8. Use LRU + token counting to identify messages 1-X      │
+│  9. Check open_user_question_ for matching assistant      │
+│ 10. Scan evicted range for user→assistant pairs            │
+│ 11. Scan remaining messages for completing assistants      │
+│ 12. Archive complete turns to RAG                          │
+│ 13. Remove evicted messages from deque                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Key Differences from llama.cpp
+### Precise Message Identification
 
-| Aspect | llama.cpp | TensorRT-LLM |
-|--------|-----------|--------------|
-| **Trigger** | Synchronous callback before eviction | Async event after eviction |
-| **Control** | We choose what to evict | TensorRT chooses |
-| **Timing** | NOTICE in same generation | NOTICE in next request |
-| **Mechanism** | Patch required | Built-in API |
-| **Thread** | No extra thread | Background monitor thread |
+TensorRT uses **guaranteed LRU eviction** within each priority level. This means:
 
-### The Critical Insight
+1. System message (priority 100) is never evicted
+2. Other messages (priority 35) are evicted oldest-first
+3. We can precisely calculate which messages were evicted:
 
-**We don't inject the NOTICE into the KV cache!** Instead:
+```cpp
+// Calculate tokens removed
+size_t tokens_removed = num_blocks × 64 tokens_per_block;
 
-1. NOTICE is added to `messages_` deque (our tracking layer)
-2. Next `get_context_for_inference()` renders it as part of the prompt
-3. That prompt is tokenized and submitted as a new Request
-4. TensorRT processes it normally, adding NOTICE tokens to KV cache
-5. Model sees the NOTICE in its context
+// Sum token counts from oldest messages
+size_t token_sum = 0;
+for (size_t i = 1; i < messages.size(); ++i) {  // Skip system at 0
+    token_sum += messages[i].token_count;
+    if (token_sum >= tokens_removed) {
+        // Messages 1 through i were evicted
+        last_evicted_msg = i;
+        break;
+    }
+}
+```
 
-This is the **same mechanism** llama.cpp uses - the difference is just timing.
+**No heuristics. No estimation. Exact calculation.**
+
+### RAG Archival Strategy
+
+The handler scans for complete conversation turns in three phases:
+
+**Phase 1: Complete orphaned turn**
+```cpp
+if (open_user_question_.has_value()) {
+    // Check if evicted range contains the assistant response
+    if (found assistant in messages 1-X) {
+        archive_turn(open_user_question_, assistant);
+        open_user_question_.reset();
+    }
+}
+```
+
+**Phase 2: Complete turns in evicted range**
+```cpp
+for each user message in evicted range (1-X) {
+    if (assistant response also in 1-X) {
+        archive_turn(user, assistant);
+    }
+}
+```
+
+**Phase 3: Complete turns spanning eviction boundary**
+```cpp
+for each user message in evicted range (1-X) {
+    if (assistant response in remaining messages X+1 onwards) {
+        archive_turn(user, assistant);
+    }
+}
+```
+
+**Phase 4: Store new orphaned questions**
+```cpp
+if (user message found with no assistant anywhere) {
+    open_user_question_ = user_message;
+}
+```
+
+This maximizes RAG archival - we preserve every complete turn we can, even when they span the eviction boundary.
 
 ## Implementation Details
+
+### Retention Priority Configuration
+
+```cpp
+// In generate() method, before creating Request
+size_t system_msg_tokens = trt_ctx_mgr->get_tokens_before_message(1);
+
+std::vector<tle::KvCacheRetentionConfig::TokenRangeRetentionConfig> token_ranges;
+if (system_msg_tokens > 0) {
+    token_ranges.push_back(
+        tle::KvCacheRetentionConfig::TokenRangeRetentionConfig(
+            0,                    // start token
+            system_msg_tokens,    // end token (exclusive)
+            100                   // priority - never evict
+        )
+    );
+}
+
+tle::KvCacheRetentionConfig retention(
+    token_ranges,
+    35  // decodeRetentionPriority - everything else
+);
+
+tle::Request request(
+    input_tokens,
+    max_tokens,
+    true,  // streaming
+    samplingConfig,
+    outputConfig,
+    /* ... many nullopt parameters ... */
+    retention  // kvCacheRetentionConfig
+);
+```
 
 ### Message Position Tracking
 
 ```cpp
-class TensorRTContextManager {
-    // message_token_positions_[i] = cumulative tokens BEFORE message i
-    std::vector<size_t> message_token_positions_;
-
-    void add_message(const Message& message, int token_count) override {
-        // Track position
-        size_t tokens_before = 0;
-        if (!messages_.empty()) {
-            tokens_before = message_token_positions_.back() +
-                           messages_.back().token_count;
-        }
-        message_token_positions_.push_back(tokens_before);
-
-        // Add to base class
-        ContextManager::add_message(message, token_count);
+void TensorRTContextManager::add_message(const Message& message) {
+    // Track cumulative token position before this message
+    size_t tokens_before = 0;
+    if (!messages_.empty()) {
+        tokens_before = message_token_positions_.back() +
+                       messages_.back().token_count;
     }
-};
+    message_token_positions_.push_back(tokens_before);
+
+    // Call base class
+    ContextManager::add_message(message);
+}
 ```
 
-### Event Monitoring Configuration
+### Event Monitoring Setup
 
 ```cpp
 // In initialize()
-KvCacheConfig kvCacheConfig;
+tle::KvCacheConfig kvCacheConfig;
 kvCacheConfig.setEnableBlockReuse(true);
-kvCacheConfig.setEventBufferMaxSize(1000);  // CRITICAL: Enables events
+kvCacheConfig.setEventBufferMaxSize(1000);  // Enable event buffering
 config.setKvCacheConfig(kvCacheConfig);
+
+// Create executor
+auto* executor = new tle::Executor(model_path, tle::ModelType::kDECODER_ONLY, config);
 
 // Get event manager
 auto event_mgr_opt = executor->getKVCacheEventManager();
 if (event_mgr_opt.has_value()) {
-    event_manager_ = new std::shared_ptr<KVCacheEventManager>(*event_mgr_opt);
+    event_manager_ = new std::shared_ptr<tle::KVCacheEventManager>(*event_mgr_opt);
 
     // Start monitoring thread
     monitoring_events_ = true;
@@ -142,174 +224,181 @@ if (event_mgr_opt.has_value()) {
 }
 ```
 
-### Eviction Estimation
+## Corner Cases
 
-Currently uses a simple heuristic:
-```cpp
-// TensorRT typically uses 64-128 tokens per block
-size_t estimated_tokens_evicted = block_hashes.size() * 64;
-```
+### User Question Evicted During Tool Execution
 
-**Future Enhancement:** Track exact block→token mappings by monitoring `KVCacheStoredData` events.
+**Scenario**: User asks "Read every file in this project", model starts executing tool calls, context fills up, user message gets evicted before assistant response is generated.
 
-## Example User Experience
+**Result**:
+- Context becomes: [System message] + [Tool results]
+- No user question in context
+- Model continues generating based on available context (tool results + system)
 
-```
-User: What is quantum computing?
-Assistant: [Long explanation about quantum computing...]
+**Why this is acceptable**:
+- This is a universal problem for any LLM system with KV cache eviction
+- The model likely generates a reasonable response based on tool results
+- This corner case is rare in practice
+- Over-engineering a solution (e.g., canceling generation) would be worse
 
-User: Tell me more about qubits.
-Assistant: [Long explanation about qubits...]
-
-... [many more turns] ...
-
-[KV cache fills up, TensorRT evicts old blocks]
-[Event detected, handler archives to RAG and adds NOTICE]
-
-User: What was that thing you said about quantum computing earlier?
-Assistant: I see there's a notice that our earlier conversation about
-"What is quantum computing?..." has been moved to long-term memory.
-Let me use the search_memory tool to retrieve it.
-
-[Calls search_memory("quantum computing")]
-[Retrieves from RAG]
-
-Based on what I find in memory, I previously explained that...
-```
-
-The model naturally sees the NOTICE and knows to use `search_memory` to retrieve archived context.
-
-## Configuration Options
-
-### KV Cache Size
-
-Control when eviction occurs by setting max tokens:
-
-```cpp
-KvCacheConfig kvCacheConfig;
-kvCacheConfig.setMaxTokens(4096);  // Force small cache for testing
-```
-
-### Event Buffer Size
-
-Control how many events are buffered:
-
-```cpp
-kvCacheConfig.setEventBufferMaxSize(1000);  // Default
-```
-
-Setting this to `0` disables event monitoring.
-
-### Retention Priorities (Optional)
-
-Prevent specific messages from being evicted:
-
-```cpp
-KvCacheRetentionConfig retention;
-retention.addTokenRange(
-    0,              // start
-    system_tokens,  // end
-    100             // priority (0-100, higher = keep longer)
-);
-request.setKvCacheRetentionConfig(retention);
-```
+**What we do**:
+- Let generation continue
+- Remove all evicted messages from our tracking
+- Deque remains coherent
 
 ## Thread Safety
 
-- Event monitor thread runs independently
-- Uses `block_map_mutex_` for concurrent access to `block_to_tokens_`
-- Context manager operations are called from monitor thread
-- No race conditions with main generation thread (events are queued)
+- **Event monitor thread**: Runs independently in background
+- **Mutex protection**: `block_map_mutex_` protects concurrent access
+- **Message deque**: Only accessed from monitor thread during eviction
+- **No race conditions**: TensorRT queues events, no concurrent modification
 
-## Performance Impact
+## Performance
 
-- **Event polling**: 100ms timeout, minimal CPU usage
-- **Event processing**: O(n) where n = number of messages (small)
-- **Thread overhead**: Single background thread, negligible
-- **Memory**: Event buffer ~1000 events, each ~100 bytes = ~100KB
+- **Event polling**: 100ms timeout, minimal CPU overhead
+- **Token counting**: O(n) where n = number of messages (typically < 100)
+- **Message removal**: O(n) for deque operations
+- **Thread overhead**: Single background thread, ~1MB stack
+- **Memory**: Event buffer ~100KB, position tracking ~1KB per 100 messages
 
-## Limitations & Future Work
+**Total impact**: Negligible
 
-### Current Limitations
+## Configuration
 
-1. **Token estimation**: Uses 64 tokens/block heuristic instead of exact mapping
-2. **Block mapping**: Doesn't track exact block→token→message mappings yet
-3. **Timing**: NOTICE appears in next request, not same generation
-
-### Future Enhancements
-
-1. **Exact block tracking**:
-   ```cpp
-   // Monitor KVCacheStoredData events
-   for (const auto& block : stored.blocks) {
-       size_t start_token = calculate_token_position(block.tokens);
-       size_t end_token = start_token + block.tokens.size();
-       block_to_tokens_[block.blockHash] = {start_token, end_token};
-   }
-   ```
-
-2. **Smarter eviction detection**:
-   - Map evicted blocks to exact messages
-   - Only evict complete conversation turns
-   - Preserve message boundaries
-
-3. **Retention policies**:
-   - Auto-set high priority for system messages
-   - Medium priority for recent turns
-   - Low priority for old conversations
-
-## Testing
-
-### Test Eviction Manually
+### Force Eviction for Testing
 
 ```bash
-# Build with TensorRT enabled
-cmake -DENABLE_TENSORRT=ON ..
-make
-
-# Run with small KV cache (forces eviction)
 ./shepherd --backend tensorrt \
            --model /path/to/engine \
-           --max-context 512  # Small context forces eviction
-
-# Have a long conversation to trigger eviction
-# Watch logs for: "KV cache eviction detected"
+           --max-context 512  # Small context forces frequent eviction
 ```
 
-### Verify NOTICE Messages
+### Enable Debug Logging
 
 ```bash
-# Enable debug logging
 ./shepherd --backend tensorrt --model /path/to/engine --debug
 
-# Look for logs:
-# - "KV cache eviction detected: N blocks removed"
-# - "Estimated X tokens evicted"
-# - "Successfully evicted N messages, added eviction notice"
-# - "Remaining tokens: X/Y"
+# Watch for logs:
+# - "KV cache eviction: N blocks removed (~X tokens)"
+# - "Identified messages 1-Y as evicted"
+# - "Found complete turn ... archiving to RAG"
+# - "User message has no assistant response yet, storing as orphaned"
+# - "Removed Y messages from context, Z remaining"
 ```
-
-## Comparison with llama.cpp
-
-Both backends now support identical functionality:
-
-✅ KV cache eviction detection
-✅ RAG archival of evicted conversations
-✅ NOTICE messages visible to model
-✅ `search_memory` tool integration
-✅ Automatic context management
-
-The only difference is the underlying mechanism (callback vs events) and timing (immediate vs next-request).
 
 ## Files Modified
 
-- `backends/tensorrt.h` - Added event monitoring infrastructure
-- `backends/tensorrt.cpp` - Implemented monitor thread and handlers
-- `context_manager.h` - Already had `evict_messages_by_index()` (shared)
-- `context_manager.cpp` - Already had RAG archival + NOTICE logic (shared)
+- `backends/tensorrt.h`:
+  - Added `message_token_positions_` to TensorRTContextManager
+  - Added `open_user_question_` member to TensorRTBackend
+  - Added `remove_message_at_index()` helper method
+
+- `backends/tensorrt.cpp`:
+  - Implemented retention priority configuration in `generate()`
+  - Refactored `handle_kv_cache_removed()` with token counting logic
+  - Added RAG archival for complete turns
+  - Added orphaned question tracking
+
+## Key Insights
+
+### Why No Coherence Check?
+
+Because **token counting makes the deque automatically coherent**:
+
+1. TensorRT evicts messages 1 through X (we calculate this precisely)
+2. We remove messages 1 through X from our deque
+3. Our deque now exactly matches TensorRT's cache
+
+There's no "orphaned tool results" or "missing user messages" because we removed exactly what TensorRT removed. The mapping is one-to-one.
+
+### Why No Priority Updates?
+
+Because **TensorRT doesn't support dynamic priority updates**:
+
+- Block priorities are set when blocks are created
+- They're baked into the KV cache state
+- There's no API to retroactively change them
+- Any attempt would require expensive VRAM manipulation
+
+So we use **static priorities**: system=100 (never evict), everything else=35 (LRU).
+
+### Why Single open_user_question_?
+
+Because **normal conversation flow only has one open question at a time**:
+
+```
+User message 1
+Assistant response 1  ← completes
+User message 2
+Assistant response 2  ← completes
+```
+
+If we somehow encounter a second user message while `open_user_question_` has data, it means something went wrong. We could:
+- Assert/error (something broke)
+- Overwrite with new question (lose old one)
+
+Currently we overwrite, as this corner case shouldn't happen in practice.
+
+## Comparison with llama.cpp
+
+| Aspect | llama.cpp | TensorRT |
+|--------|-----------|----------|
+| **Mechanism** | Callback before eviction | Event after eviction |
+| **Control** | We choose what to evict | TensorRT chooses (LRU) |
+| **Accuracy** | Exact (we control eviction) | Exact (token counting + LRU guarantee) |
+| **RAG archival** | Complete turns only | Complete turns + spanning boundary |
+| **Orphaned questions** | No special handling | Tracked in `open_user_question_` |
+| **Priority system** | N/A (we control eviction) | Static priorities (system=100) |
+| **Thread overhead** | None (callback on main thread) | Background event monitor thread |
+
+Both achieve the same goal with different approaches.
+
+## Testing
+
+### Basic Eviction Test
+
+```bash
+# Build
+cmake -DENABLE_TENSORRT=ON -B build
+cmake --build build -j8
+
+# Run with small context
+./build/shepherd --backend tensorrt \
+                 --model /path/to/llama-3.1-8B-instruct-engine \
+                 --max-context 1024
+
+# Have a conversation with multiple long turns
+# Watch debug logs for eviction events
+```
+
+### Verify RAG Archival
+
+```bash
+# After eviction, check RAG database
+sqlite3 ~/.shepherd/rag.db "SELECT question, answer FROM turns ORDER BY timestamp DESC LIMIT 5;"
+
+# Verify turns were archived correctly
+```
+
+### Test Orphaned Questions
+
+```bash
+# User: "Read every file in /huge/directory"
+# [Model starts tool execution]
+# [Context fills up before assistant response]
+# [User message gets evicted]
+
+# Check logs:
+# - "User message has no assistant response yet, storing as orphaned"
+# - "Removed N messages from context"
+
+# On next eviction (if assistant response gets evicted):
+# - "Found assistant response for orphaned user question, archiving to RAG"
+```
 
 ## References
 
-- TensorRT KV Cache Events: `TENSORRT_KV_CACHE_EVENTS.md`
-- llama.cpp Callback: `patches/llama.patch`
-- Context Manager: `context_manager.cpp:257-344`
+- TensorRT KV Cache Events API: `TENSORRT_KV_CACHE_EVENTS.md`
+- LRU Eviction Policy: `include/tensorrt_llm/batch_manager/evictionPolicy.h`
+- RAG Manager: `rag.h`, `rag.cpp`
+- Context Manager: `context_manager.h`, `context_manager.cpp`

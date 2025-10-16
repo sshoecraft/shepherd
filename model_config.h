@@ -36,6 +36,10 @@ struct ModelConfig {
     // Tool call format
     std::string tool_call_format;     // "json", "python_tag", "xml"
 
+    // Message format tags (populated by ModelManager from chat template)
+    std::string assistant_start_tag;  // e.g., "<|im_start|>assistant\n" or "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    std::string assistant_end_tag;    // e.g., "<|im_end|>\n" or "<|eot_id|>"
+
     /// @brief Create default config for generic models
     static ModelConfig create_generic() {
         return ModelConfig{
@@ -47,7 +51,9 @@ struct ModelConfig {
             .uses_builtin_tools_array = false,
             .supports_thinking_mode = false,
             .uses_observation_role = false,
-            .tool_call_format = "json"
+            .tool_call_format = "json",
+            .assistant_start_tag = "assistant: ",
+            .assistant_end_tag = "\n"
         };
     }
 
@@ -62,7 +68,9 @@ struct ModelConfig {
             .uses_builtin_tools_array = true,
             .supports_thinking_mode = false,
             .uses_observation_role = false,
-            .tool_call_format = "json"  // Can also use python_tag for built-ins
+            .tool_call_format = "json",  // Can also use python_tag for built-ins
+            .assistant_start_tag = "<|start_header_id|>assistant<|end_header_id|>\n\n",
+            .assistant_end_tag = "<|eot_id|>"
         };
     }
 
@@ -78,7 +86,9 @@ struct ModelConfig {
             .uses_builtin_tools_array = false,
             .supports_thinking_mode = has_thinking,
             .uses_observation_role = true,
-            .tool_call_format = "xml"  // Uses <tool_call> tags
+            .tool_call_format = "xml",  // Uses <tool_call> tags
+            .assistant_start_tag = "<|assistant|>\n",
+            .assistant_end_tag = ""  // GLM doesn't use explicit end tag
         };
     }
 
@@ -93,7 +103,9 @@ struct ModelConfig {
             .uses_builtin_tools_array = false,
             .supports_thinking_mode = false,
             .uses_observation_role = false,
-            .tool_call_format = "json"
+            .tool_call_format = "json",
+            .assistant_start_tag = "<|im_start|>assistant\n",
+            .assistant_end_tag = "<|im_end|>\n"
         };
     }
 };

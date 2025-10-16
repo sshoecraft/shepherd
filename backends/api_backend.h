@@ -63,6 +63,17 @@ public:
     /// @return Always false (no eviction needed for stateless APIs)
     uint32_t evict_to_free_space(uint32_t tokens_needed) override;
 
+    /// @brief Set tools from external source (for server mode)
+    /// @param tools_json JSON array of tools in OpenAI format
+    void set_tools_from_json(const std::string& tools_json);
+
+    /// @brief Generate from session context (NEW unified interface)
+    /// Each API backend implements this to format SessionContext to their specific API format
+    /// @param session Session context containing system, messages, tools
+    /// @param max_tokens Maximum tokens to generate (0 = model default)
+    /// @return Generated response text (may contain tool call JSON)
+    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override = 0;
+
 protected:
 #ifdef ENABLE_API_BACKENDS
     /// @brief Shared HTTP client for making API requests

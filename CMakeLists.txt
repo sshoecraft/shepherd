@@ -19,6 +19,7 @@ pkg_check_modules(CURL REQUIRED libcurl)
 # Collect all source files
 set(SHEPHERD_SOURCES
     main.cpp
+    server.cpp
     logger.cpp
     config.cpp
     rag.cpp
@@ -266,3 +267,11 @@ message(STATUS "Shepherd configuration:")
 message(STATUS "  TensorRT backend: ${ENABLE_TENSORRT}")
 message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
+
+# Install server directory for HTTP API mode
+install(DIRECTORY server/
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/server
+        FILES_MATCHING
+        PATTERN "*.py"
+        PATTERN "*.txt"
+        PATTERN "*.md")

@@ -1,7 +1,10 @@
 #include "grok.h"
 #include "../logger.h"
+#include "../nlohmann/json.hpp"
 #include <sstream>
 #include <algorithm>
+
+using json = nlohmann::json;
 
 // GrokTokenizer implementation
 GrokTokenizer::GrokTokenizer(const std::string& model_name)
@@ -196,4 +199,110 @@ std::string GrokBackend::parse_grok_response(const std::string& response_json) {
     // TODO: Parse Grok response format (OpenAI-compatible)
     // Extract choices[0].message.content
     return "TODO: Parse response";
+}
+std::string GrokBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+    if (!is_ready()) {
+        throw BackendManagerError("Grok backend not initialized");
+    }
+
+    LOG_DEBUG("Grok generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // Build API request JSON from SessionContext
+    // Grok uses OpenAI-compatible format
+    try {
+        json request;
+        request["model"] = model_name_;
+
+        if (max_tokens > 0) {
+            request["max_tokens"] = max_tokens;
+        }
+
+        // Format messages for Grok API from SessionContext (OpenAI-compatible format)
+        request["messages"] = json::array();
+
+        for (const auto& msg : session.messages) {
+            json message_obj;
+            message_obj["role"] = msg.role;
+            message_obj["content"] = msg.content;
+
+            // Add optional fields
+            if (!msg.name.empty()) {
+                message_obj["name"] = msg.name;
+            }
+            if (!msg.tool_call_id.empty()) {
+                message_obj["tool_call_id"] = msg.tool_call_id;
+            }
+
+            request["messages"].push_back(message_obj);
+        }
+
+        // Format tools for Grok API from SessionContext (OpenAI-compatible format)
+        if (!session.tools.empty()) {
+            json tools_array = json::array();
+
+            for (const auto& tool_def : session.tools) {
+                json tool;
+                tool["type"] = "function";
+
+                json function;
+                function["name"] = tool_def.name;
+                function["description"] = tool_def.description;
+
+                // Parse parameters JSON or use default schema
+                if (!tool_def.parameters_json.empty()) {
+                    try {
+                        function["parameters"] = json::parse(tool_def.parameters_json);
+                    } catch (const json::exception& e) {
+                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
+                        function["parameters"] = {
+                            {"type", "object"},
+                            {"properties", json::object()},
+                            {"required", json::array()}
+                        };
+                    }
+                } else {
+                    function["parameters"] = {
+                        {"type", "object"},
+                        {"properties", json::object()},
+                        {"required", json::array()}
+                    };
+                }
+
+                tool["function"] = function;
+                tools_array.push_back(tool);
+            }
+
+            request["tools"] = tools_array;
+            LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to Grok request from SessionContext");
+        }
+
+        // Convert to string
+        std::string request_json = request.dump();
+
+        // Log request for debugging
+        if (request_json.length() <= 2000) {
+            LOG_DEBUG("Full Grok API request: " + request_json);
+        } else {
+            LOG_DEBUG("Grok API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
+            LOG_DEBUG("Grok API request length: " + std::to_string(request_json.length()) + " bytes");
+        }
+
+        // Make API call (currently stubbed)
+        std::string response_json = make_api_request(request_json);
+        if (response_json.empty()) {
+            throw BackendManagerError("Grok API request failed");
+        }
+
+        LOG_DEBUG("Grok API response: " + response_json.substr(0, 500));
+
+        // Parse response (currently stubbed, OpenAI-compatible format)
+        std::string response_text = parse_grok_response(response_json);
+        if (response_text.empty()) {
+            throw BackendManagerError("Failed to parse Grok response");
+        }
+
+        return response_text;
+    } catch (const json::exception& e) {
+        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    }
 }

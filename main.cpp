@@ -7,11 +7,14 @@
 #include "mcp/mcp_manager.h"
 #include "mcp/mcp_config.h"
 #include "web_search.h"
+#include "server.h"
+#include "session_context.h"
 #include "nlohmann/json.hpp"
 
 #ifdef ENABLE_API_BACKENDS
 #include "backends/openai.h"
 #include "backends/ollama.h"
+#include "backends/api_backend.h"
 #endif
 
 #include <iostream>
@@ -29,6 +32,7 @@
 #include <atomic>
 #include <thread>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -306,6 +310,9 @@ static void print_usage(int, char** argv) {
     printf("    --penalty-freq     Frequency penalty >= 0.0 (default: 0.1, local backends)\n");
     printf("    --penalty-present  Presence penalty >= 0.0 (default: 0.0, local backends)\n");
     printf("    --penalty-last-n   Penalty window size (default: 64, 0=disabled, local backends)\n");
+    printf("    --server           Start HTTP API server mode (OpenAI-compatible)\n");
+    printf("    --port PORT        Server port (default: 8080, requires --server)\n");
+    printf("    --host HOST        Server host to bind to (default: 0.0.0.0, requires --server)\n");
     printf("    -h, --help         Show this help message\n");
     printf("\nMCP Management:\n");
     printf("    mcp list                              List all configured MCP servers\n");
@@ -791,6 +798,7 @@ int main(int argc, char** argv) {
 
     bool debug_override = false;
     bool no_mcp = false;
+    bool server_mode = false;
     std::string log_file;
     std::string config_file_path;
     std::string model_path_override;
@@ -798,6 +806,8 @@ int main(int argc, char** argv) {
     std::string api_key_override;
     std::string api_base_override;
     std::string template_override;
+    int server_port = 8080;
+    std::string server_host = "0.0.0.0";
     int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
     int max_tokens_override = 0;
     float temperature_override = -1.0f;  // -1 means use config/default
@@ -829,6 +839,9 @@ int main(int argc, char** argv) {
         {"penalty-freq", required_argument, 0, 1012},
         {"penalty-present", required_argument, 0, 1013},
         {"penalty-last-n", required_argument, 0, 1014},
+        {"server", no_argument, 0, 1015},
+        {"port", required_argument, 0, 1016},
+        {"host", required_argument, 0, 1017},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -933,6 +946,19 @@ int main(int argc, char** argv) {
                     printf("Error: penalty-last-n must be >= 0 (0 = disabled)\n");
                     return 1;
                 }
+                break;
+            case 1015: // --server
+                server_mode = true;
+                break;
+            case 1016: // --port
+                server_port = std::atoi(optarg);
+                if (server_port <= 0 || server_port > 65535) {
+                    printf("Error: port must be between 1 and 65535\n");
+                    return 1;
+                }
+                break;
+            case 1017: // --host
+                server_host = optarg;
                 break;
             case 'h':
                 print_usage(argc, argv);
@@ -1183,64 +1209,68 @@ int main(int argc, char** argv) {
 
         LOG_INFO("Backend initialized: " + backend->get_backend_name() + " with model: " + backend->get_model_name());
 
-        // Initialize tools system
-        LOG_INFO("Initializing tools system...");
-        try {
-            // Register all native tools including memory search
-            register_filesystem_tools();
-            register_command_tools();
-            register_json_tools();
-            register_http_tools();
-            register_memory_tools();
-            register_mcp_resource_tools();
-            register_core_tools();  // IMPORTANT: Register core tools (Bash, Glob, Grep, Edit, WebSearch, etc.)
+        // Initialize tools system (skip in server mode - tools handled by client)
+        if (!server_mode) {
+            LOG_INFO("Initializing tools system...");
+            try {
+                // Register all native tools including memory search
+                register_filesystem_tools();
+                register_command_tools();
+                register_json_tools();
+                register_http_tools();
+                register_memory_tools();
+                register_mcp_resource_tools();
+                register_core_tools();  // IMPORTANT: Register core tools (Bash, Glob, Grep, Edit, WebSearch, etc.)
 
-            auto& registry = ToolRegistry::instance();
-            auto tools = registry.list_tools();
-            LOG_INFO("Native tools initialized with " + std::to_string(tools.size()) + " tools");
-            if (g_debug_mode) {
-                for (const auto& tool_name : tools) {
-                    LOG_DEBUG("Registered tool: " + tool_name);
+                auto& registry = ToolRegistry::instance();
+                auto tools = registry.list_tools();
+                LOG_INFO("Native tools initialized with " + std::to_string(tools.size()) + " tools");
+                if (g_debug_mode) {
+                    for (const auto& tool_name : tools) {
+                        LOG_DEBUG("Registered tool: " + tool_name);
+                    }
                 }
-            }
 
-            // Initialize MCP servers (will register additional tools)
-            if (!no_mcp) {
-                auto& mcp_manager = MCPManager::instance();
-                mcp_manager.initialize(config);
+                // Initialize MCP servers (will register additional tools)
+                if (!no_mcp) {
+                    auto& mcp_manager = MCPManager::instance();
+                    mcp_manager.initialize(config);
 
-                // Show total tool count after MCP
-                tools = registry.list_tools();
-                LOG_INFO("Total tools available: " + std::to_string(tools.size()) +
-                         " (native + " + std::to_string(mcp_manager.get_tool_count()) + " MCP)");
-            } else {
-                LOG_INFO("MCP system disabled via --nomcp flag");
-                tools = registry.list_tools();
-                LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
-            }
-
-            // Initialize web search if configured
-            std::string web_provider = config.get_web_search_provider();
-            if (!web_provider.empty()) {
-                LOG_INFO("Initializing web search: " + web_provider);
-
-                auto& search_manager = WebSearchManager::instance();
-                std::string api_key = config.get_web_search_api_key();
-                std::string instance_url = config.get_web_search_instance_url();
-
-                search_manager.initialize(web_provider, api_key, instance_url);
-                if (search_manager.is_available()) {
-                    LOG_INFO("Web search initialized successfully");
+                    // Show total tool count after MCP
+                    tools = registry.list_tools();
+                    LOG_INFO("Total tools available: " + std::to_string(tools.size()) +
+                             " (native + " + std::to_string(mcp_manager.get_tool_count()) + " MCP)");
                 } else {
-                    LOG_WARN("Web search initialization failed");
+                    LOG_INFO("MCP system disabled via --nomcp flag");
+                    tools = registry.list_tools();
+                    LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
                 }
-            } else {
-                LOG_DEBUG("Web search not configured");
-            }
 
-        } catch (const std::exception& e) {
-            LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
-            return 1;
+                // Initialize web search if configured
+                std::string web_provider = config.get_web_search_provider();
+                if (!web_provider.empty()) {
+                    LOG_INFO("Initializing web search: " + web_provider);
+
+                    auto& search_manager = WebSearchManager::instance();
+                    std::string api_key = config.get_web_search_api_key();
+                    std::string instance_url = config.get_web_search_instance_url();
+
+                    search_manager.initialize(web_provider, api_key, instance_url);
+                    if (search_manager.is_available()) {
+                        LOG_INFO("Web search initialized successfully");
+                    } else {
+                        LOG_WARN("Web search initialization failed");
+                    }
+                } else {
+                    LOG_DEBUG("Web search not configured");
+                }
+
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
+                return 1;
+            }
+        } else {
+            LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
         }
 
         // Check what tools the model already knows from chat template
@@ -1290,13 +1320,55 @@ int main(int argc, char** argv) {
             LOG_INFO("System prompt: default only");
         }
 
-        backend->add_system_message(system_prompt);
-
+        // Get registry and tool descriptions (needed for both interactive and server modes)
         auto& registry = ToolRegistry::instance();
         auto tool_descriptions = registry.list_tools_with_descriptions();
-        LOG_INFO("Added system prompt with " + std::to_string(tool_descriptions.size()) + " available tools");
+
+        // In server mode, DON'T cache the system message at startup
+        // The client will provide it with the correct tools in each request
+        if (!server_mode) {
+            backend->add_system_message(system_prompt);
+            LOG_INFO("Added system prompt with " + std::to_string(tool_descriptions.size()) + " available tools");
+        } else {
+            LOG_INFO("Server mode: System message will be provided by client with each request (empty KV cache)");
+        }
+
+        // Create session context for non-server mode
+        // In non-server mode, this is a single continuous session
+        // SessionContext organizes system prompt, tools, and messages in a unified structure
+        SessionContext session;
+        session.system_prompt = system_prompt;
+
+        // Populate tools from registry
+        for (const auto& [tool_name, tool_desc] : tool_descriptions) {
+            SessionContext::ToolDefinition td;
+            td.name = tool_name;
+            td.description = tool_desc;
+
+            // Get parameters schema if available
+            Tool* tool = registry.get_tool(tool_name);
+            if (tool) {
+                auto params_schema = tool->get_parameters_schema();
+                if (!params_schema.empty()) {
+                    // Convert parameter schema to JSON string
+                    // For now, just store the tool name - full schema conversion can be added later if needed
+                    td.parameters_json = "{}";  // Placeholder
+                }
+            }
+
+            session.tools.push_back(td);
+        }
+
+        LOG_DEBUG("SessionContext created with " + std::to_string(session.tools.size()) + " tools");
 
         LOG_INFO("Shepherd initialization complete");
+
+        // ============================================================================
+        // Server Mode - HTTP API via FastAPI
+        // ============================================================================
+        if (server_mode) {
+            return run_server_mode(backend, server_host, server_port);
+        }
 
         // For MPI multi-GPU setups, only rank 0 handles user interaction
         // Non-zero ranks keep their backend alive for MPI communication

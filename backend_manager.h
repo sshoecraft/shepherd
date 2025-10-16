@@ -4,6 +4,7 @@
 #include "tools_manager.h"
 #include "tokenizer.h"
 #include "model_config.h"
+#include "session_context.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -49,6 +50,14 @@ public:
     /// @brief Add a system message to the context
     /// @param content System message content
     virtual void add_system_message(const std::string& content) = 0;
+
+    /// @brief Process a session context and generate response
+    /// This is the NEW unified interface that backends should implement
+    /// Backend reads SessionContext, formats request appropriately, and generates
+    /// @param session Session context containing system, messages, tools
+    /// @param max_tokens Maximum tokens to generate (0 = model default)
+    /// @return Generated response text (may contain tool call JSON)
+    virtual std::string generate_from_session(const SessionContext& session, int max_tokens = 0) = 0;
 
     /// @brief Get backend name/identifier
     /// @return Backend name (e.g., "llamacpp", "openai", "anthropic")

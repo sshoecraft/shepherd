@@ -18,7 +18,7 @@ void Config::set_defaults() {
     model_ = "";
     model_path_ = get_default_model_path();
     context_size_ = 0; // Auto-detect
-    key_ = "";
+    key_ = "none";
     api_base_ = "";  // Optional API base URL
     system_prompt_ = "";  // Optional custom system prompt
 
@@ -364,13 +364,10 @@ void Config::validate() const {
         }
     }
 
-    // Validate API key and model for cloud backends
+    // Validate API key for cloud backends
     if (backend_ == "openai" || backend_ == "anthropic") {
         if (key_.empty()) {
             throw ConfigError("API key is required for backend: " + backend_);
-        }
-        if (model_.empty()) {
-            throw ConfigError("Model name is required for backend: " + backend_);
         }
     }
 

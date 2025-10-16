@@ -29,6 +29,7 @@ public:
 
     bool initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path = "") override;
     std::string generate(int max_tokens = 0) override;
+    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
     std::string get_backend_name() const override;
     std::string get_model_name() const override;
     size_t get_max_context_size() const override;

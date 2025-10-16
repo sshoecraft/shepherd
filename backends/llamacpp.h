@@ -106,6 +106,7 @@ public:
 
     bool initialize(const std::string& model_path, const std::string& api_key = "", const std::string& template_path = "") override;
     std::string generate(int max_tokens = 0) override;
+    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
     void add_user_message(const std::string& content) override;
     void add_tool_result(const std::string& tool_name, const std::string& content, const std::string& tool_call_id = "") override;
     void add_assistant_message(const std::string& content) override;
@@ -193,6 +194,9 @@ private:
     float penalty_freq_ = 0.1f;
     float penalty_present_ = 0.0f;
     int penalty_last_n_ = 64;
+
+    // Server mode flag - suppresses all streaming output
+    bool server_mode_ = false;
 
 #endif
 };

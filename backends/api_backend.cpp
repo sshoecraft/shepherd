@@ -151,6 +151,51 @@ uint32_t ApiBackend::evict_to_free_space(uint32_t tokens_needed) {
     return UINT32_MAX;
 }
 
+void ApiBackend::set_tools_from_json(const std::string& tools_json) {
+    if (tools_json.empty()) {
+        LOG_DEBUG("No tools provided");
+        tools_built_ = true;
+        return;
+    }
+
+    try {
+        auto tools_array = nlohmann::json::parse(tools_json);
+        if (!tools_array.is_array()) {
+            LOG_ERROR("Tools JSON is not an array");
+            tools_built_ = true;
+            return;
+        }
+
+        tools_data_.clear();
+        tools_data_.reserve(tools_array.size());
+
+        for (const auto& tool : tools_array) {
+            if (!tool.contains("function") || !tool["function"].contains("name")) {
+                LOG_WARN("Tool missing function.name, skipping");
+                continue;
+            }
+
+            ToolInfo info;
+            info.name = tool["function"]["name"].get<std::string>();
+            info.description = tool["function"].value("description", "");
+
+            if (tool["function"].contains("parameters")) {
+                info.parameters_schema = tool["function"]["parameters"].dump();
+            } else {
+                info.parameters_schema = "{}";
+            }
+
+            tools_data_.push_back(info);
+        }
+
+        tools_built_ = true;
+        LOG_INFO("Set tools from JSON: " + std::to_string(tools_data_.size()) + " tools");
+    } catch (const nlohmann::json::exception& e) {
+        LOG_ERROR("Failed to parse tools JSON: " + std::string(e.what()));
+        tools_built_ = true;
+    }
+}
+
 void ApiBackend::build_tools_from_registry() {
     if (tools_built_) {
         return; // Already built

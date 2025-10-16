@@ -672,3 +672,163 @@ void AnthropicBackend::discover_api_metadata() {
     curl_easy_cleanup(temp_curl);
 #endif
 }
+
+std::string AnthropicBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+    if (!is_ready()) {
+        throw BackendManagerError("Anthropic backend not initialized");
+    }
+
+    LOG_DEBUG("Anthropic generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    // Use configured max output limit if max_tokens not specified
+    int actual_max_tokens = (max_tokens > 0) ? max_tokens : query_max_output_tokens(model_name_);
+
+    LOG_DEBUG("Max tokens for generation: " + std::to_string(actual_max_tokens));
+
+    // Build complete API request JSON from SessionContext
+    try {
+        json request;
+
+        // Required fields
+        request["model"] = model_name_;
+        request["max_tokens"] = actual_max_tokens;
+
+        // Anthropic format: separate "system" field from "messages" array
+        request["messages"] = json::array();
+
+        // Process messages from SessionContext
+        for (const auto& msg : session.messages) {
+            if (msg.role == "system") {
+                // Anthropic uses a separate "system" field at the root level
+                request["system"] = msg.content;
+            } else if (msg.role == "user") {
+                // Check if this is a tool result
+                if (!msg.tool_call_id.empty()) {
+                    // Tool results for Anthropic must be user messages with tool_result content blocks
+                    request["messages"].push_back({
+                        {"role", "user"},
+                        {"content", json::array({
+                            {
+                                {"type", "tool_result"},
+                                {"tool_use_id", msg.tool_call_id},
+                                {"content", msg.content}
+                            }
+                        })}
+                    });
+                } else {
+                    // Regular user message
+                    request["messages"].push_back({
+                        {"role", "user"},
+                        {"content", msg.content}
+                    });
+                }
+            } else if (msg.role == "assistant") {
+                // Check if this is a tool call (JSON format)
+                json assistant_content;
+                try {
+                    json parsed = json::parse(msg.content);
+                    // If it parses as JSON with "name" and "parameters", it's a tool call
+                    if (parsed.contains("name") && parsed.contains("parameters")) {
+                        // Format as tool_use block for Anthropic
+                        assistant_content = json::array({
+                            {
+                                {"type", "tool_use"},
+                                {"id", parsed.value("id", "")},
+                                {"name", parsed["name"]},
+                                {"input", parsed["parameters"]}
+                            }
+                        });
+                    } else {
+                        // Regular text content
+                        assistant_content = msg.content;
+                    }
+                } catch (const json::exception&) {
+                    // Not JSON, treat as regular text
+                    assistant_content = msg.content;
+                }
+
+                request["messages"].push_back({
+                    {"role", "assistant"},
+                    {"content", assistant_content}
+                });
+            } else if (msg.role == "tool") {
+                // Tool results for Anthropic must be user messages with tool_result content blocks
+                request["messages"].push_back({
+                    {"role", "user"},
+                    {"content", json::array({
+                        {
+                            {"type", "tool_result"},
+                            {"tool_use_id", msg.tool_call_id},
+                            {"content", msg.content}
+                        }
+                    })}
+                });
+            }
+        }
+
+        // Format tools from SessionContext for Anthropic API
+        if (!session.tools.empty()) {
+            json tools_array = json::array();
+
+            for (const auto& tool_def : session.tools) {
+                json tool;
+                tool["name"] = tool_def.name;
+                tool["description"] = tool_def.description;
+
+                // Parse parameters JSON or use default schema
+                if (!tool_def.parameters_json.empty()) {
+                    try {
+                        tool["input_schema"] = json::parse(tool_def.parameters_json);
+                    } catch (const json::exception& e) {
+                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
+                        tool["input_schema"] = {
+                            {"type", "object"},
+                            {"properties", json::object()},
+                            {"required", json::array()}
+                        };
+                    }
+                } else {
+                    tool["input_schema"] = {
+                        {"type", "object"},
+                        {"properties", json::object()},
+                        {"required", json::array()}
+                    };
+                }
+
+                tools_array.push_back(tool);
+            }
+
+            request["tools"] = tools_array;
+            LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to Anthropic request from SessionContext");
+        }
+
+        // Convert to string
+        std::string request_json = request.dump();
+
+        // Log request for debugging
+        if (request_json.length() <= 2000) {
+            LOG_DEBUG("Full Anthropic API request: " + request_json);
+        } else {
+            LOG_DEBUG("Anthropic API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
+            LOG_DEBUG("Anthropic API request length: " + std::to_string(request_json.length()) + " bytes");
+        }
+
+        // Make API call
+        std::string response_json = make_api_request(request_json);
+        if (response_json.empty()) {
+            throw BackendManagerError("Anthropic API request failed");
+        }
+
+        LOG_DEBUG("Anthropic API response: " + response_json.substr(0, 500));
+
+        // Parse response
+        std::string response_text = parse_anthropic_response(response_json);
+        if (response_text.empty()) {
+            throw BackendManagerError("Failed to parse Anthropic response");
+        }
+
+        return response_text;
+    } catch (const json::exception& e) {
+        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    }
+}

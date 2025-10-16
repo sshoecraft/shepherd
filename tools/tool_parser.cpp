@@ -95,7 +95,9 @@ bool has_tool_call(const std::string& response,
 
     try {
         auto json_response = nlohmann::json::parse(json_str);
-        if (json_response.contains("name") && json_response.contains("parameters")) {
+        // Accept both "parameters" (internal format) and "arguments" (OpenAI format)
+        if (json_response.contains("name") &&
+            (json_response.contains("parameters") || json_response.contains("arguments"))) {
             LOG_DEBUG("Found valid tool call");
             return true;
         }
@@ -230,14 +232,22 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         // Parse the JSON
         auto json_response = nlohmann::json::parse(json_str);
 
-        // Check for required fields
-        if (!json_response.contains("name") || !json_response.contains("parameters")) {
-            LOG_DEBUG("JSON missing required 'name' or 'parameters' fields");
+        // Check for required fields (accept both "parameters" and "arguments")
+        if (!json_response.contains("name")) {
+            LOG_DEBUG("JSON missing required 'name' field");
+            return std::nullopt;
+        }
+
+        if (!json_response.contains("parameters") && !json_response.contains("arguments")) {
+            LOG_DEBUG("JSON missing required 'parameters' or 'arguments' field");
             return std::nullopt;
         }
 
         std::string tool_name = json_response["name"];
-        auto params_json = json_response["parameters"];
+        // Accept both "parameters" (internal format) and "arguments" (OpenAI format)
+        auto params_json = json_response.contains("parameters") ?
+                          json_response["parameters"] :
+                          json_response["arguments"];
 
         // Extract optional tool_call_id (used by API backends)
         std::string tool_call_id;

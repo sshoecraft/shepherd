@@ -375,7 +375,6 @@ void register_memory_tools() {
     registry.register_tool(std::make_unique<ClearMemoryTool>());
     registry.register_tool(std::make_unique<SetFactTool>());
     registry.register_tool(std::make_unique<GetFactTool>());
-    // ClearFactTool remains disabled
-    // registry.register_tool(std::make_unique<ClearFactTool>());
-    LOG_DEBUG("Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact");
+    registry.register_tool(std::make_unique<ClearFactTool>());
+    LOG_DEBUG("Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact, clear_fact");
 }

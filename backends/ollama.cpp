@@ -333,33 +333,69 @@ std::string OllamaBackend::make_get_request(const std::string& endpoint) {
 
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
 #ifdef ENABLE_API_BACKENDS
-    // Try to query from Ollama API
-    // Ollama endpoint: GET /api/show with model name
-    // For now, use reasonable defaults based on model name
+    // Try to query from Ollama API: POST /api/show
+    try {
+        json request;
+        request["model"] = model_name;
 
-    if (model_name.find("llama3.1") != std::string::npos) {
-        if (model_name.find("70b") != std::string::npos) {
-            return 128000; // Llama 3.1 70B
+        std::string request_str = request.dump();
+
+        // Build full URL for /api/show endpoint (needs POST)
+        std::string base_url = api_endpoint_;
+        size_t pos = base_url.find("/v1/chat/completions");
+        if (pos != std::string::npos) {
+            base_url = base_url.substr(0, pos);
         }
-        return 128000; // Llama 3.1 8B also has 128k context
-    } else if (model_name.find("llama3") != std::string::npos) {
-        return 8192; // Llama 3 base
-    } else if (model_name.find("llama2") != std::string::npos) {
-        return 4096; // Llama 2
-    } else if (model_name.find("mistral") != std::string::npos) {
-        return 8192; // Mistral models
-    } else if (model_name.find("mixtral") != std::string::npos) {
-        return 32768; // Mixtral
-    } else if (model_name.find("codellama") != std::string::npos) {
-        if (model_name.find("34b") != std::string::npos) {
-            return 16384; // Code Llama 34B
+        std::string show_url = base_url + "/api/show";
+
+        if (!http_client_.get()) {
+            LOG_WARN("HTTP client not initialized, using default context size");
+            return 8192;
         }
-        return 4096; // Code Llama base
+
+        // Prepare headers
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
+
+        HttpResponse response = http_client_->post(show_url, request_str, headers);
+
+        if (!response.is_success()) {
+            LOG_WARN("Failed to query model info from Ollama API, using default context size");
+            return 8192;
+        }
+
+        // Parse response to extract context length from model_info
+        json model_data = json::parse(response.body);
+
+        // Try to get context length from model_info (field name varies by model family)
+        if (model_data.contains("model_info") && model_data["model_info"].is_object()) {
+            auto& info = model_data["model_info"];
+
+            // Try different possible field names for context length
+            std::vector<std::string> context_fields = {
+                "llama.context_length",
+                "qwen2.context_length",
+                "mistral.context_length",
+                "gemma.context_length",
+                "phi3.context_length"
+            };
+
+            for (const auto& field : context_fields) {
+                if (info.contains(field) && info[field].is_number()) {
+                    size_t context_len = info[field].get<size_t>();
+                    LOG_INFO("Retrieved context size from Ollama API (" + field + "): " + std::to_string(context_len));
+                    return context_len;
+                }
+            }
+        }
+
+        LOG_WARN("Context length not found in Ollama API response, using default");
+        return 8192;
+
+    } catch (const std::exception& e) {
+        LOG_WARN("Error querying Ollama model info: " + std::string(e.what()) + ", using default context size");
+        return 8192;
     }
-
-    // Default fallback
-    LOG_WARN("Unknown Ollama model: " + model_name + ", using default context size");
-    return 8192;
 #else
     return 8192;
 #endif

@@ -662,7 +662,24 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ## License
 
-[Specify License]
+**PolyForm Shield License 1.0.0**
+
+Copyright (C) 2024-2025 Stephen P. Shoecraft
+
+This project is licensed under the PolyForm Shield License 1.0.0. You are free to:
+- ✅ Use Shepherd for any purpose (personal, commercial, internal business use)
+- ✅ Modify and create derivative works
+- ✅ Distribute copies
+
+**Restrictions**:
+- ❌ Cannot sell Shepherd or derivatives as a standalone product
+- ❌ Cannot offer Shepherd as a paid service (SaaS)
+- ❌ Cannot create competing products using Shepherd
+
+For the full license text, see [LICENSE](LICENSE) or visit:
+https://polyformproject.org/licenses/shield/1.0.0/
+
+**Commercial Licensing**: For use cases not covered by the PolyForm Shield License, please contact the author for alternative licensing options.
 
 ---
 

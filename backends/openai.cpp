@@ -454,10 +454,21 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
 
     // Fallback values based on known models
     if (model_name.find("gpt-4") != std::string::npos) {
-        if (model_name.find("turbo") != std::string::npos || model_name.find("1106") != std::string::npos) {
-            return 128000; // GPT-4 Turbo
+        // Modern GPT-4 variants (128K context)
+        if (model_name.find("gpt-4o") != std::string::npos ||      // gpt-4o, gpt-4o-mini
+            model_name.find("turbo") != std::string::npos ||       // gpt-4-turbo
+            model_name.find("1106") != std::string::npos ||        // gpt-4-1106-preview
+            model_name.find("0125") != std::string::npos) {        // gpt-4-0125-preview
+            return 128000;
         }
-        return 8192; // GPT-4 base
+        // Legacy GPT-4 (8K context) - gpt-4-0613, gpt-4-0314
+        if (model_name.find("0613") != std::string::npos ||
+            model_name.find("0314") != std::string::npos) {
+            return 8192;
+        }
+        // Unknown GPT-4 variant - assume modern 128K
+        LOG_WARN("Unknown GPT-4 variant: " + model_name + ", assuming 128K context");
+        return 128000;
     } else if (model_name.find("gpt-3.5") != std::string::npos) {
         if (model_name.find("16k") != std::string::npos) {
             return 16384; // GPT-3.5 Turbo 16k
@@ -465,7 +476,7 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
         return 4096; // GPT-3.5 Turbo base
     }
 
-    // Default fallback
+    // Default fallback for completely unknown models
     size_t default_context = 4096;
     LOG_WARN("Unknown OpenAI model: " + model_name + ", using default context size of " + std::to_string(default_context));
     return default_context;

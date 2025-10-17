@@ -1317,6 +1317,16 @@ int main(int argc, char** argv) {
 5.  **Clear outdated information before storing corrections.**
 6.  **NEVER say you don't know without completing both Step 1 and Step 2.**)";
 
+        system_prompt += R"(
+
+**Handling Truncated Tool Results:**
+- When you see [TRUNCATED], assess whether the visible data is sufficient to answer the question
+- If you need more information, use targeted follow-up calls:
+  - Read with offset/limit parameters for specific sections
+  - Grep with patterns to search for what you need
+  - Glob with specific patterns instead of broad matches
+- If the truncated result contains what you need, proceed with your answer)";
+
         // Append custom user prompt if configured
         std::string custom_prompt = config.get_system_prompt();
         if (!custom_prompt.empty()) {
@@ -1641,7 +1651,7 @@ int main(int argc, char** argv) {
 
                             std::string truncation_notice = "\n\n[TRUNCATED: Output too large for context window]";
                             truncation_notice += "\nOriginal length: " + std::to_string(original_line_count) + " lines";
-                            truncation_notice += "\nTo see more: read part of the data, search for specific content, or use pagination if available";
+                            truncation_notice += "\nIf you need more: use Read(offset=X, limit=Y), Grep(pattern=...), or Glob with specific patterns";
 
                             // Reserve space for the truncation notice itself
                             int notice_tokens = backend->get_context_manager().count_tokens(truncation_notice);

@@ -47,7 +47,6 @@ OllamaBackend::~OllamaBackend() {
 }
 
 void OllamaBackend::set_api_base(const std::string& api_base) {
-#ifdef ENABLE_API_BACKENDS
     if (!api_base.empty()) {
         // Ensure it ends with /v1/chat/completions
         if (api_base.find("/v1/chat/completions") == std::string::npos) {
@@ -61,11 +60,9 @@ void OllamaBackend::set_api_base(const std::string& api_base) {
         }
         LOG_INFO("Ollama API endpoint set to: " + api_endpoint_);
     }
-#endif
 }
 
 bool OllamaBackend::initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path) {
-#ifdef ENABLE_API_BACKENDS
     if (initialized_) {
         LOG_WARN("OllamaBackend already initialized");
         return true;
@@ -81,14 +78,8 @@ bool OllamaBackend::initialize(const std::string& model_name, const std::string&
     // Only query model's context size if not explicitly set (max_context_size_ == 0 means auto)
     if (max_context_size_ == 0) {
         size_t actual_context_size = query_model_context_size(model_name_);
-        if (actual_context_size > 0) {
-            max_context_size_ = actual_context_size;
-            LOG_INFO("Ollama model " + model_name_ + " context size: " + std::to_string(actual_context_size));
-        } else {
-            // Fallback to default if query fails
-            max_context_size_ = 8192;
-            LOG_WARN("Failed to query context size for " + model_name_ + ", using default: " + std::to_string(max_context_size_));
-        }
+        max_context_size_ = actual_context_size;
+        LOG_INFO("Ollama model " + model_name_ + " context size: " + std::to_string(actual_context_size));
     } else {
         // Context size was explicitly set via command line - respect it
         LOG_INFO("Using explicitly configured context size: " + std::to_string(max_context_size_));
@@ -101,10 +92,6 @@ bool OllamaBackend::initialize(const std::string& model_name, const std::string&
     LOG_INFO("OllamaBackend initialized with model: " + model_name_);
     initialized_ = true;
     return true;
-#else
-    LOG_ERROR("API backends not compiled in");
-    return false;
-#endif
 }
 
 std::string OllamaBackend::generate(int max_tokens) {
@@ -236,19 +223,11 @@ std::string OllamaBackend::get_model_name() const {
 }
 
 size_t OllamaBackend::get_max_context_size() const {
-#ifdef ENABLE_API_BACKENDS
     return max_context_size_;
-#else
-    return 8192;
-#endif
 }
 
 bool OllamaBackend::is_ready() const {
-#ifdef ENABLE_API_BACKENDS
     return initialized_;
-#else
-    return false;
-#endif
 }
 
 void OllamaBackend::shutdown() {
@@ -256,17 +235,14 @@ void OllamaBackend::shutdown() {
         return;
     }
 
-#ifdef ENABLE_API_BACKENDS
     // HttpClient destructor will handle cleanup
     http_client_.reset();
-#endif
 
     initialized_ = false;
     LOG_DEBUG("OllamaBackend shutdown complete");
 }
 
 std::string OllamaBackend::make_api_request(const std::string& json_payload) {
-#ifdef ENABLE_API_BACKENDS
     if (!http_client_.get()) {
         LOG_ERROR("HTTP client not initialized");
         return "";
@@ -289,13 +265,9 @@ std::string OllamaBackend::make_api_request(const std::string& json_payload) {
     }
 
     return response.body;
-#else
-    return "";
-#endif
 }
 
 std::string OllamaBackend::make_get_request(const std::string& endpoint) {
-#ifdef ENABLE_API_BACKENDS
     if (!http_client_.get()) {
         LOG_ERROR("HTTP client not initialized");
         return "";
@@ -326,18 +298,20 @@ std::string OllamaBackend::make_get_request(const std::string& endpoint) {
     }
 
     return response.body;
-#else
-    return "";
-#endif
 }
 
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
-#ifdef ENABLE_API_BACKENDS
+    const size_t DEFAULT_CONTEXT_SIZE = 32768;  // Conservative default for modern models
+
     // Try to query from Ollama API: POST /api/show
     try {
+        if (!http_client_.get()) {
+            LOG_WARN("HTTP client not initialized for Ollama, using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
+            return DEFAULT_CONTEXT_SIZE;
+        }
+
         json request;
         request["model"] = model_name;
-
         std::string request_str = request.dump();
 
         // Build full URL for /api/show endpoint (needs POST)
@@ -348,11 +322,6 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
         }
         std::string show_url = base_url + "/api/show";
 
-        if (!http_client_.get()) {
-            LOG_WARN("HTTP client not initialized, using default context size");
-            return 8192;
-        }
-
         // Prepare headers
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
@@ -360,8 +329,8 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
         HttpResponse response = http_client_->post(show_url, request_str, headers);
 
         if (!response.is_success()) {
-            LOG_WARN("Failed to query model info from Ollama API, using default context size");
-            return 8192;
+            LOG_WARN("Failed to query model info from Ollama API, using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
+            return DEFAULT_CONTEXT_SIZE;
         }
 
         // Parse response to extract context length from model_info
@@ -389,16 +358,13 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
             }
         }
 
-        LOG_WARN("Context length not found in Ollama API response, using default");
-        return 8192;
+        LOG_WARN("Context length not found in Ollama API response, using default: " + std::to_string(DEFAULT_CONTEXT_SIZE));
+        return DEFAULT_CONTEXT_SIZE;
 
     } catch (const std::exception& e) {
-        LOG_WARN("Error querying Ollama model info: " + std::string(e.what()) + ", using default context size");
-        return 8192;
+        LOG_WARN("Error querying Ollama model info: " + std::string(e.what()) + ", using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
+        return DEFAULT_CONTEXT_SIZE;
     }
-#else
-    return 8192;
-#endif
 }
 
 std::string OllamaBackend::parse_ollama_response(const std::string& response_json) {

@@ -294,7 +294,8 @@ static void print_usage(int, char** argv) {
     printf("    -c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
     printf("    -d, --debug        Enable debug mode\n");
     printf("    -l, --log-file     Log to file instead of console\n");
-    printf("    -m, --model        Model path (overrides config)\n");
+    printf("    -m, --model        Model name or file (overrides config)\n");
+    printf("    --model_path       Model directory path (overrides config, e.g., ~/models)\n");
     printf("    --backend          Backend (llamacpp, openai, anthropic, gemini, grok, ollama)\n");
     printf("    --api-key          API key for cloud backends\n");
     printf("    --api-base         API base URL (for OpenAI-compatible APIs)\n");
@@ -313,6 +314,7 @@ static void print_usage(int, char** argv) {
     printf("    --server           Start HTTP API server mode (OpenAI-compatible)\n");
     printf("    --port PORT        Server port (default: 8080, requires --server)\n");
     printf("    --host HOST        Server host to bind to (default: 0.0.0.0, requires --server)\n");
+    printf("    --no-truncate      Disable tool result truncation (may cause context overflow)\n");
     printf("    -h, --help         Show this help message\n");
     printf("\nMCP Management:\n");
     printf("    mcp list                              List all configured MCP servers\n");
@@ -799,8 +801,10 @@ int main(int argc, char** argv) {
     bool debug_override = false;
     bool no_mcp = false;
     bool server_mode = false;
+    bool no_truncate = false;
     std::string log_file;
     std::string config_file_path;
+    std::string model_override;
     std::string model_path_override;
     std::string backend_override;
     std::string api_key_override;
@@ -824,6 +828,7 @@ int main(int argc, char** argv) {
         {"debug", no_argument, 0, 'd'},
         {"log-file", required_argument, 0, 'l'},
         {"model", required_argument, 0, 'm'},
+        {"model_path", required_argument, 0, 1018},
         {"backend", required_argument, 0, 1002},
         {"api-key", required_argument, 0, 1003},
         {"api-base", required_argument, 0, 1004},
@@ -842,6 +847,7 @@ int main(int argc, char** argv) {
         {"server", no_argument, 0, 1015},
         {"port", required_argument, 0, 1016},
         {"host", required_argument, 0, 1017},
+        {"no-truncate", no_argument, 0, 1019},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -860,6 +866,9 @@ int main(int argc, char** argv) {
                 log_file = optarg;
                 break;
             case 'm':
+                model_override = optarg;
+                break;
+            case 1018: // --model_path
                 model_path_override = optarg;
                 break;
             case 1002: // --backend
@@ -960,6 +969,9 @@ int main(int argc, char** argv) {
             case 1017: // --host
                 server_host = optarg;
                 break;
+            case 1019: // --no-truncate
+                no_truncate = true;
+                break;
             case 'h':
                 print_usage(argc, argv);
                 return 0;
@@ -1012,9 +1024,13 @@ int main(int argc, char** argv) {
     if (context_size_override >= 0) {  // -1 means not set, 0+ are valid values
         config.set_context_size(context_size_override);
     }
+    if (no_truncate) {
+        config.set_truncate_tool_results(false);
+    }
 
     // Validate configuration (skip model path check if overridden)
-    if (model_path_override.empty()) {
+    if (model_override.empty() && model_path_override.empty()) {
+        // No overrides - validate everything from config
         try {
             config.validate();
         } catch (const ConfigError& e) {
@@ -1023,7 +1039,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     } else {
-        // With model override, just validate backend availability
+        // With overrides, just validate backend availability
         auto available = Config::get_available_backends();
         bool backend_found = false;
         for (const auto& b : available) {
@@ -1042,10 +1058,27 @@ int main(int argc, char** argv) {
                     config.get_backend().c_str(), available_str.c_str());
             return 1;
         }
-        // Validate model file exists (only for local backends)
+        // Validate model file exists (only for local backends with overrides)
         if (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt") {
-            if (!std::filesystem::exists(model_path_override)) {
-                fprintf(stderr, "Model file not found: %s\n", model_path_override.c_str());
+            // Construct the full path to validate
+            std::string model_file_to_check;
+            std::string model_name = model_override.empty() ? config.get_model() : model_override;
+            std::string model_dir = model_path_override.empty() ? config.get_model_path() : model_path_override;
+
+            // Check if model_name is already a full path
+            if (!model_name.empty() && (model_name[0] == '/' || model_name[0] == '~')) {
+                model_file_to_check = model_name;
+            } else {
+                model_file_to_check = std::filesystem::path(model_dir) / model_name;
+            }
+
+            // Expand ~ if present
+            if (!model_file_to_check.empty() && model_file_to_check[0] == '~') {
+                model_file_to_check = Config::get_home_directory() + model_file_to_check.substr(1);
+            }
+
+            if (!std::filesystem::exists(model_file_to_check)) {
+                fprintf(stderr, "Model file not found: %s\n", model_file_to_check.c_str());
                 return 1;
             }
         }
@@ -1068,21 +1101,35 @@ int main(int argc, char** argv) {
         // Create backend manager
         std::string model_path;
 
-        if (!model_path_override.empty()) {
-            // Use command line override as full path
-            model_path = model_path_override;
-            LOG_INFO("Model path overridden from command line: " + model_path);
-        } else if (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt") {
+        if (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt") {
             // For local backends, construct full path from directory + model name
-            std::filesystem::path full_path;
-            if (!config.get_model().empty() && (config.get_model()[0] == '/' || config.get_model()[0] == '~')) {
-                // Model is already a full path
-                full_path = config.get_model();
+            // Use overrides if provided, otherwise use config values
+            std::string model_name = model_override.empty() ? config.get_model() : model_override;
+            std::string model_dir = model_path_override.empty() ? config.get_model_path() : model_path_override;
+
+            // Check if model_name is already a full path (absolute path)
+            if (!model_name.empty() && (model_name[0] == '/' || model_name[0] == '~')) {
+                // Model is already a full path - use it directly
+                model_path = model_name;
             } else {
                 // Combine model_path directory with model name
-                full_path = std::filesystem::path(config.get_model_path()) / config.get_model();
+                model_path = (std::filesystem::path(model_dir) / model_name).string();
             }
-            model_path = full_path.string();
+
+            // Expand ~ if present
+            if (!model_path.empty() && model_path[0] == '~') {
+                model_path = Config::get_home_directory() + model_path.substr(1);
+            }
+
+            // Log what we're using
+            if (!model_override.empty() || !model_path_override.empty()) {
+                std::string override_msg = "Model path constructed from overrides: " + model_path;
+                if (!model_override.empty()) override_msg += " (model=" + model_override + ")";
+                if (!model_path_override.empty()) override_msg += " (dir=" + model_path_override + ")";
+                LOG_INFO(override_msg);
+            } else {
+                LOG_INFO("Model path from config: " + model_path);
+            }
         }
 
         size_t context_size = context_size_override >= 0 ?  // -1 means not set
@@ -1161,7 +1208,7 @@ int main(int argc, char** argv) {
                 #endif
             }
             // Use model override if provided, otherwise use config
-            std::string api_model_name = model_path_override.empty() ? config.get_model() : model_path_override;
+            std::string api_model_name = model_override.empty() ? config.get_model() : model_override;
             init_success = backend->initialize(api_model_name, config.get_key());
         } else if (config.get_backend() == "ollama") {
             // Set API base if specified
@@ -1174,7 +1221,7 @@ int main(int argc, char** argv) {
                 #endif
             }
             // Use model override if provided, otherwise use config
-            std::string api_model_name = model_path_override.empty() ? config.get_model() : model_path_override;
+            std::string api_model_name = model_override.empty() ? config.get_model() : model_override;
             // Ollama doesn't require a real API key
             std::string api_key = config.get_key().empty() ? "dummy" : config.get_key();
             init_success = backend->initialize(api_model_name, api_key);
@@ -1655,33 +1702,34 @@ User: "What is the private variable in config.cpp?"
                             }
                         }
 
-                        // Truncate large tool results to prevent context overflow
-                        // Use actual tokenizer to count tokens accurately
-                        int actual_tool_result_tokens = backend->get_context_manager().count_tokens(tool_result);
+                        // Truncate large tool results to prevent context overflow (if enabled)
+                        if (config.get_truncate_tool_results()) {
+                            // Use actual tokenizer to count tokens accurately
+                            int actual_tool_result_tokens = backend->get_context_manager().count_tokens(tool_result);
 
-                        // Get current total tokens from context manager (includes ALL messages: system, user, assistant, tools)
-                        int current_total_tokens = backend->get_context_manager().get_total_tokens();
+                            // Get current total tokens from context manager (includes ALL messages: system, user, assistant, tools)
+                            int current_total_tokens = backend->get_context_manager().get_total_tokens();
 
-                        // Reserve space for model's response - scale with context size
-                        // Small contexts need proportionally more space for generation
-                        size_t min_response_tokens = 2000; // Minimum 2K tokens for response
-                        size_t context_based_reserve = context_size / 4; // Reserve 25% of context for response
-                        size_t reserved_for_response = std::max(min_response_tokens, context_based_reserve);
+                            // Reserve space for model's response - scale with context size
+                            // Small contexts need proportionally more space for generation
+                            size_t min_response_tokens = 2000; // Minimum 2K tokens for response
+                            size_t context_based_reserve = context_size / 4; // Reserve 25% of context for response
+                            size_t reserved_for_response = std::max(min_response_tokens, context_based_reserve);
 
-                        LOG_DEBUG("Context calculation: size=" + std::to_string(context_size) +
-                                 ", current_total=" + std::to_string(current_total_tokens) +
-                                 ", tool_result=" + std::to_string(actual_tool_result_tokens) +
-                                 ", reserved=" + std::to_string(reserved_for_response));
+                            LOG_DEBUG("Context calculation: size=" + std::to_string(context_size) +
+                                     ", current_total=" + std::to_string(current_total_tokens) +
+                                     ", tool_result=" + std::to_string(actual_tool_result_tokens) +
+                                     ", reserved=" + std::to_string(reserved_for_response));
 
-                        int max_tool_result_tokens = static_cast<int>(context_size) - current_total_tokens - static_cast<int>(reserved_for_response);
-                        if (max_tool_result_tokens < 500) {
-                            max_tool_result_tokens = 500; // Minimum fallback if context is tiny
-                        }
+                            int max_tool_result_tokens = static_cast<int>(context_size) - current_total_tokens - static_cast<int>(reserved_for_response);
+                            if (max_tool_result_tokens < 500) {
+                                max_tool_result_tokens = 500; // Minimum fallback if context is tiny
+                            }
 
-                        LOG_DEBUG("Max tool result: " + std::to_string(max_tool_result_tokens) + " tokens allowed, actual: " +
-                                 std::to_string(actual_tool_result_tokens) + " tokens");
+                            LOG_DEBUG("Max tool result: " + std::to_string(max_tool_result_tokens) + " tokens allowed, actual: " +
+                                     std::to_string(actual_tool_result_tokens) + " tokens");
 
-                        if (actual_tool_result_tokens > max_tool_result_tokens) {
+                            if (actual_tool_result_tokens > max_tool_result_tokens) {
                             // Count lines for helpful guidance
                             size_t original_line_count = std::count(tool_result.begin(), tool_result.end(), '\n');
 
@@ -1730,6 +1778,7 @@ User: "What is the private variable in config.cpp?"
                                             std::to_string(final_line_count) + " lines / " +
                                             std::to_string(truncated_tokens + notice_tokens) + " tokens)");
                                 }
+                            }
                             }
                         }
 

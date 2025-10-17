@@ -45,6 +45,9 @@ void Config::set_defaults() {
 
     // GPU layers (for llamacpp backend with GPU support)
     gpu_layers_ = -1;  // -1 = auto (load all layers to GPU), 0 = CPU only, >0 = specific number
+
+    // Tool result truncation (enabled by default)
+    truncate_tool_results_ = true;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -214,6 +217,9 @@ void Config::load() {
         if (config_json.contains("gpu_layers")) {
             gpu_layers_ = config_json["gpu_layers"].get<int>();
         }
+        if (config_json.contains("truncate")) {
+            truncate_tool_results_ = config_json["truncate"].get<bool>();
+        }
 
         // Load RAG database size limit (optional, supports both string and numeric formats)
         if (config_json.contains("max_db_size")) {
@@ -278,6 +284,7 @@ void Config::save() const {
         config_json["penalty_present"] = penalty_present_;
         config_json["penalty_last_n"] = penalty_last_n_;
         config_json["gpu_layers"] = gpu_layers_;
+        config_json["truncate"] = truncate_tool_results_;
 
         // Add RAG database size limit (as human-friendly string)
         config_json["max_db_size"] = max_db_size_str_;

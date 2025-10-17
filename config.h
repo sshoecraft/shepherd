@@ -70,6 +70,7 @@ public:
     float get_penalty_present() const { return penalty_present_; }
     int get_penalty_last_n() const { return penalty_last_n_; }
     int get_gpu_layers() const { return gpu_layers_; }
+    bool get_truncate_tool_results() const { return truncate_tool_results_; }
 
     void set_temperature(float temperature) { temperature_ = temperature; }
     void set_top_p(float top_p) { top_p_ = top_p; }
@@ -80,6 +81,7 @@ public:
     void set_penalty_present(float penalty_present) { penalty_present_ = penalty_present; }
     void set_penalty_last_n(int penalty_last_n) { penalty_last_n_ = penalty_last_n; }
     void set_gpu_layers(int gpu_layers) { gpu_layers_ = gpu_layers; }
+    void set_truncate_tool_results(bool truncate) { truncate_tool_results_ = truncate; }
 
 private:
     // Helper to parse size strings with suffixes (e.g., "10G", "500M")
@@ -112,6 +114,7 @@ private:
     float penalty_present_;
     int penalty_last_n_;
     int gpu_layers_;  // Number of layers to offload to GPU (-1 = all, 0 = none)
+    bool truncate_tool_results_;  // Whether to truncate large tool results (default: true)
 
     std::string get_config_path() const;
     std::string get_default_model_path() const;

@@ -1713,11 +1713,13 @@ User: "What is the private variable in config.cpp?"
                                 tool_result = truncated + truncation_notice;
 
                                 size_t final_line_count = std::count(truncated.begin(), truncated.end(), '\n');
-                                LOG_WARN("Truncated large tool result from " + tool_name + " (" +
-                                        std::to_string(original_line_count) + " lines / " +
-                                        std::to_string(actual_tool_result_tokens) + " tokens -> " +
-                                        std::to_string(final_line_count) + " lines / " +
-                                        std::to_string(truncated_tokens + notice_tokens) + " tokens)");
+                                if (g_debug_mode) {
+                                    LOG_WARN("Truncated large tool result from " + tool_name + " (" +
+                                            std::to_string(original_line_count) + " lines / " +
+                                            std::to_string(actual_tool_result_tokens) + " tokens -> " +
+                                            std::to_string(final_line_count) + " lines / " +
+                                            std::to_string(truncated_tokens + notice_tokens) + " tokens)");
+                                }
                             }
                         }
 

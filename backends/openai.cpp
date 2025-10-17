@@ -420,35 +420,50 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
         return 0;
     }
 
-    // Make GET request to /models/{model_name}
-    std::string endpoint = "/models/" + model_name;
-    LOG_INFO("Querying model info from endpoint: " + endpoint);
-    std::string response = make_get_request(endpoint);
-    LOG_INFO("Model info response (" + std::to_string(response.length()) + " bytes): " +
+    // Make GET request to /models (list endpoint)
+    LOG_INFO("Querying model list from /models");
+    std::string response = make_get_request("/models");
+    LOG_INFO("Model list response (" + std::to_string(response.length()) + " bytes): " +
              (response.length() > 200 ? response.substr(0, 200) + "..." : response));
 
-    // Parse JSON response to extract context_window or context_length
+    // Parse JSON response to find our model and extract context size
     if (!response.empty()) {
         try {
             auto j = json::parse(response);
 
-            // Try context_window first (OpenAI-compatible APIs)
-            if (j.contains("context_window") && j["context_window"].is_number()) {
-                size_t context_size = j["context_window"].get<size_t>();
-                LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
-                return context_size;
-            }
+            // Check if this is a list response with data array (vLLM/OpenAI format)
+            if (j.contains("data") && j["data"].is_array()) {
+                for (const auto& model_obj : j["data"]) {
+                    // Match by id field
+                    if (model_obj.contains("id") && model_obj["id"].get<std::string>() == model_name) {
+                        LOG_INFO("Found model in list: " + model_name);
 
-            // Try context_length as fallback (official OpenAI format)
-            if (j.contains("context_length") && j["context_length"].is_number()) {
-                size_t context_size = j["context_length"].get<size_t>();
-                LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
-                return context_size;
-            }
+                        // Try max_model_len (vLLM format)
+                        if (model_obj.contains("max_model_len") && model_obj["max_model_len"].is_number()) {
+                            size_t context_size = model_obj["max_model_len"].get<size_t>();
+                            LOG_INFO("Parsed max_model_len from API: " + std::to_string(context_size));
+                            return context_size;
+                        }
 
-            LOG_WARN("No context_window or context_length field in API response, using fallbacks");
+                        // Try context_window (some OpenAI-compatible APIs)
+                        if (model_obj.contains("context_window") && model_obj["context_window"].is_number()) {
+                            size_t context_size = model_obj["context_window"].get<size_t>();
+                            LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
+                            return context_size;
+                        }
+
+                        // Try context_length (official OpenAI format)
+                        if (model_obj.contains("context_length") && model_obj["context_length"].is_number()) {
+                            size_t context_size = model_obj["context_length"].get<size_t>();
+                            LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
+                            return context_size;
+                        }
+                    }
+                }
+                LOG_INFO("Model " + model_name + " not found in /models list");
+            }
         } catch (const json::exception& e) {
-            LOG_WARN("Failed to parse model info JSON: " + std::string(e.what()) + ", using fallbacks");
+            LOG_WARN("Failed to parse model list JSON: " + std::string(e.what()) + ", using fallbacks");
         }
     }
 
@@ -477,7 +492,7 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     }
 
     // Default fallback for completely unknown models
-    size_t default_context = 4096;
+    size_t default_context = 8192;
     LOG_WARN("Unknown OpenAI model: " + model_name + ", using default context size of " + std::to_string(default_context));
     return default_context;
 #else

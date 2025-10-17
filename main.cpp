@@ -1339,12 +1339,22 @@ When you see [TRUNCATED]:
    - General knowledge: WebSearch ONLY
    - NO MIXING domains - never websearch for file content
 
+**Task Completion:**
+
+When the user requests multiple steps in a single message:
+- Complete ALL steps before responding
+- Example: "write hello.c and compile it and run it" = 3 steps, do all 3
+- Do NOT stop after each tool call - continue until the entire task is done
+- Only respond to user when the complete task is finished
+- If a step fails, report the failure and stop
+
 **Enforcement Rules:**
 
 ALWAYS check memory FIRST - even if query seems like obvious file operation
 ALWAYS store answer LAST - unless it came from memory
 NEVER skip memory check - this wastes computation and breaks continuity
 NEVER forget to store - every answer you derive must be saved for next time
+NEVER stop mid-task - complete all requested steps before responding
 
 **Example Correct Flow:**
 User: "What is the private variable in config.cpp?"

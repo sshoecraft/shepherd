@@ -139,6 +139,11 @@ public:
         penalty_last_n_ = penalty_last_n;
     }
 
+    // Set GPU layers before initialization (-1 = auto/all, 0 = CPU only, >0 = specific count)
+    void set_gpu_layers(int gpu_layers) {
+        gpu_layers_ = gpu_layers;
+    }
+
 private:
     /// @brief Run inference using llama.cpp
     /// @param prompt_text The text to generate from
@@ -194,6 +199,9 @@ private:
     float penalty_freq_ = 0.1f;
     float penalty_present_ = 0.0f;
     int penalty_last_n_ = 64;
+
+    // GPU offload configuration
+    int gpu_layers_ = -1;  // -1 = auto/all, 0 = CPU only, >0 = specific layer count
 
     // Server mode flag - suppresses all streaming output
     bool server_mode_ = false;

@@ -42,6 +42,9 @@ void Config::set_defaults() {
     penalty_freq_ = 0.1f;     // Small frequency penalty
     penalty_present_ = 0.0f;  // No presence penalty
     penalty_last_n_ = 64;     // Apply penalty to last 64 tokens
+
+    // GPU layers (for llamacpp backend with GPU support)
+    gpu_layers_ = -1;  // -1 = auto (load all layers to GPU), 0 = CPU only, >0 = specific number
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -208,6 +211,9 @@ void Config::load() {
         if (config_json.contains("penalty_last_n")) {
             penalty_last_n_ = config_json["penalty_last_n"].get<int>();
         }
+        if (config_json.contains("gpu_layers")) {
+            gpu_layers_ = config_json["gpu_layers"].get<int>();
+        }
 
         // Load RAG database size limit (optional, supports both string and numeric formats)
         if (config_json.contains("max_db_size")) {
@@ -271,6 +277,7 @@ void Config::save() const {
         config_json["penalty_freq"] = penalty_freq_;
         config_json["penalty_present"] = penalty_present_;
         config_json["penalty_last_n"] = penalty_last_n_;
+        config_json["gpu_layers"] = gpu_layers_;
 
         // Add RAG database size limit (as human-friendly string)
         config_json["max_db_size"] = max_db_size_str_;

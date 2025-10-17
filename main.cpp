@@ -1143,6 +1143,11 @@ int main(int argc, char** argv) {
         // Initialize backend with appropriate credentials
         bool init_success = false;
         if (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt") {
+            // Set GPU layers via environment variable (will be read by llamacpp backend during init)
+            if (config.get_backend() == "llamacpp" && config.get_gpu_layers() >= 0) {
+                setenv("GGML_N_GPU_LAYERS", std::to_string(config.get_gpu_layers()).c_str(), 0); // 0 = don't overwrite if already set
+                LOG_INFO("Setting GPU layers from config: " + std::to_string(config.get_gpu_layers()));
+            }
             init_success = backend->initialize(model_path, "", template_override);
         } else if (config.get_backend() == "openai" || config.get_backend() == "anthropic") {
             // Set API base if specified (for OpenAI-compatible APIs)

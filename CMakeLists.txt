@@ -235,11 +235,19 @@ if(ENABLE_LLAMACPP)
         ${LLAMACPP_DIR}/ggml/include
         ${LLAMACPP_DIR}/common
     )
+
+    # Determine shared library extension based on platform
+    if(APPLE)
+        set(SHARED_LIB_EXT "dylib")
+    else()
+        set(SHARED_LIB_EXT "so")
+    endif()
+
     target_link_libraries(shepherd PRIVATE
         ${LLAMACPP_DIR}/build/common/libcommon.a
-        ${LLAMACPP_DIR}/build/bin/libllama.so
-        ${LLAMACPP_DIR}/build/bin/libggml.so
-        ${LLAMACPP_DIR}/build/bin/libggml-base.so
+        ${LLAMACPP_DIR}/build/bin/libllama.${SHARED_LIB_EXT}
+        ${LLAMACPP_DIR}/build/bin/libggml.${SHARED_LIB_EXT}
+        ${LLAMACPP_DIR}/build/bin/libggml-base.${SHARED_LIB_EXT}
     )
 endif()
 

@@ -459,23 +459,44 @@ bool LlamaCppBackend::initialize(const std::string& model_path, const std::strin
 
     model_path_ = model_path;
 
-    // Suppress llama.cpp logging unless in debug mode
+    // Suppress llama.cpp logging unless in debug mode (but always show errors)
     extern bool g_debug_mode;
     if (!g_debug_mode) {
         llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
-            // Suppress all llama.cpp logs in non-debug mode
+            // Always show ERROR and WARN messages
+            if (level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_WARN) {
+                fprintf(stderr, "%s", text);
+            }
         }, nullptr);
     }
 
-    // Detect GPU support
+    // Detect GPU support (can be disabled with GGML_METAL=0 or GGML_NO_METAL=1)
     bool has_gpu = llama_supports_gpu_offload();
+    const char* disable_metal = getenv("GGML_METAL");
+    const char* no_metal = getenv("GGML_NO_METAL");
+    if ((disable_metal && strcmp(disable_metal, "0") == 0) ||
+        (no_metal && strcmp(no_metal, "1") == 0)) {
+        has_gpu = false;
+        LOG_INFO("Metal GPU disabled by environment variable");
+    }
 
     // Load actual llama.cpp model
     llama_model_params model_params = llama_model_default_params();
 
     if (has_gpu) {
-        // Set to extremely high number - llama.cpp will automatically cap at actual layer count
-        model_params.n_gpu_layers = INT32_MAX;
+        // Priority: environment variable > config setting > auto
+        const char* gpu_layers_env = getenv("GGML_N_GPU_LAYERS");
+        if (gpu_layers_env) {
+            model_params.n_gpu_layers = atoi(gpu_layers_env);
+            LOG_INFO("Using GPU layer count from GGML_N_GPU_LAYERS env: " + std::to_string(model_params.n_gpu_layers));
+        } else if (gpu_layers_ >= 0) {
+            model_params.n_gpu_layers = gpu_layers_;
+            LOG_INFO("Using GPU layer count from config: " + std::to_string(model_params.n_gpu_layers));
+        } else {
+            // -1 = auto: set to extremely high number - llama.cpp will automatically cap at actual layer count
+            model_params.n_gpu_layers = INT32_MAX;
+            LOG_INFO("Auto GPU layers (loading all layers to GPU)");
+        }
 
         // Multi-GPU support: split layers across GPUs
         // LAYER mode distributes layers evenly across available GPUs

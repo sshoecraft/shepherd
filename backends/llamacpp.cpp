@@ -728,6 +728,8 @@ void LlamaCppBackend::add_system_message(const std::string& custom_prompt) {
     auto& messages = context_manager_->get_messages();
     if (!messages.empty()) {
         format_and_decode_message(messages.back());
+        // Save the formatted token count (updated by format_and_decode_message)
+        system_formatted_tokens_ = messages.back().token_count;
     }
 
     LOG_DEBUG("Added formatted system message with tools to LlamaCpp backend and decoded to KV cache");
@@ -743,6 +745,8 @@ void LlamaCppBackend::add_user_message(const std::string& content) {
     auto& messages = context_manager_->get_messages();
     if (!messages.empty()) {
         format_and_decode_message(messages.back());
+        // Save the formatted token count (updated by format_and_decode_message)
+        current_user_formatted_tokens_ = messages.back().token_count;
     }
 
     LOG_DEBUG("Added user message to LlamaCpp backend and decoded to KV cache");
@@ -1178,43 +1182,18 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     std::string response;
     int n_generated = 0;
 
-    // Calculate max generation tokens based on what MUST stay in context:
-    // - System prompt (message 0)
-    // - Current user message (last user message)
-    // Everything else is evictable to make room for the response
-    auto& messages = context_manager_->get_messages();
-    int system_tokens = 0;
-    int current_user_tokens = 0;
+    // Calculate max generation tokens: context_size - system - current_user
+    // These token counts include ALL template overhead (saved when messages were decoded)
+    int available_for_generation = static_cast<int>(max_context_size_) - system_formatted_tokens_ - current_user_formatted_tokens_;
 
-    if (!messages.empty()) {
-        // System message is always first
-        system_tokens = messages[0].token_count;
-
-        // Find last user message
-        for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-            if (it->get_role() == "user") {
-                current_user_tokens = it->token_count;
-                break;
-            }
-        }
-
-        // Safety check: verify user message exists
-        if (current_user_tokens == 0) {
-            LOG_ERROR("CRITICAL: No user message found in context - cannot generate without user input");
-            llama_sampler_free(sampler);
-            return "Error: No user message in context. This indicates a critical eviction bug.";
-        }
-    }
-
-    int protected_tokens = system_tokens + current_user_tokens + 200; // 200 token buffer for safety
-    int available_for_generation = static_cast<int>(max_context_size_) - protected_tokens;
-
-    // Trust eviction system - it will free old messages as needed
+    // Use explicit max_tokens if provided, otherwise use all available space
     int max_gen_tokens = max_tokens > 0 ? max_tokens : available_for_generation;
 
-    LOG_DEBUG("Generation limits: " + std::to_string(max_gen_tokens) + " max tokens (protected: system=" +
-              std::to_string(system_tokens) + " + user=" + std::to_string(current_user_tokens) +
-              " + buffer=200, evictable_for_response: " + std::to_string(available_for_generation) + ")");
+    LOG_DEBUG("Generation limits: available=" + std::to_string(available_for_generation) +
+              " (context=" + std::to_string(max_context_size_) +
+              " - system=" + std::to_string(system_formatted_tokens_) +
+              " - user=" + std::to_string(current_user_formatted_tokens_) +
+              "), max_gen_tokens=" + std::to_string(max_gen_tokens));
 
     // Start timing for t/s measurement
     auto gen_start_time = std::chrono::high_resolution_clock::now();
@@ -1394,7 +1373,11 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     }
     msg_tokens.resize(n_tokens);
 
-    LOG_DEBUG("Decoding " + std::to_string(n_tokens) + " tokens for new message");
+    // CRITICAL: Update message token count to the FORMATTED count (includes all template overhead)
+    // This is the actual number of tokens in KV cache, not just the raw content
+    msg.token_count = n_tokens;
+
+    LOG_DEBUG("Decoding " + std::to_string(n_tokens) + " tokens for new message (updated msg.token_count)");
 
     // Start timing for prompt processing (prefill) speed
     auto prefill_start_time = std::chrono::high_resolution_clock::now();

@@ -206,5 +206,9 @@ private:
     // Server mode flag - suppresses all streaming output
     bool server_mode_ = false;
 
+    // Formatted token counts (including all template overhead)
+    int system_formatted_tokens_ = 0;
+    int current_user_formatted_tokens_ = 0;
+
 #endif
 };

@@ -422,18 +422,37 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
 
     // Make GET request to /models/{model_name}
     std::string endpoint = "/models/" + model_name;
+    LOG_INFO("Querying model info from endpoint: " + endpoint);
     std::string response = make_get_request(endpoint);
+    LOG_INFO("Model info response (" + std::to_string(response.length()) + " bytes): " +
+             (response.length() > 200 ? response.substr(0, 200) + "..." : response));
 
-    // TODO: Parse JSON response to extract context_length
-    // OpenAI model response format:
-    // {
-    //   "id": "gpt-4",
-    //   "object": "model",
-    //   "context_length": 8192,
-    //   ...
-    // }
+    // Parse JSON response to extract context_window or context_length
+    if (!response.empty()) {
+        try {
+            auto j = json::parse(response);
 
-    // For now, return fallback values based on known models
+            // Try context_window first (OpenAI-compatible APIs)
+            if (j.contains("context_window") && j["context_window"].is_number()) {
+                size_t context_size = j["context_window"].get<size_t>();
+                LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
+                return context_size;
+            }
+
+            // Try context_length as fallback (official OpenAI format)
+            if (j.contains("context_length") && j["context_length"].is_number()) {
+                size_t context_size = j["context_length"].get<size_t>();
+                LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
+                return context_size;
+            }
+
+            LOG_WARN("No context_window or context_length field in API response, using fallbacks");
+        } catch (const json::exception& e) {
+            LOG_WARN("Failed to parse model info JSON: " + std::string(e.what()) + ", using fallbacks");
+        }
+    }
+
+    // Fallback values based on known models
     if (model_name.find("gpt-4") != std::string::npos) {
         if (model_name.find("turbo") != std::string::npos || model_name.find("1106") != std::string::npos) {
             return 128000; // GPT-4 Turbo

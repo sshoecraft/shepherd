@@ -1102,8 +1102,9 @@ int main(int argc, char** argv) {
             LOG_INFO("Max tokens overridden from command line: " + std::to_string(max_tokens_override));
         }
 
-        // Show status to user
-        if (is_interactive) {
+        // Show status to user (only for local backends that actually load models)
+        bool is_local_backend = (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt");
+        if (is_interactive && is_local_backend) {
             printf("Initializing Engine...\n");
             fflush(stdout);
         }
@@ -1133,8 +1134,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // Show status to user before the slow model load
-        if (is_interactive) {
+        // Show status to user before the slow model load (only for local backends)
+        if (is_interactive && is_local_backend) {
             printf("Loading Model...\n");
             fflush(stdout);
         }

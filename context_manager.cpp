@@ -36,6 +36,16 @@ void ContextManager::set_max_context_tokens(size_t max_tokens) {
 }
 
 void ContextManager::add_message(const Message& message) {
+    // In server mode, throw exception instead of evicting
+    // Client is responsible for managing context window
+    extern bool g_server_mode;
+    if (g_server_mode && needs_eviction(message.token_count)) {
+        throw ContextManagerError(
+            "Context limit exceeded in server mode: would need " +
+            std::to_string(get_total_tokens() + message.token_count) + " tokens but limit is " +
+            std::to_string(max_context_tokens_) + " tokens. Client must manage context window.");
+    }
+
     // Check if we need to evict BEFORE adding (only if auto-eviction is enabled)
     // For backends with KV cache (llama.cpp, TensorRT), eviction is handled by KV cache callbacks
     if (auto_evict_on_add_ && needs_eviction(message.token_count)) {

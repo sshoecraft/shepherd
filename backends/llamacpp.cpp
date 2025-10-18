@@ -42,31 +42,17 @@ int LlamaCppTokenizer::count_tokens(const std::string& text) {
 }
 
 std::vector<int> LlamaCppTokenizer::encode(const std::string& text) {
-#ifdef ENABLE_LLAMACPP
-    if (model_) {
-        // TODO: Use actual llama.cpp tokenization
-        // std::vector<int> tokens(text.length() + 100); // oversized buffer
-        // int n_tokens = llama_tokenize(model_, text.c_str(), text.length(), tokens.data(), tokens.size(), true, false);
-        // tokens.resize(n_tokens);
-        // return tokens;
-    }
-#endif
-    // Fallback implementation
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
-    }
-    return tokens;
+    // NOTE: This method is never called by LlamaCppBackend - it uses llama_tokenize() directly
+    // This stub exists only to satisfy the Tokenizer interface contract
+    LOG_ERROR("LlamaCppTokenizer::encode() should never be called - llama.cpp uses direct tokenization");
+    return {};
 }
 
 std::string LlamaCppTokenizer::decode(const std::vector<int>& tokens) {
-#ifdef ENABLE_LLAMACPP
-    if (model_) {
-        // TODO: Use actual llama.cpp detokenization
-        // return llama_detokenize(model_, tokens.data(), tokens.size());
-    }
-#endif
-    return "TODO: Implement llama.cpp decode";
+    // NOTE: This method is never called by LlamaCppBackend - it uses llama_token_to_piece() directly
+    // This stub exists only to satisfy the Tokenizer interface contract
+    LOG_ERROR("LlamaCppTokenizer::decode() should never be called - llama.cpp uses direct detokenization");
+    return "";
 }
 
 std::string LlamaCppTokenizer::get_tokenizer_name() const {
@@ -871,6 +857,14 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 #ifdef ENABLE_LLAMACPP
     LOG_INFO("KV cache full - need to free " + std::to_string(tokens_needed) + " tokens");
 
+    // In server mode, throw exception instead of evicting
+    // Client is responsible for managing context window
+    extern bool g_server_mode;
+    if (g_server_mode) {
+        LOG_ERROR("KV cache full in server mode - throwing ContextFullException");
+        throw ContextFullException("Context limit exceeded (" + std::to_string(tokens_needed) + " tokens needed)");
+    }
+
     auto* llama_ctx_mgr = dynamic_cast<LlamaCppContextManager*>(context_manager_.get());
     if (!llama_ctx_mgr) {
         LOG_ERROR("Context manager is not LlamaCppContextManager");
@@ -1145,6 +1139,10 @@ std::string LlamaCppBackend::generate(int max_tokens) {
         }
     }
 
+    // Store prompt token count for server to return (like API backends do)
+    // This is the total number of tokens in the KV cache before generation
+    last_prompt_tokens_ = context_manager_->get_total_tokens();
+
     // Return response directly - main will handle tool parsing and cleanup
     return raw_response;
 }
@@ -1323,6 +1321,10 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
     LOG_INFO("Generation (decode): " + std::to_string(n_generated) + " tokens in " +
              std::to_string(seconds) + "s (" + std::to_string(tokens_per_second) + " t/s)");
+
+    // Store completion token count for server to return (like API backends do)
+    last_completion_tokens_ = n_generated;
+
     return response;
 #else
     // Fallback when llama.cpp not available

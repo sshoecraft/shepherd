@@ -100,6 +100,13 @@ public:
     /// @brief Get number of messages in hot context
     size_t get_message_count() const { return context_manager_->get_message_count(); }
 
+    /// @brief Get last prompt token count from API response (for API backends)
+    /// Returns 0 for local backends or if no API call has been made yet
+    int get_last_prompt_tokens() const { return last_prompt_tokens_; }
+
+    /// @brief Get last completion token count from API response (for API backends)
+    /// Returns 0 for local backends or if no API call has been made yet
+    int get_last_completion_tokens() const { return last_completion_tokens_; }
 
     /// @brief Clear all context
     void clear_context() { context_manager_->clear(); }
@@ -171,6 +178,11 @@ protected:
     std::string api_key_;
     size_t max_context_size_ = 0;  // Requested max context (0 = use model default, or override for testing)
     bool initialized_ = false;
+
+    /// @brief Token counts from last API call (for API backends)
+    /// Local backends should leave these at 0
+    int last_prompt_tokens_ = 0;
+    int last_completion_tokens_ = 0;
 };
 
 /// @brief Factory for creating backend managers
@@ -204,4 +216,11 @@ class BackendManagerError : public std::runtime_error {
 public:
     explicit BackendManagerError(const std::string& message)
         : std::runtime_error("BackendManager: " + message) {}
+};
+
+/// @brief Exception thrown when context is full and automatic eviction is disabled
+class ContextFullException : public std::runtime_error {
+public:
+    explicit ContextFullException(const std::string& message)
+        : std::runtime_error("Context Full: " + message) {}
 };

@@ -232,10 +232,21 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
                 }
 
                 // Add usage statistics
+                // Use native token counts from API backends if available (non-zero)
+                // Fall back to ContextManager estimates for local backends
+                int prompt_tokens = backend->get_last_prompt_tokens();
+                int completion_tokens = backend->get_last_completion_tokens();
+
+                if (prompt_tokens == 0 && completion_tokens == 0) {
+                    // Local backend - use ContextManager estimate
+                    prompt_tokens = backend->get_context_manager().get_total_tokens();
+                    completion_tokens = 0;  // TODO: Track separately for local backends
+                }
+
                 response["usage"] = {
-                    {"prompt_tokens", backend->get_context_manager().get_total_tokens()},
-                    {"completion_tokens", 0},  // TODO: Track separately
-                    {"total_tokens", backend->get_context_manager().get_total_tokens()}
+                    {"prompt_tokens", prompt_tokens},
+                    {"completion_tokens", completion_tokens},
+                    {"total_tokens", prompt_tokens + completion_tokens}
                 };
 
             } else if (request["action"] == "list_models") {

@@ -1,6 +1,7 @@
 #include "openai.h"
 #include "../logger.h"
 #include "../nlohmann/json.hpp"
+#include "../cpp-tiktoken/encoding.h"
 #include <sstream>
 #include <algorithm>
 
@@ -9,29 +10,83 @@ using json = nlohmann::json;
 // OpenAITokenizer implementation
 OpenAITokenizer::OpenAITokenizer(const std::string& model_name)
     : model_name_(model_name) {
+    initialize_encoding();
     LOG_DEBUG("OpenAI tokenizer initialized for model: " + model_name);
 }
 
+void OpenAITokenizer::initialize_encoding() {
+    // Map OpenAI model names to tiktoken LanguageModel enum
+    LanguageModel tiktoken_model;
+
+    // GPT-4o models use o200k_base
+    if (model_name_.find("gpt-4o") != std::string::npos) {
+        tiktoken_model = LanguageModel::O200K_BASE;
+    }
+    // GPT-4 and GPT-3.5 models use cl100k_base
+    else if (model_name_.find("gpt-4") != std::string::npos ||
+             model_name_.find("gpt-3.5") != std::string::npos) {
+        tiktoken_model = LanguageModel::CL100K_BASE;
+    }
+    // Codex models use p50k_base
+    else if (model_name_.find("code") != std::string::npos) {
+        tiktoken_model = LanguageModel::P50K_BASE;
+    }
+    // Default to cl100k_base for unknown models (most modern OpenAI models use this)
+    else {
+        LOG_WARN("Unknown OpenAI model '" + model_name_ + "', defaulting to cl100k_base encoding");
+        tiktoken_model = LanguageModel::CL100K_BASE;
+    }
+
+    try {
+        encoding_ = GptEncoding::get_encoding(tiktoken_model);
+        LOG_DEBUG("Tiktoken encoding initialized successfully");
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to initialize tiktoken encoding: " + std::string(e.what()));
+        encoding_ = nullptr;
+    }
+}
+
 int OpenAITokenizer::count_tokens(const std::string& text) {
-    // TODO: Integrate tiktoken library for accurate token counting
-    // For now, use the same approximation as before
-    return static_cast<int>(text.length() / 4.0 + 0.5);
+    if (!encoding_) {
+        LOG_WARN("Tiktoken encoding not initialized, using approximation");
+        return static_cast<int>(text.length() / 4.0 + 0.5);
+    }
+
+    try {
+        std::vector<int> tokens = encoding_->encode(text);
+        return static_cast<int>(tokens.size());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Tiktoken encoding failed: " + std::string(e.what()));
+        return static_cast<int>(text.length() / 4.0 + 0.5);
+    }
 }
 
 std::vector<int> OpenAITokenizer::encode(const std::string& text) {
-    // TODO: Implement tiktoken encoding
-    // This is a placeholder implementation
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
+    if (!encoding_) {
+        LOG_WARN("Tiktoken encoding not initialized, returning empty vector");
+        return {};
     }
-    return tokens;
+
+    try {
+        return encoding_->encode(text);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Tiktoken encoding failed: " + std::string(e.what()));
+        return {};
+    }
 }
 
 std::string OpenAITokenizer::decode(const std::vector<int>& tokens) {
-    // TODO: Implement tiktoken decoding
-    // This is a placeholder implementation
-    return "TODO: Implement tiktoken decode";
+    if (!encoding_) {
+        LOG_WARN("Tiktoken encoding not initialized, cannot decode");
+        return "";
+    }
+
+    try {
+        return encoding_->decode(tokens);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Tiktoken decoding failed: " + std::string(e.what()));
+        return "";
+    }
 }
 
 std::string OpenAITokenizer::get_tokenizer_name() const {
@@ -538,6 +593,19 @@ std::string OpenAIBackend::parse_openai_response(const std::string& response_jso
             std::string error_msg = j["error"].contains("message") ? j["error"]["message"].get<std::string>() : "Unknown error";
             LOG_ERROR("OpenAI API error: " + error_msg);
             return "";
+        }
+
+        // Extract usage data from API response and store for server to return
+        if (j.contains("usage") && j["usage"].is_object()) {
+            last_prompt_tokens_ = j["usage"].value("prompt_tokens", 0);
+            last_completion_tokens_ = j["usage"].value("completion_tokens", 0);
+            LOG_DEBUG("Usage from API: prompt=" + std::to_string(last_prompt_tokens_) +
+                      " completion=" + std::to_string(last_completion_tokens_) +
+                      " total=" + std::to_string(last_prompt_tokens_ + last_completion_tokens_));
+        } else {
+            // Reset to 0 if no usage data (shouldn't happen with real APIs)
+            last_prompt_tokens_ = 0;
+            last_completion_tokens_ = 0;
         }
 
         // Extract message from choices[0].message

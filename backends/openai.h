@@ -7,6 +7,9 @@
 #include "../nlohmann/json.hpp"
 #endif
 
+// Forward declare GptEncoding to avoid including full header in header file
+class GptEncoding;
+
 /// @brief OpenAI-specific tokenizer using tiktoken library
 class OpenAITokenizer : public Tokenizer {
 public:
@@ -19,7 +22,10 @@ public:
 
 private:
     std::string model_name_;
-    // tiktoken implementation will be added when library is integrated
+    std::shared_ptr<GptEncoding> encoding_;
+
+    /// @brief Initialize tiktoken encoding for the model
+    void initialize_encoding();
 };
 
 /// @brief Backend manager for OpenAI API with integrated context management

@@ -138,10 +138,13 @@ async def chat_completions(request: ChatCompletionRequest):
     messages = [msg.model_dump(exclude_none=True) for msg in request.messages]
 
     parameters = {
-        "max_tokens": request.max_tokens or 150,
         "temperature": request.temperature,
         "top_p": request.top_p
     }
+
+    # Only include max_tokens if client explicitly provided it
+    if request.max_tokens is not None:
+        parameters["max_tokens"] = request.max_tokens
 
     # Forward tools if provided
     tools = None

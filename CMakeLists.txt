@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
-option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" ON)
+option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
 option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
 option(ENABLE_LLAMACPP "Enable llama.cpp backend" ON)
 

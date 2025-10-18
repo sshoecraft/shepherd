@@ -1,8 +1,8 @@
 diff --git a/include/llama.h b/include/llama.h
-index 452d9ec5..5313926d 100644
+index 452d9ec5..0c0945fc 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -209,6 +209,15 @@ extern "C" {
+@@ -209,6 +209,12 @@ extern "C" {
          bool sorted;      // note: do not assume the data is sorted - always check this flag
      } llama_token_data_array;
  
@@ -12,14 +12,10 @@ index 452d9ec5..5313926d 100644
 +    // Returns the new head position after eviction (where freed space begins)
 +    typedef uint32_t (*llama_kv_need_space_callback)(uint32_t tokens_needed, void * user_data);
 +
-+    // Called when tokens are added to the KV cache
-+    // Provides the ubatch that was applied to the cache
-+    typedef void (*llama_kv_tokens_added_callback)(const struct llama_ubatch * ubatch, void * user_data);
-+
      typedef bool (*llama_progress_callback)(float progress, void * user_data);
  
      // Input data for llama_encode/llama_decode
-@@ -335,6 +344,14 @@ extern "C" {
+@@ -335,6 +341,10 @@ extern "C" {
          ggml_abort_callback abort_callback;
          void *              abort_callback_data;
  
@@ -27,15 +23,11 @@ index 452d9ec5..5313926d 100644
 +        llama_kv_need_space_callback kv_need_space_callback;
 +        void *                       kv_need_space_callback_data;
 +
-+        // KV cache tokens added callback
-+        llama_kv_tokens_added_callback kv_tokens_added_callback;
-+        void *                         kv_tokens_added_callback_data;
-+
          // Keep the booleans together and at the end of the struct to avoid misalignment during copy-by-value.
          bool embeddings;  // if true, extract embeddings (together with logits)
          bool offload_kqv; // offload the KQV ops (including the KV cache) to GPU
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index d8a8b5e6..48a49d7a 100644
+index d8a8b5e6..926ca6bb 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3,6 +3,7 @@
@@ -46,7 +38,7 @@ index d8a8b5e6..48a49d7a 100644
  #include "llama-memory.h"
  #include "llama-mmap.h"
  #include "llama-model.h"
-@@ -200,6 +201,22 @@ llama_context::llama_context(
+@@ -200,6 +201,14 @@ llama_context::llama_context(
          };
  
          memory.reset(model.create_memory(params_mem, cparams));
@@ -58,123 +50,18 @@ index d8a8b5e6..48a49d7a 100644
 +                kv->set_need_space_callback(params.kv_need_space_callback, params.kv_need_space_callback_data);
 +            }
 +        }
-+
-+        // Set KV cache tokens added callback if memory is a kv_cache
-+        if (params.kv_tokens_added_callback && memory) {
-+            auto * kv = dynamic_cast<llama_kv_cache*>(memory.get());
-+            if (kv) {
-+                kv->set_tokens_added_callback(params.kv_tokens_added_callback, params.kv_tokens_added_callback_data);
-+            }
-+        }
      }
  
      // init backends
-@@ -2289,6 +2306,10 @@ llama_context_params llama_context_default_params() {
+@@ -2289,6 +2298,8 @@ llama_context_params llama_context_default_params() {
          /*.type_v                      =*/ GGML_TYPE_F16,
          /*.abort_callback              =*/ nullptr,
          /*.abort_callback_data         =*/ nullptr,
 +        /*.kv_need_space_callback      =*/ nullptr,
 +        /*.kv_need_space_callback_data =*/ nullptr,
-+        /*.kv_tokens_added_callback      =*/ nullptr,
-+        /*.kv_tokens_added_callback_data =*/ nullptr,
          /*.embeddings                  =*/ false,
          /*.offload_kqv                 =*/ true,
          /*.no_perf                     =*/ true,
-diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 816f2d5d..d7b18a86 100644
---- a/src/llama-kv-cache.cpp
-+++ b/src/llama-kv-cache.cpp
-@@ -199,6 +199,16 @@ llama_kv_cache::llama_kv_cache(
-     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
- }
- 
-+void llama_kv_cache::set_need_space_callback(llama_kv_need_space_callback callback, void * user_data) {
-+    need_space_callback = callback;
-+    need_space_callback_data = user_data;
-+}
-+
-+void llama_kv_cache::set_tokens_added_callback(llama_kv_tokens_added_callback callback, void * user_data) {
-+    tokens_added_callback = callback;
-+    tokens_added_callback_data = user_data;
-+}
-+
- void llama_kv_cache::clear(bool data) {
-     for (uint32_t s = 0; s < n_stream; ++s) {
-         v_cells[s].reset();
-@@ -851,8 +861,15 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
-                 res.idxs[s].clear();
-             }
- 
-+            // Out of space - try callback before failing
-             if (n_tested >= cells.size()) {
--                //LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
-+                if (need_space_callback && !cont) {
-+                    // Call Shepherd to free space by removing old sequences
-+                    uint32_t new_head = need_space_callback(n_tokens, need_space_callback_data);
-+                    // Update head to start searching from the freed space
-+                    if (new_head < cells.size()) {
-+                        head_cur = new_head;
-+                        n_tested = 0;  // Reset search counter and continue from new head
-+                        continue;
-+                    }
-+                    // Note: If callback didn't free enough, we'll return empty below
-+                }
-+                // No space available (or callback didn't free enough)
-                 return { };
-             }
-         }
-@@ -931,6 +948,11 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
- 
-         head = sinfo.idxs[s].back() + 1;
-     }
-+
-+    // notify callback that tokens were added to KV cache
-+    if (tokens_added_callback) {
-+        tokens_added_callback(&ubatch, tokens_added_callback_data);
-+    }
- }
- 
- bool llama_kv_cache::get_can_shift() const {
-diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 85f0663d..a8fd5c5f 100644
---- a/src/llama-kv-cache.h
-+++ b/src/llama-kv-cache.h
-@@ -1,5 +1,7 @@
- #pragma once
- 
-+#include "llama.h"
-+
- #include "llama-batch.h"
- #include "llama-graph.h"
- #include "llama-kv-cells.h"
-@@ -151,6 +153,12 @@ public:
-     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
-     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
- 
-+    // Set callback for space allocation
-+    void set_need_space_callback(llama_kv_need_space_callback callback, void * user_data);
-+
-+    // Set callback for when tokens are added to KV cache
-+    void set_tokens_added_callback(llama_kv_tokens_added_callback callback, void * user_data);
-+
-     //
-     // preparation API
-     //
-@@ -268,6 +276,14 @@ private:
- 
-     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
-     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count);
-+
-+    // KV cache space callback
-+    llama_kv_need_space_callback need_space_callback = nullptr;
-+    void * need_space_callback_data = nullptr;
-+
-+    // KV cache tokens added callback
-+    llama_kv_tokens_added_callback tokens_added_callback = nullptr;
-+    void * tokens_added_callback_data = nullptr;
- };
- 
- class llama_kv_cache_context : public llama_memory_context_i {
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 index 816f2d5d..06dcdb0b 100644
 --- a/src/llama-kv-cache.cpp
@@ -191,18 +78,50 @@ index 816f2d5d..06dcdb0b 100644
  void llama_kv_cache::clear(bool data) {
      for (uint32_t s = 0; s < n_stream; ++s) {
          v_cells[s].reset();
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 85f0663d..cb1adfee 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include "llama.h"
++
+ #include "llama-batch.h"
+ #include "llama-graph.h"
+ #include "llama-kv-cells.h"
+@@ -151,6 +153,9 @@ public:
+     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
+     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+ 
++    // Set callback for space allocation
++    void set_need_space_callback(llama_kv_need_space_callback callback, void * user_data);
++
+     //
+     // preparation API
+     //
+@@ -268,6 +273,10 @@ private:
+ 
+     bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
+     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count);
++
++    // KV cache space callback
++    llama_kv_need_space_callback need_space_callback = nullptr;
++    void * need_space_callback_data = nullptr;
+ };
+ 
+ class llama_kv_cache_context : public llama_memory_context_i {
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
 index ffd9286e..72675624 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -2100,15 +2100,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
+@@ -2100,15 +2100,17 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
      if (cpu_dev == nullptr) {
          throw std::runtime_error(format("%s: no CPU backend found", __func__));
      }
 -    const int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
 +    // PATCH: Put FIRST layers on GPU (most critical), LAST layers on CPU
 +    // Original logic was backwards: put last layers on GPU, first on CPU
-+    const int i_gpu_start = 0;  // Always start GPU from layer 0
      const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, (int)n_layer + 1);
      auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
          const bool is_swa = il < (int) hparams.n_layer && hparams.is_swa(il);

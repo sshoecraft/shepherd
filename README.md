@@ -206,7 +206,7 @@ void monitor_kv_events() {
 - SQLite3
 - libcurl
 - nlohmann/json
-- Rust 1.65+ and Cargo (for building tokenizers library)
+- Rust 1.65+ and Cargo (only required for TensorRT backend)
 
 **Optional** (for local inference):
 - llama.cpp (included as submodule, requires CUDA Toolkit for GPU support)
@@ -216,41 +216,55 @@ void monitor_kv_events() {
 ### Build Instructions
 
 ```bash
-# 1. Clone repository with submodules
-git clone --recursive https://github.com/sshoecraft/shepherd.git
+# 1. Clone repository
+git clone https://github.com/sshoecraft/shepherd.git
 cd shepherd
 
-# 2. Build llama.cpp (if using llamacpp backend)
+# 2. Initialize submodules (llama.cpp and tokenizers)
+git submodule update --init --recursive
+
+# Alternative: Clone with submodules in one step
+# git clone --recursive https://github.com/sshoecraft/shepherd.git
+
+# 3. Build llama.cpp (if using llamacpp backend)
 cd llama.cpp
 
 # Apply Shepherd patches (KV cache eviction callbacks + layer assignment fix)
 git apply ../patches/llama.patch
 
-# Build llama.cpp with CUDA support
+# Build llama.cpp
 mkdir -p build && cd build
+
+# With NVIDIA GPU support (requires CUDA Toolkit)
 cmake .. -DGGML_CUDA=ON
+
+# Without GPU (CPU only)
+# cmake ..
+
 make -j$(nproc)
 cd ../..
 
-# 3. Build tokenizers library (Rust required)
+# 4. Build tokenizers library (ONLY needed for TensorRT backend)
+# Skip this step if you're only using llama.cpp backend
 cd tokenizers/tokenizers
 cargo build --release --features=capi
 cp target/release/libtokenizers_c.a ../../lib/
 cp target/release/libtokenizers_cpp.a ../../lib/
 cd ../..
 
-# 4. Build Shepherd
+# 5. Build Shepherd
 mkdir -p build && cd build
-cmake ..
+
+# For llama.cpp only (no TensorRT, no Rust needed):
+cmake .. -DENABLE_LLAMACPP=ON -DENABLE_TENSORRT=OFF
+
+# For TensorRT (requires tokenizers library built in step 4):
+# cmake .. -DENABLE_TENSORRT=ON -DENABLE_LLAMACPP=ON
+
 make -j$(nproc)
 
-# 5. Run
+# 6. Run
 ./shepherd --model /path/to/model.gguf
-```
-
-**Note**: If you cloned without `--recursive`, initialize submodules:
-```bash
-git submodule update --init --recursive
 ```
 
 ### CMake Options

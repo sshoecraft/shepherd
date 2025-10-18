@@ -432,13 +432,13 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
             auto j = json::parse(response);
 
             // Check if this is a list response with data array (vLLM/OpenAI format)
-            if (j.contains("data") && j["data"].is_array()) {
+            if (j.contains("data") && j["data"].is_array() && !j["data"].empty()) {
+                // First, try exact match by ID
                 for (const auto& model_obj : j["data"]) {
-                    // Match by id field
                     if (model_obj.contains("id") && model_obj["id"].get<std::string>() == model_name) {
-                        LOG_INFO("Found model in list: " + model_name);
+                        LOG_INFO("Found exact model match in list: " + model_name);
 
-                        // Try max_model_len (vLLM format)
+                        // Try max_model_len (vLLM/llama.cpp format)
                         if (model_obj.contains("max_model_len") && model_obj["max_model_len"].is_number()) {
                             size_t context_size = model_obj["max_model_len"].get<size_t>();
                             LOG_INFO("Parsed max_model_len from API: " + std::to_string(context_size));
@@ -460,7 +460,36 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                         }
                     }
                 }
-                LOG_INFO("Model " + model_name + " not found in /models list");
+
+                // No exact match found - use first available model (common for llama.cpp/single-model servers)
+                LOG_INFO("No exact match for '" + model_name + "', using first available model from list");
+                const auto& model_obj = j["data"][0];
+
+                std::string actual_model_id = model_obj.contains("id") ? model_obj["id"].get<std::string>() : "unknown";
+                LOG_INFO("Using model: " + actual_model_id);
+
+                // Try max_model_len (vLLM/llama.cpp format)
+                if (model_obj.contains("max_model_len") && model_obj["max_model_len"].is_number()) {
+                    size_t context_size = model_obj["max_model_len"].get<size_t>();
+                    LOG_INFO("Parsed max_model_len from API: " + std::to_string(context_size));
+                    return context_size;
+                }
+
+                // Try context_window (some OpenAI-compatible APIs)
+                if (model_obj.contains("context_window") && model_obj["context_window"].is_number()) {
+                    size_t context_size = model_obj["context_window"].get<size_t>();
+                    LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
+                    return context_size;
+                }
+
+                // Try context_length (official OpenAI format)
+                if (model_obj.contains("context_length") && model_obj["context_length"].is_number()) {
+                    size_t context_size = model_obj["context_length"].get<size_t>();
+                    LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
+                    return context_size;
+                }
+
+                LOG_INFO("Model found but no context size field detected");
             }
         } catch (const json::exception& e) {
             LOG_WARN("Failed to parse model list JSON: " + std::string(e.what()) + ", using fallbacks");

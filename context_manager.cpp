@@ -1,6 +1,6 @@
+#include "shepherd.h"
 #include "context_manager.h"
 #include "rag.h"
-#include "logger.h"
 #include <chrono>
 #include <filesystem>
 
@@ -38,7 +38,6 @@ void ContextManager::set_max_context_tokens(size_t max_tokens) {
 void ContextManager::add_message(const Message& message) {
     // In server mode, throw exception instead of evicting
     // Client is responsible for managing context window
-    extern bool g_server_mode;
     if (g_server_mode && needs_eviction(message.token_count)) {
         throw ContextManagerError(
             "Context limit exceeded in server mode: would need " +

@@ -1,8 +1,5 @@
+#include "../shepherd.h"
 #include "http_tools.h"
-#include "../logger.h"
-#include <iostream>
-#include <sstream>
-#include <vector>
 #include <map>
 
 // Simple HTTP client using curl command (for cross-platform compatibility)
@@ -63,7 +60,6 @@ public:
             curl_cmd += "\"" + url + "\"";
 
             // Debug output controlled by global flag
-            extern bool g_debug_mode;
             if (g_debug_mode) {
                 std::cout << "HTTPClient: Executing: " << curl_cmd << std::endl;
             }
@@ -141,7 +137,6 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
             result["error"] = response.error;
         }
 
-        extern bool g_debug_mode;
         if (g_debug_mode) {
             std::cout << "HTTPRequest: " << method << " " << url
                       << " -> " << response.status_code << std::endl;
@@ -188,7 +183,6 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
             result["error"] = response.error;
         }
 
-        extern bool g_debug_mode;
         if (g_debug_mode) {
             std::cout << "HTTPGet: " << url << " -> " << response.status_code << std::endl;
         }
@@ -237,7 +231,6 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
             result["error"] = response.error;
         }
 
-        extern bool g_debug_mode;
         if (g_debug_mode) {
             std::cout << "HTTPPost: " << url << " -> " << response.status_code << std::endl;
         }

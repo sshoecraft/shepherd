@@ -1,5 +1,5 @@
+#include "../shepherd.h"
 #include "llamacpp.h"
-#include "../logger.h"
 #include "../tools/tool.h"
 #include "../tools/tool_parser.h"
 #include "../nlohmann/json.hpp"
@@ -8,9 +8,6 @@
 #include "../model_manager.h"
 #include <sstream>
 #include <fstream>
-#include <vector>
-#include <iostream>
-#include <iomanip>
 #include <regex>
 #include <ctime>
 
@@ -446,7 +443,6 @@ bool LlamaCppBackend::initialize(const std::string& model_path, const std::strin
     model_path_ = model_path;
 
     // Suppress llama.cpp logging unless in debug mode (but always show errors)
-    extern bool g_debug_mode;
     if (!g_debug_mode) {
         llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
             // Only show ERROR messages (suppress INFO and WARN unless debug enabled)
@@ -859,7 +855,6 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 
     // In server mode, throw exception instead of evicting
     // Client is responsible for managing context window
-    extern bool g_server_mode;
     if (g_server_mode) {
         LOG_ERROR("KV cache full in server mode - throwing ContextFullException");
         throw ContextFullException("Context limit exceeded (" + std::to_string(tokens_needed) + " tokens needed)");
@@ -1046,7 +1041,6 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     // We just need to run the generation loop now
 
     // In debug mode, show what's in the KV cache
-    extern bool g_debug_mode;
     if (g_debug_mode) {
         LOG_DEBUG("=== MESSAGES IN KV CACHE ===");
         char line[128];
@@ -1406,7 +1400,6 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     std::string rendered_msg = llama_ctx_mgr->render_single_message(msg, false);
 
     // In debug mode, show the rendered message being sent to the model
-    extern bool g_debug_mode;
     if (g_debug_mode) {
         LOG_DEBUG("=== MESSAGE TO DECODE ===");
         LOG_DEBUG(rendered_msg);

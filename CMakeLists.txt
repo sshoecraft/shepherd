@@ -217,6 +217,16 @@ if(ENABLE_TENSORRT)
     )
 endif()
 
+# cpp-tiktoken for OpenAI tokenization
+if(ENABLE_API_BACKENDS)
+    set(CPP_TIKTOKEN_DIR "${CMAKE_SOURCE_DIR}/cpp-tiktoken")
+    target_include_directories(shepherd PRIVATE ${CPP_TIKTOKEN_DIR})
+    target_link_libraries(shepherd PRIVATE
+        ${CPP_TIKTOKEN_DIR}/build/libtiktoken.a
+        ${CPP_TIKTOKEN_DIR}/build/pcre2/libpcre2-8.a
+    )
+endif()
+
 # Compile definitions
 if(ENABLE_API_BACKENDS)
     target_compile_definitions(shepherd PRIVATE ENABLE_API_BACKENDS)

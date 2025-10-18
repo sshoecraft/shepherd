@@ -60,6 +60,9 @@ void get_global_args(int& argc, char**& argv) {
 // Global debug flag
 bool g_debug_mode = false;
 
+// Global server mode flag (accessed by context_manager and backends)
+bool g_server_mode = false;
+
 // Get input line with readline support if available
 // Global flag to track EOF from readline
 bool g_eof_received = false;
@@ -968,6 +971,7 @@ int main(int argc, char** argv) {
                 break;
             case 1015: // --server
                 server_mode = true;
+                g_server_mode = true;
                 break;
             case 1016: // --port
                 server_port = std::atoi(optarg);

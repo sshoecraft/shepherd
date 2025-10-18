@@ -1,5 +1,5 @@
+#include "../shepherd.h"
 #include "tensorrt.h"
-#include "../logger.h"
 #include "../tools/tool.h"
 #include "../minja.hpp"
 #include "../nlohmann/json.hpp"
@@ -696,7 +696,6 @@ std::string TensorRTBackend::generate(int max_tokens) {
         std::string prompt_text = context_manager_->get_context_for_inference();
 
         // Always show full prompt in debug mode - user needs to see exactly what's being sent
-        extern bool g_debug_mode;
         if (g_debug_mode) {
             LOG_DEBUG("========== PROMPT BEING SENT TO MODEL ==========");
             LOG_DEBUG(prompt_text);

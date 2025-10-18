@@ -1,0 +1,14 @@
+[Unit]
+Description=Shepherd LLM Server
+After=network.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKING_DIR@
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/shepherd --server
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

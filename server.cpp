@@ -58,11 +58,15 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
 
         // Check if script exists
         if (!std::filesystem::exists(script_path)) {
-            // Try relative path (for development)
-            script_path = "./server/api_server.py";
+            // Try installed location (e.g., /usr/local/share/shepherd/server/)
+            script_path = exe_path + "/../share/shepherd/server/api_server.py";
             if (!std::filesystem::exists(script_path)) {
-                fprintf(stderr, "Error: Could not find server/api_server.py\n");
-                exit(1);
+                // Try relative path (for development)
+                script_path = "./server/api_server.py";
+                if (!std::filesystem::exists(script_path)) {
+                    fprintf(stderr, "Error: Could not find server/api_server.py\n");
+                    exit(1);
+                }
             }
         }
 

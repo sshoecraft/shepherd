@@ -276,10 +276,36 @@ message(STATUS "  TensorRT backend: ${ENABLE_TENSORRT}")
 message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
 
+# Install targets
+install(TARGETS shepherd
+        RUNTIME DESTINATION bin)
+
 # Install server directory for HTTP API mode
 install(DIRECTORY server/
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/server
+        DESTINATION share/shepherd/server
         FILES_MATCHING
         PATTERN "*.py"
         PATTERN "*.txt"
         PATTERN "*.md")
+
+# Install systemd service file template
+# Get current user for service file
+execute_process(COMMAND whoami OUTPUT_VARIABLE USER OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(WORKING_DIR ${CMAKE_SOURCE_DIR})
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/shepherd.service.in
+               ${CMAKE_CURRENT_BINARY_DIR}/shepherd.service
+               @ONLY)
+
+# Install systemd service file and reload systemd
+if(EXISTS "/etc/systemd/system")
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/shepherd.service
+            DESTINATION /etc/systemd/system)
+
+    # Run systemctl daemon-reload after installing service file
+    install(CODE "execute_process(COMMAND systemctl daemon-reload)")
+
+    message(STATUS "After installation, run:")
+    message(STATUS "  sudo systemctl enable shepherd")
+    message(STATUS "  sudo systemctl restart shepherd")
+endif()

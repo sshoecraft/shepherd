@@ -4,6 +4,3 @@
 [submodule "tokenizers"]
 	path = tokenizers
 	url = https://github.com/huggingface/tokenizers.git
-[submodule "cpp-tiktoken"]
-	path = cpp-tiktoken
-	url = https://github.com/gh-markt/cpp-tiktoken.git

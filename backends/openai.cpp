@@ -1,103 +1,15 @@
 #include "openai.h"
 #include "../logger.h"
 #include "../nlohmann/json.hpp"
-#include "../cpp-tiktoken/encoding.h"
 #include <sstream>
 #include <algorithm>
 
 using json = nlohmann::json;
 
-// OpenAITokenizer implementation
-OpenAITokenizer::OpenAITokenizer(const std::string& model_name)
-    : model_name_(model_name) {
-    initialize_encoding();
-    LOG_DEBUG("OpenAI tokenizer initialized for model: " + model_name);
-}
-
-void OpenAITokenizer::initialize_encoding() {
-    // Map OpenAI model names to tiktoken LanguageModel enum
-    LanguageModel tiktoken_model;
-
-    // GPT-4o models use o200k_base
-    if (model_name_.find("gpt-4o") != std::string::npos) {
-        tiktoken_model = LanguageModel::O200K_BASE;
-    }
-    // GPT-4 and GPT-3.5 models use cl100k_base
-    else if (model_name_.find("gpt-4") != std::string::npos ||
-             model_name_.find("gpt-3.5") != std::string::npos) {
-        tiktoken_model = LanguageModel::CL100K_BASE;
-    }
-    // Codex models use p50k_base
-    else if (model_name_.find("code") != std::string::npos) {
-        tiktoken_model = LanguageModel::P50K_BASE;
-    }
-    // Default to cl100k_base for unknown models (most modern OpenAI models use this)
-    else {
-        LOG_WARN("Unknown OpenAI model '" + model_name_ + "', defaulting to cl100k_base encoding");
-        tiktoken_model = LanguageModel::CL100K_BASE;
-    }
-
-    try {
-        encoding_ = GptEncoding::get_encoding(tiktoken_model);
-        LOG_DEBUG("Tiktoken encoding initialized successfully");
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to initialize tiktoken encoding: " + std::string(e.what()));
-        encoding_ = nullptr;
-    }
-}
-
-int OpenAITokenizer::count_tokens(const std::string& text) {
-    if (!encoding_) {
-        LOG_WARN("Tiktoken encoding not initialized, using approximation");
-        return static_cast<int>(text.length() / 4.0 + 0.5);
-    }
-
-    try {
-        std::vector<int> tokens = encoding_->encode(text);
-        return static_cast<int>(tokens.size());
-    } catch (const std::exception& e) {
-        LOG_ERROR("Tiktoken encoding failed: " + std::string(e.what()));
-        return static_cast<int>(text.length() / 4.0 + 0.5);
-    }
-}
-
-std::vector<int> OpenAITokenizer::encode(const std::string& text) {
-    if (!encoding_) {
-        LOG_WARN("Tiktoken encoding not initialized, returning empty vector");
-        return {};
-    }
-
-    try {
-        return encoding_->encode(text);
-    } catch (const std::exception& e) {
-        LOG_ERROR("Tiktoken encoding failed: " + std::string(e.what()));
-        return {};
-    }
-}
-
-std::string OpenAITokenizer::decode(const std::vector<int>& tokens) {
-    if (!encoding_) {
-        LOG_WARN("Tiktoken encoding not initialized, cannot decode");
-        return "";
-    }
-
-    try {
-        return encoding_->decode(tokens);
-    } catch (const std::exception& e) {
-        LOG_ERROR("Tiktoken decoding failed: " + std::string(e.what()));
-        return "";
-    }
-}
-
-std::string OpenAITokenizer::get_tokenizer_name() const {
-    return "tiktoken-" + model_name_;
-}
-
 // OpenAIBackend implementation
 OpenAIBackend::OpenAIBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
     // Don't create context manager yet - wait until model is loaded to get actual context size
-    tokenizer_ = std::make_unique<OpenAITokenizer>("gpt-4"); // Default model
     LOG_DEBUG("OpenAIBackend created");
 }
 
@@ -133,9 +45,6 @@ bool OpenAIBackend::initialize(const std::string& model_name, const std::string&
 
     model_name_ = model_name.empty() ? "gpt-4" : model_name;
     api_key_ = api_key;
-
-    // Update tokenizer with correct model name
-    tokenizer_ = std::make_unique<OpenAITokenizer>(model_name_);
 
     // Only query model's context size if not explicitly set (max_context_size_ == 0 means auto)
     if (max_context_size_ == 0) {

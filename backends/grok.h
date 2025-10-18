@@ -7,21 +7,6 @@
 #include <memory>
 #endif
 
-/// @brief Grok-specific tokenizer using tiktoken library (OpenAI-compatible)
-class GrokTokenizer : public Tokenizer {
-public:
-    explicit GrokTokenizer(const std::string& model_name = "grok-1");
-
-    int count_tokens(const std::string& text) override;
-    std::vector<int> encode(const std::string& text) override;
-    std::string decode(const std::vector<int>& tokens) override;
-    std::string get_tokenizer_name() const override;
-
-private:
-    std::string model_name_;
-    // tiktoken implementation will be added when library is integrated (same as OpenAI)
-};
-
 /// @brief Backend manager for xAI Grok API (OpenAI-compatible)
 class GrokBackend : public ApiBackend {
 public:

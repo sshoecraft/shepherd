@@ -6,41 +6,10 @@
 
 using json = nlohmann::json;
 
-// GrokTokenizer implementation
-GrokTokenizer::GrokTokenizer(const std::string& model_name)
-    : model_name_(model_name) {
-    LOG_DEBUG("Grok tokenizer initialized for model: " + model_name);
-}
-
-int GrokTokenizer::count_tokens(const std::string& text) {
-    // TODO: Integrate tiktoken library for accurate token counting (same as OpenAI)
-    // For now, use the same approximation as OpenAI
-    return static_cast<int>(text.length() / 4.0 + 0.5);
-}
-
-std::vector<int> GrokTokenizer::encode(const std::string& text) {
-    // TODO: Implement tiktoken encoding (same as OpenAI)
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
-    }
-    return tokens;
-}
-
-std::string GrokTokenizer::decode(const std::vector<int>& tokens) {
-    // TODO: Implement tiktoken decoding (same as OpenAI)
-    return "TODO: Implement tiktoken decode";
-}
-
-std::string GrokTokenizer::get_tokenizer_name() const {
-    return "tiktoken-" + model_name_;
-}
-
 // GrokBackend implementation
 GrokBackend::GrokBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
     // Don't create context manager yet - wait until model is loaded to get actual context size
-    tokenizer_ = std::make_unique<GrokTokenizer>("grok-1"); // Default model
     LOG_DEBUG("GrokBackend created");
 }
 
@@ -62,9 +31,6 @@ bool GrokBackend::initialize(const std::string& model_name, const std::string& a
 
     model_name_ = model_name.empty() ? "grok-1" : model_name;
     api_key_ = api_key;
-
-    // Update tokenizer with correct model name
-    tokenizer_ = std::make_unique<GrokTokenizer>(model_name_);
 
     // Initialize curl
     curl_global_init(CURL_GLOBAL_DEFAULT);

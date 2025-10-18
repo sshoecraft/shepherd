@@ -46,6 +46,10 @@ void Config::set_defaults() {
     // GPU layers (for llamacpp backend with GPU support)
     gpu_layers_ = -1;  // -1 = auto (load all layers to GPU), 0 = CPU only, >0 = specific number
 
+    // Multi-GPU settings (for llamacpp backend)
+    tensor_parallel_ = 0;   // 0 = auto (use all available GPUs), >0 = specific number of GPUs
+    pipeline_parallel_ = 0; // 0 = auto, 1 = disabled, >1 = number of stages
+
     // Tool result truncation (enabled by default)
     truncate_tool_results_ = true;
 }
@@ -216,6 +220,16 @@ void Config::load() {
         }
         if (config_json.contains("gpu_layers")) {
             gpu_layers_ = config_json["gpu_layers"].get<int>();
+        }
+        if (config_json.contains("tensor_parallel")) {
+            tensor_parallel_ = config_json["tensor_parallel"].get<int>();
+        } else if (config_json.contains("tp")) {
+            tensor_parallel_ = config_json["tp"].get<int>();
+        }
+        if (config_json.contains("pipeline_parallel")) {
+            pipeline_parallel_ = config_json["pipeline_parallel"].get<int>();
+        } else if (config_json.contains("pp")) {
+            pipeline_parallel_ = config_json["pp"].get<int>();
         }
         if (config_json.contains("truncate")) {
             truncate_tool_results_ = config_json["truncate"].get<bool>();

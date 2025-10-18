@@ -463,8 +463,8 @@ bool LlamaCppBackend::initialize(const std::string& model_path, const std::strin
     extern bool g_debug_mode;
     if (!g_debug_mode) {
         llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
-            // Always show ERROR and WARN messages
-            if (level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_WARN) {
+            // Only show ERROR messages (suppress INFO and WARN unless debug enabled)
+            if (level == GGML_LOG_LEVEL_ERROR) {
                 fprintf(stderr, "%s", text);
             }
         }, nullptr);
@@ -498,12 +498,64 @@ bool LlamaCppBackend::initialize(const std::string& model_path, const std::strin
             LOG_INFO("Auto GPU layers (loading all layers to GPU)");
         }
 
-        // Multi-GPU support: split layers across GPUs
-        // LAYER mode distributes layers evenly across available GPUs
-        model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
-        model_params.main_gpu = 0;  // Primary GPU for single-GPU ops
+        // Multi-GPU support: Use tensor_parallel_ config to control GPU usage
+        if (tensor_parallel_ == 0 || tensor_parallel_ > 1) {
+            // TP=0 (auto) or TP>1: Use multiple GPUs with LAYER split mode
+            model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+            model_params.main_gpu = 0;
 
-        LOG_INFO("GPU detected, offloading all layers to GPU with multi-GPU layer splitting enabled");
+            // Configure tensor_split array to distribute model across GPUs
+            // Array must be 128 elements (llama_max_devices), with 0.0f for unused GPUs
+            // Non-zero values indicate proportion for each GPU (e.g., [1.0, 1.0, 0, 0, ...] for 2 GPUs)
+            int num_gpus = tensor_parallel_ > 0 ? tensor_parallel_ : 16;  // Max 16 GPUs if auto
+            tensor_split_.resize(128, 0.0f);  // Initialize all to 0 (unused)
+            for (int i = 0; i < num_gpus && i < 128; i++) {
+                tensor_split_[i] = 1.0f;  // Equal proportion for each GPU
+            }
+            model_params.tensor_split = tensor_split_.data();
+
+            // Configure devices array to tell llama.cpp which GPUs to actually use
+            // NULL-terminated array of device pointers
+            // IMPORTANT: Only include CUDA devices, skip CPU backends
+            size_t dev_count = ggml_backend_dev_count();
+            gpu_devices_.clear();
+            for (size_t i = 0; i < dev_count && (int)gpu_devices_.size() < num_gpus; i++) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                if (dev) {
+                    const char* dev_name = ggml_backend_dev_name(dev);
+                    // Only include CUDA devices (skip CPU, Metal, etc if we want CUDA only)
+                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                        gpu_devices_.push_back(static_cast<void*>(dev));
+                        LOG_DEBUG("Added device " + std::to_string(i) + ": " + std::string(dev_name));
+                    }
+                }
+            }
+            gpu_devices_.push_back(nullptr);  // NULL terminator
+            model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices_.data());
+
+            LOG_INFO("Configured " + std::to_string(gpu_devices_.size() - 1) + " devices for multi-GPU");
+
+            // Debug: Log what we're actually setting
+            LOG_INFO("model_params.devices = " + std::string(model_params.devices ? "SET" : "NULL"));
+            LOG_INFO("model_params.tensor_split[0] = " + std::to_string(model_params.tensor_split[0]));
+            LOG_INFO("model_params.tensor_split[1] = " + std::to_string(model_params.tensor_split[1]));
+            LOG_INFO("model_params.split_mode = " + std::to_string((int)model_params.split_mode));
+
+            if (tensor_parallel_ == 0) {
+                LOG_INFO("Tensor parallelism: AUTO (using all available GPUs with LAYER splitting)");
+            } else {
+                LOG_INFO("Tensor parallelism: TP=" + std::to_string(tensor_parallel_) + " GPUs with LAYER split mode");
+                LOG_INFO("Tensor split configured: " + std::to_string(num_gpus) + " GPUs with equal proportions");
+            }
+        } else {
+            // TP=1: Single GPU only, no splitting
+            model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
+            model_params.main_gpu = 0;
+            model_params.tensor_split = nullptr;  // No splitting
+            LOG_INFO("Tensor parallelism: TP=1 (single GPU, no splitting)");
+        }
+
+        LOG_INFO("GPU detected, offloading layers to GPU (n_gpu_layers=" + std::to_string(model_params.n_gpu_layers) + ")");
     } else {
         model_params.n_gpu_layers = 0;
         LOG_INFO("GPU not available, using CPU only");
@@ -564,6 +616,7 @@ bool LlamaCppBackend::initialize(const std::string& model_path, const std::strin
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = static_cast<uint32_t>(actual_context_size);
     ctx_params.n_batch = static_cast<uint32_t>(n_batch_);
+    ctx_params.offload_kqv = has_gpu;  // Offload KV cache to GPU when available
 
     // Set KV cache space callback for interrupt-driven eviction
     ctx_params.kv_need_space_callback = [](uint32_t tokens_needed, void* user_data) -> uint32_t {

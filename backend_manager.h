@@ -130,6 +130,27 @@ public:
         // Default: no-op for backends that don't support configurable penalties
     }
 
+    /// @brief Set tensor parallelism (for backends that support it)
+    /// @param tp Number of GPUs to use (0 = auto/all, 1 = single GPU, >1 = specific count)
+    /// Default implementation does nothing (API backends don't support this)
+    virtual void set_tensor_parallel(int tp) {
+        // Default: no-op for backends that don't support multi-GPU
+    }
+
+    /// @brief Set pipeline parallelism (for backends that support it)
+    /// @param pp Number of pipeline stages (0 = auto, 1 = disabled, >1 = stages)
+    /// Default implementation does nothing (API backends don't support this)
+    virtual void set_pipeline_parallel(int pp) {
+        // Default: no-op for backends that don't support pipeline parallelism
+    }
+
+    /// @brief Set number of GPU layers to offload (for backends that support it)
+    /// @param gpu_layers Number of model layers to offload to GPU (-1 = auto/all, 0 = CPU only, >0 = specific count)
+    /// Default implementation does nothing (API backends don't support this)
+    virtual void set_gpu_layers(int gpu_layers) {
+        // Default: no-op for backends that don't support GPU layer offloading
+    }
+
 protected:
     /// @brief Each backend implements its own context manager
     std::unique_ptr<ContextManager> context_manager_;

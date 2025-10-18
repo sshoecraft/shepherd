@@ -144,6 +144,16 @@ public:
         gpu_layers_ = gpu_layers;
     }
 
+    // Set tensor parallelism before initialization (0 = auto/all GPUs, >0 = specific GPU count)
+    void set_tensor_parallel(int tp) {
+        tensor_parallel_ = tp;
+    }
+
+    // Set pipeline parallelism before initialization (0 = auto, 1 = disabled, >1 = stages)
+    void set_pipeline_parallel(int pp) {
+        pipeline_parallel_ = pp;
+    }
+
 private:
     /// @brief Run inference using llama.cpp
     /// @param prompt_text The text to generate from
@@ -202,6 +212,12 @@ private:
 
     // GPU offload configuration
     int gpu_layers_ = -1;  // -1 = auto/all, 0 = CPU only, >0 = specific layer count
+    int tensor_parallel_ = 0;  // 0 = auto/all GPUs, >0 = specific GPU count for tensor parallelism
+    int pipeline_parallel_ = 0;  // 0 = auto, 1 = disabled, >1 = number of pipeline stages
+
+    // Multi-GPU configuration (must persist for lifetime of model_params)
+    std::vector<float> tensor_split_;  // Proportion for each GPU (e.g., [1.0, 1.0] for even split across 2 GPUs)
+    std::vector<void*> gpu_devices_;  // Device pointers (ggml_backend_dev_t*) for multi-GPU (NULL-terminated)
 
     // Server mode flag - suppresses all streaming output
     bool server_mode_ = false;

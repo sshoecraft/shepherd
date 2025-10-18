@@ -206,26 +206,51 @@ void monitor_kv_events() {
 - SQLite3
 - libcurl
 - nlohmann/json
+- Rust 1.65+ and Cargo (for building tokenizers library)
 
 **Optional** (for local inference):
-- llama.cpp (for CPU/GPU inference)
+- llama.cpp (included as submodule, requires CUDA Toolkit for GPU support)
 - TensorRT-LLM (for NVIDIA GPU optimization)
-- CUDA Toolkit 11.8+ (for GPU support)
+- CUDA Toolkit 11.8+ (for GPU support in llama.cpp backend)
 
 ### Build Instructions
 
 ```bash
-# Clone repository
-git clone https://github.com/sshoecraft/shepherd.git
+# 1. Clone repository with submodules
+git clone --recursive https://github.com/sshoecraft/shepherd.git
 cd shepherd
 
-# Build with CMake
-mkdir build && cd build
+# 2. Build llama.cpp (if using llamacpp backend)
+cd llama.cpp
+
+# Apply Shepherd patches (KV cache eviction callbacks + layer assignment fix)
+git apply ../patches/llama.patch
+
+# Build llama.cpp with CUDA support
+mkdir -p build && cd build
+cmake .. -DGGML_CUDA=ON
+make -j$(nproc)
+cd ../..
+
+# 3. Build tokenizers library (Rust required)
+cd tokenizers/tokenizers
+cargo build --release --features=capi
+cp target/release/libtokenizers_c.a ../../lib/
+cp target/release/libtokenizers_cpp.a ../../lib/
+cd ../..
+
+# 4. Build Shepherd
+mkdir -p build && cd build
 cmake ..
 make -j$(nproc)
 
-# Run
-./shepherd
+# 5. Run
+./shepherd --model /path/to/model.gguf
+```
+
+**Note**: If you cloned without `--recursive`, initialize submodules:
+```bash
+git submodule update --init --recursive
 ```
 
 ### CMake Options

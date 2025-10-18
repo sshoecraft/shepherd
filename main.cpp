@@ -17,6 +17,7 @@
 #include "backends/api_backend.h"
 #endif
 
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -311,6 +312,9 @@ static void print_usage(int, char** argv) {
     printf("    --penalty-freq     Frequency penalty >= 0.0 (default: 0.1, local backends)\n");
     printf("    --penalty-present  Presence penalty >= 0.0 (default: 0.0, local backends)\n");
     printf("    --penalty-last-n   Penalty window size (default: 64, 0=disabled, local backends)\n");
+    printf("    --gpu-layers N     Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, local backends)\n");
+    printf("    --tp N             Tensor parallelism: number of GPUs (0=auto/all, local backends)\n");
+    printf("    --pp N             Pipeline parallelism: number of stages (0=auto, 1=disabled, local backends)\n");
     printf("    --server           Start HTTP API server mode (OpenAI-compatible)\n");
     printf("    --port PORT        Server port (default: 8080, requires --server)\n");
     printf("    --host HOST        Server host to bind to (default: 0.0.0.0, requires --server)\n");
@@ -822,6 +826,9 @@ int main(int argc, char** argv) {
     float penalty_freq_override = -1.0f;
     float penalty_present_override = -1.0f;
     int penalty_last_n_override = -1;
+    int tp_override = -1;  // -1 means not specified
+    int pp_override = -1;  // -1 means not specified
+    int gpu_layers_override = -1;  // -1 means not specified
 
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
@@ -848,6 +855,9 @@ int main(int argc, char** argv) {
         {"port", required_argument, 0, 1016},
         {"host", required_argument, 0, 1017},
         {"no-truncate", no_argument, 0, 1019},
+        {"tp", required_argument, 0, 1020},
+        {"pp", required_argument, 0, 1021},
+        {"gpu-layers", required_argument, 0, 1022},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -972,6 +982,27 @@ int main(int argc, char** argv) {
             case 1019: // --no-truncate
                 no_truncate = true;
                 break;
+            case 1020: // --tp
+                tp_override = std::atoi(optarg);
+                if (tp_override < 0) {
+                    printf("Error: tp must be >= 0 (0 = auto/all GPUs)\n");
+                    return 1;
+                }
+                break;
+            case 1021: // --pp
+                pp_override = std::atoi(optarg);
+                if (pp_override < 0) {
+                    printf("Error: pp must be >= 0 (0 = auto, 1 = disabled)\n");
+                    return 1;
+                }
+                break;
+            case 1022: // --gpu-layers
+                gpu_layers_override = std::atoi(optarg);
+                if (gpu_layers_override < -1) {
+                    printf("Error: gpu-layers must be >= -1 (-1 = auto/all layers, 0 = CPU only, >0 = specific count)\n");
+                    return 1;
+                }
+                break;
             case 'h':
                 print_usage(argc, argv);
                 return 0;
@@ -1026,6 +1057,15 @@ int main(int argc, char** argv) {
     }
     if (no_truncate) {
         config.set_truncate_tool_results(false);
+    }
+    if (tp_override >= 0) {  // -1 means not set, 0+ are valid values
+        config.set_tensor_parallel(tp_override);
+    }
+    if (pp_override >= 0) {  // -1 means not set, 0+ are valid values
+        config.set_pipeline_parallel(pp_override);
+    }
+    if (gpu_layers_override >= -1) {  // -1 is a valid value (auto), < -1 means not set
+        config.set_gpu_layers(gpu_layers_override);
     }
 
     // Validate configuration (skip model path check if overridden)
@@ -1190,11 +1230,20 @@ int main(int argc, char** argv) {
         // Initialize backend with appropriate credentials
         bool init_success = false;
         if (config.get_backend() == "llamacpp" || config.get_backend() == "tensorrt") {
-            // Set GPU layers via environment variable (will be read by llamacpp backend during init)
-            if (config.get_backend() == "llamacpp" && config.get_gpu_layers() >= 0) {
-                setenv("GGML_N_GPU_LAYERS", std::to_string(config.get_gpu_layers()).c_str(), 0); // 0 = don't overwrite if already set
+            // Set GPU layers directly in backend (will be read during init)
+            if (config.get_gpu_layers() >= -1) {
+                backend->set_gpu_layers(config.get_gpu_layers());
                 LOG_INFO("Setting GPU layers from config: " + std::to_string(config.get_gpu_layers()));
             }
+
+            // Set tensor parallelism and pipeline parallelism (for backends that support it)
+            backend->set_tensor_parallel(config.get_tensor_parallel());
+            backend->set_pipeline_parallel(config.get_pipeline_parallel());
+            if (config.get_tensor_parallel() != 0 || config.get_pipeline_parallel() != 0) {
+                LOG_INFO("Multi-GPU config: TP=" + std::to_string(config.get_tensor_parallel()) +
+                         ", PP=" + std::to_string(config.get_pipeline_parallel()));
+            }
+
             init_success = backend->initialize(model_path, "", template_override);
         } else if (config.get_backend() == "openai" || config.get_backend() == "anthropic") {
             // Set API base if specified (for OpenAI-compatible APIs)

@@ -175,3 +175,45 @@ index 85f0663d..a8fd5c5f 100644
  };
  
  class llama_kv_cache_context : public llama_memory_context_i {
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 816f2d5d..06dcdb0b 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -199,6 +199,11 @@ llama_kv_cache::llama_kv_cache(
+     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+ }
+ 
++void llama_kv_cache::set_need_space_callback(llama_kv_need_space_callback callback, void * user_data) {
++    need_space_callback = callback;
++    need_space_callback_data = user_data;
++}
++
+ void llama_kv_cache::clear(bool data) {
+     for (uint32_t s = 0; s < n_stream; ++s) {
+         v_cells[s].reset();
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index ffd9286e..72675624 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -2100,15 +2100,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
+     if (cpu_dev == nullptr) {
+         throw std::runtime_error(format("%s: no CPU backend found", __func__));
+     }
+-    const int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
++    // PATCH: Put FIRST layers on GPU (most critical), LAST layers on CPU
++    // Original logic was backwards: put last layers on GPU, first on CPU
++    const int i_gpu_start = 0;  // Always start GPU from layer 0
+     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, (int)n_layer + 1);
+     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
+         const bool is_swa = il < (int) hparams.n_layer && hparams.is_swa(il);
+-        if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
++        // Assign layers 0 to (act_gpu_layers-1) to GPU, rest to CPU
++        if (il >= act_gpu_layers) {
+             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
+             return {cpu_dev, &pimpl->cpu_buft_list};
+         }
+-        const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
++        const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il)/act_gpu_layers) - splits.begin();
+         auto * dev = devices.at(layer_gpu);
+         LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
+         return {dev, &pimpl->gpu_buft_list.at(dev)};

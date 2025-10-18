@@ -54,6 +54,7 @@ class ModelInfo(BaseModel):
     object: str = "model"
     created: int
     owned_by: str = "shepherd"
+    max_model_len: Optional[int] = None
 
 
 class ModelsResponse(BaseModel):
@@ -190,7 +191,8 @@ async def list_models():
     model_data = [
         ModelInfo(
             id=model.get("id", "unknown"),
-            created=int(time.time())
+            created=int(time.time()),
+            max_model_len=model.get("max_model_len")
         )
         for model in models
     ]

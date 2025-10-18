@@ -239,7 +239,8 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
                 response["models"] = json::array();
                 response["models"].push_back({
                     {"id", backend->get_model_name()},
-                    {"backend", backend->get_backend_name()}
+                    {"backend", backend->get_backend_name()},
+                    {"max_model_len", backend->get_max_context_size()}
                 });
 
             } else if (request["action"] == "get_model_info") {

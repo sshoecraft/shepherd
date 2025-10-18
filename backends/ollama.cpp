@@ -1,5 +1,6 @@
 #include "ollama.h"
 #include "../logger.h"
+#include "../shepherd.h"
 #include "../nlohmann/json.hpp"
 #include "../tools/tool.h"
 #include <sstream>
@@ -89,6 +90,10 @@ bool OllamaBackend::initialize(const std::string& model_name, const std::string&
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
     LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
 
+    // Ollama silently truncates - always use proactive eviction
+    auto_evict_ = true;
+    LOG_DEBUG("Ollama backend: auto_evict enabled (API does not return context errors)");
+
     LOG_INFO("OllamaBackend initialized with model: " + model_name_);
     initialized_ = true;
     return true;
@@ -100,6 +105,25 @@ std::string OllamaBackend::generate(int max_tokens) {
     }
 
     LOG_DEBUG("Ollama generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
+
+    // Proactive eviction for Ollama (since Ollama silently truncates instead of returning errors)
+    int estimated_tokens = estimate_context_tokens();
+    LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
+
+    if (estimated_tokens > static_cast<int>(max_context_size_)) {
+        if (g_server_mode) {
+            // Server mode: throw exception, let client handle it
+            throw ContextManagerError(
+                "Context limit exceeded: estimated " +
+                std::to_string(estimated_tokens) + " tokens but limit is " +
+                std::to_string(max_context_size_) + " tokens. Client must manage context window.");
+        } else {
+            // CLI mode: proactively evict to make room
+            LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
+                     " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
+            context_manager_->evict_oldest_messages();
+        }
+    }
 
     // Build API request JSON directly from messages
     json request;

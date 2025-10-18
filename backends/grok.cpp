@@ -1,5 +1,6 @@
 #include "grok.h"
 #include "../logger.h"
+#include "../shepherd.h"
 #include "../nlohmann/json.hpp"
 #include <sstream>
 #include <algorithm>
@@ -54,6 +55,10 @@ bool GrokBackend::initialize(const std::string& model_name, const std::string& a
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
     LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
 
+    // Grok silently truncates - always use proactive eviction
+    auto_evict_ = true;
+    LOG_DEBUG("Grok backend: auto_evict enabled (API does not return context errors)");
+
     LOG_INFO("GrokBackend initialized with model: " + model_name_);
     initialized_ = true;
     return true;
@@ -68,9 +73,29 @@ std::string GrokBackend::generate(int max_tokens) {
         throw BackendManagerError("Grok backend not initialized");
     }
 
+    LOG_DEBUG("Grok generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
+
+    // Proactive eviction for Grok (since Grok silently truncates instead of returning errors)
+    int estimated_tokens = estimate_context_tokens();
+    LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
+
+    if (estimated_tokens > static_cast<int>(max_context_size_)) {
+        if (g_server_mode) {
+            // Server mode: throw exception, let client handle it
+            throw ContextManagerError(
+                "Context limit exceeded: estimated " +
+                std::to_string(estimated_tokens) + " tokens but limit is " +
+                std::to_string(max_context_size_) + " tokens. Client must manage context window.");
+        } else {
+            // CLI mode: proactively evict to make room
+            LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
+                     " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
+            context_manager_->evict_oldest_messages();
+        }
+    }
+
     // Get current context for API call
     std::string context_json = context_manager_->get_context_for_inference();
-    LOG_DEBUG("Grok generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
 
     // TODO: Implement actual Grok API call
     std::string response = "Grok skeleton response";
@@ -166,6 +191,7 @@ std::string GrokBackend::parse_grok_response(const std::string& response_json) {
     // Extract choices[0].message.content
     return "TODO: Parse response";
 }
+
 std::string GrokBackend::generate_from_session(const SessionContext& session, int max_tokens) {
     if (!is_ready()) {
         throw BackendManagerError("Grok backend not initialized");

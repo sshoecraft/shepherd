@@ -1,5 +1,6 @@
 #include "anthropic.h"
 #include "../logger.h"
+#include "../shepherd.h"
 #include "../nlohmann/json.hpp"
 #include "../tools/tool.h"
 #include <sstream>
@@ -118,20 +119,37 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
         LOG_INFO("Using Anthropic API version: " + api_version_);
     }
 
-    // Get context size for this model (discovered or fallback)
-    size_t context_size = query_model_context_size(model_name_);
+    // Query actual API context size
+    size_t api_context_size = query_model_context_size(model_name_);
+    LOG_INFO("Anthropic model " + model_name_ + " API context size: " + std::to_string(api_context_size));
 
-    // Allow manual override for testing (use smaller of queried vs requested)
-    if (max_context_size_ > 0 && max_context_size_ < context_size) {
-        context_size = max_context_size_;
-        LOG_WARN("Overriding context size to " + std::to_string(context_size) + " tokens for testing");
+    // Determine final context size and auto_evict_ flag
+    if (max_context_size_ == 0) {
+        // User didn't specify - use API's limit
+        max_context_size_ = api_context_size;
+        auto_evict_ = false; // Rely on API 400 errors
+        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
+    } else if (max_context_size_ > api_context_size) {
+        // User requested more than API supports - cap at API limit
+        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
+                 " exceeds API limit " + std::to_string(api_context_size) +
+                 ", capping at API limit");
+        max_context_size_ = api_context_size;
+        auto_evict_ = false; // Rely on API 400 errors
+    } else if (max_context_size_ < api_context_size) {
+        // User requested less than API supports - need proactive eviction
+        auto_evict_ = true;
+        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
+                 " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
-        LOG_INFO("Anthropic model " + model_name_ + " context size: " + std::to_string(context_size));
+        // User's limit equals API limit - rely on API errors
+        auto_evict_ = false;
+        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
     }
 
-    // Create the shared context manager with actual (or overridden) context size
-    context_manager_ = std::make_unique<ApiContextManager>(context_size);
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(context_size) + " tokens");
+    // Create the shared context manager with final context size
+    context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
 
     LOG_INFO("AnthropicBackend initialized with model: " + model_name_);
     initialized_ = true;
@@ -148,6 +166,27 @@ std::string AnthropicBackend::generate(int max_tokens) {
     }
 
     LOG_DEBUG("Anthropic generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
+
+    // Proactive eviction if enabled (when user's context < API's context)
+    if (auto_evict_) {
+        int estimated_tokens = estimate_context_tokens();
+        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
+
+        if (estimated_tokens > static_cast<int>(max_context_size_)) {
+            if (g_server_mode) {
+                // Server mode: throw exception, let client handle it
+                throw ContextManagerError(
+                    "Context limit exceeded: estimated " +
+                    std::to_string(estimated_tokens) + " tokens but limit is " +
+                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
+            } else {
+                // CLI mode: proactively evict to make room
+                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
+                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
+                context_manager_->evict_oldest_messages();
+            }
+        }
+    }
 
     // Calculate available tokens for generation
     int total_context_tokens = context_manager_->get_total_tokens();

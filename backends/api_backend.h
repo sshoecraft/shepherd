@@ -92,4 +92,17 @@ protected:
     /// Populates tools_data_ with tool info from registry
     /// Should be called once during first generate() call
     void build_tools_from_registry();
+
+    /// @brief Adaptive token estimation using EMA
+    /// Starts at 4.0 chars/token, refines based on API responses
+    float chars_per_token_ = 4.0f;
+
+    /// @brief Estimate total tokens in current context using adaptive ratio
+    /// @return Estimated token count
+    int estimate_context_tokens() const;
+
+    /// @brief Update chars_per_token_ ratio based on API response
+    /// @param total_chars Total characters in messages sent
+    /// @param actual_tokens Actual token count from API response
+    void update_token_ratio(int total_chars, int actual_tokens);
 };

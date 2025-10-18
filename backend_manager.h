@@ -183,6 +183,11 @@ protected:
     /// Local backends should leave these at 0
     int last_prompt_tokens_ = 0;
     int last_completion_tokens_ = 0;
+
+    /// @brief Whether to proactively evict when estimated tokens exceed limit
+    /// - true: Check before API call and evict if needed (Grok, Ollama, or when user_context < api_context)
+    /// - false: Rely on API returning 400 error when over limit
+    bool auto_evict_ = false;
 };
 
 /// @brief Factory for creating backend managers

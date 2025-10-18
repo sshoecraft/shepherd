@@ -141,11 +141,12 @@ public:
     /// @return True if eviction successful, false otherwise
     bool evict_messages_by_index(int start_msg, int end_msg);
 
-protected:
-
     /// @brief Evict oldest messages when context is full
     /// Archives to RAG before removing from context
+    /// Public for API backends to call when doing proactive eviction
     void evict_oldest_messages();
+
+protected:
 
     /// @brief Check if context needs eviction
     bool needs_eviction(int additional_tokens) const;

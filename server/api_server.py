@@ -154,7 +154,13 @@ async def chat_completions(request: ChatCompletionRequest):
     try:
         shepherd_response = shepherd.generate(messages, parameters, tools)
     except Exception as e:
-        raise HTTPException(500, f"Shepherd error: {str(e)}")
+        error_msg = str(e)
+        # Check if this is a context limit error (client error, not server error)
+        # Return 400 to match OpenAI API spec
+        if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
+            raise HTTPException(400, error_msg)
+        # All other errors are 500
+        raise HTTPException(500, f"Shepherd error: {error_msg}")
 
     choice = {
         "index": 0,
@@ -189,7 +195,11 @@ async def list_models():
     try:
         models = shepherd.list_models()
     except Exception as e:
-        raise HTTPException(500, f"Shepherd error: {str(e)}")
+        error_msg = str(e)
+        # Check if this is a context limit error (client error, not server error)
+        if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
+            raise HTTPException(400, error_msg)
+        raise HTTPException(500, f"Shepherd error: {error_msg}")
 
     model_data = [
         ModelInfo(
@@ -209,7 +219,11 @@ async def get_model(model_name: str):
     try:
         model_info = shepherd.get_model_info()
     except Exception as e:
-        raise HTTPException(500, f"Shepherd error: {str(e)}")
+        error_msg = str(e)
+        # Check if this is a context limit error (client error, not server error)
+        if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
+            raise HTTPException(400, error_msg)
+        raise HTTPException(500, f"Shepherd error: {error_msg}")
 
     # Return model info regardless of what name was requested
     # (since we only have one "shepherd" model)

@@ -264,3 +264,40 @@ void ApiBackend::build_tools_from_registry() {
     tools_built_ = true;
     LOG_INFO("Built tools data from registry: " + std::to_string(tools_data_.size()) + " tools");
 }
+
+int ApiBackend::estimate_context_tokens() const {
+    if (!context_manager_) {
+        return 0;
+    }
+
+    // Calculate total characters in all messages
+    int total_chars = 0;
+    const auto& messages = context_manager_->get_messages();
+
+    for (const auto& msg : messages) {
+        total_chars += msg.content.length();
+    }
+
+    // Add JSON overhead (already in tokens from calculate_json_overhead)
+    int overhead_tokens = context_manager_->calculate_json_overhead();
+
+    // Estimate message tokens using adaptive ratio
+    int message_tokens = static_cast<int>(total_chars / chars_per_token_ + 0.5f);
+
+    return message_tokens + overhead_tokens;
+}
+
+void ApiBackend::update_token_ratio(int total_chars, int actual_tokens) {
+    if (actual_tokens <= 0 || total_chars <= 0) {
+        return; // Invalid data, skip update
+    }
+
+    float measured_ratio = static_cast<float>(total_chars) / actual_tokens;
+
+    // Exponential Moving Average: 90% old, 10% new
+    // This smooths out noise while adapting to model's actual tokenization
+    chars_per_token_ = 0.9f * chars_per_token_ + 0.1f * measured_ratio;
+
+    LOG_DEBUG("Updated chars/token ratio: " + std::to_string(chars_per_token_) +
+              " (measured: " + std::to_string(measured_ratio) + ")");
+}

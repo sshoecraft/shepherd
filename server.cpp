@@ -241,8 +241,13 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
             } else if (request["action"] == "list_models") {
                 response["status"] = "success";
                 response["models"] = json::array();
+
+                // Extract just the filename from the model path
+                std::string model_path = backend->get_model_name();
+                std::string model_id = std::filesystem::path(model_path).filename().string();
+
                 response["models"].push_back({
-                    {"id", backend->get_model_name()},
+                    {"id", model_id},
                     {"backend", backend->get_backend_name()},
                     {"max_model_len", backend->get_max_context_size()}
                 });

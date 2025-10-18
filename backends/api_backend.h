@@ -15,7 +15,8 @@ public:
     /// @brief Not used by API backends - they read messages directly
     std::string get_context_for_inference() override;
 
-    /// @brief Approximate token counting (4 chars per token)
+    /// @brief Not used - token counts come from API responses
+    /// @return Always returns 0 (unused)
     int count_tokens(const std::string& text) override;
 
     /// @brief Calculate JSON overhead

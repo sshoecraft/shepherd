@@ -84,8 +84,10 @@ std::string ApiContextManager::get_context_for_inference() {
 }
 
 int ApiContextManager::count_tokens(const std::string& text) {
-    // Approximate: 4 characters per token
-    return static_cast<int>(text.length() / 4.0 + 0.5);
+    // Not used - token counts come from API responses
+    // Messages are stored with token_count=0
+    (void)text; // Suppress unused parameter warning
+    return 0;
 }
 
 int ApiContextManager::calculate_json_overhead() const {
@@ -112,22 +114,22 @@ ApiBackend::ApiBackend(size_t max_context_tokens)
 }
 
 void ApiBackend::add_system_message(const std::string& content) {
-    int token_count = context_manager_->count_tokens(content);
-    Message system_msg(Message::SYSTEM, content, token_count);
+    // Token count not needed - actual usage comes from API response
+    Message system_msg(Message::SYSTEM, content, 0);
     context_manager_->add_message(system_msg);
     LOG_DEBUG("Added system message to context (API backend)");
 }
 
 void ApiBackend::add_user_message(const std::string& content) {
-    int token_count = context_manager_->count_tokens(content);
-    Message user_msg(Message::USER, content, token_count);
+    // Token count not needed - actual usage comes from API response
+    Message user_msg(Message::USER, content, 0);
     context_manager_->add_message(user_msg);
     LOG_DEBUG("Added user message to context (API backend)");
 }
 
 void ApiBackend::add_assistant_message(const std::string& content) {
-    int token_count = context_manager_->count_tokens(content);
-    Message assistant_msg(Message::ASSISTANT, content, token_count);
+    // Token count not needed - actual usage comes from API response
+    Message assistant_msg(Message::ASSISTANT, content, 0);
     context_manager_->add_message(assistant_msg);
     LOG_DEBUG("Added assistant message to context (API backend)");
 }
@@ -136,8 +138,8 @@ void ApiBackend::add_tool_result(const std::string& tool_name, const std::string
     // Sanitize content to remove invalid UTF-8 bytes that would break JSON serialization
     std::string sanitized_content = sanitize_for_json(content);
 
-    int token_count = context_manager_->count_tokens(sanitized_content);
-    Message tool_msg(Message::TOOL, sanitized_content, token_count);
+    // Token count not needed - actual usage comes from API response
+    Message tool_msg(Message::TOOL, sanitized_content, 0);
     tool_msg.tool_name = tool_name;
     tool_msg.tool_call_id = tool_call_id;
     context_manager_->add_message(tool_msg);

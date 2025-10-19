@@ -1550,6 +1550,11 @@ std::string LlamaCppBackend::generate_from_session(const SessionContext& session
         while (cached_messages.size() > matching_prefix) {
             context_manager_->get_messages().pop_back();
         }
+
+        // CRITICAL: Recalculate token count after removing messages
+        // pop_back() doesn't update current_token_count_, so we must recalculate
+        context_manager_->recalculate_total_tokens();
+        LOG_DEBUG("Recalculated total tokens after clearing: " + std::to_string(context_manager_->get_total_tokens()));
     }
 
     // Now add only NEW messages (from matching_prefix onward)

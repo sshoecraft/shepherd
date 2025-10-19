@@ -105,4 +105,10 @@ protected:
     /// @param total_chars Total characters in messages sent
     /// @param actual_tokens Actual token count from API response
     void update_token_ratio(int total_chars, int actual_tokens);
+
+    /// @brief Proactively evict messages using token estimation
+    /// Updates message token counts based on estimation, then calls eviction
+    /// Fixes bug where eviction aborted because messages had token_count=0
+    /// @param estimated_tokens Total estimated tokens in context
+    void evict_with_estimation(int estimated_tokens);
 };

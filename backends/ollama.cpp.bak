@@ -121,7 +121,7 @@ std::string OllamaBackend::generate(int max_tokens) {
             // CLI mode: proactively evict to make room
             LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
                      " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-            evict_with_estimation(estimated_tokens);
+            context_manager_->evict_oldest_messages();
         }
     }
 

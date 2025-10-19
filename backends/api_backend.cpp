@@ -301,3 +301,34 @@ void ApiBackend::update_token_ratio(int total_chars, int actual_tokens) {
     LOG_DEBUG("Updated chars/token ratio: " + std::to_string(chars_per_token_) +
               " (measured: " + std::to_string(measured_ratio) + ")");
 }
+
+void ApiBackend::evict_with_estimation(int estimated_tokens) {
+    // CRITICAL FIX FOR BUG: API backends don't get actual token counts before eviction
+    // Messages have token_count=0, so evict_oldest_messages() would abort immediately
+    // We need to distribute estimated tokens to messages first
+
+    auto& messages = context_manager_->get_messages();
+
+    // Calculate total characters
+    int total_chars = 0;
+    for (const auto& msg : messages) {
+        total_chars += msg.content.length();
+    }
+
+    // Distribute estimated tokens proportionally based on character count
+    for (auto& msg : context_manager_->get_messages()) {
+        if (total_chars > 0) {
+            int est_msg_tokens = static_cast<int>((msg.content.length() * estimated_tokens) / total_chars);
+            msg.token_count = est_msg_tokens;
+        }
+    }
+
+    // Recalculate total so eviction logic sees the correct token count
+    context_manager_->recalculate_total_tokens();
+
+    LOG_DEBUG("Updated message token counts for eviction (total: " +
+              std::to_string(context_manager_->get_total_tokens()) + ")");
+
+    // Now eviction will work correctly
+    context_manager_->evict_oldest_messages();
+}

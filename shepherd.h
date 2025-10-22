@@ -21,6 +21,7 @@
 
 // Core Shepherd headers
 #include "logger.h"
+#include "debug.h"
 
 // ============================================================================
 // Global System Flags
@@ -29,6 +30,9 @@
 
 // Debug mode flag - enables verbose logging and debug output
 extern bool g_debug_mode;
+
+// Debug level (0=off, 1-9=increasing verbosity) - used by dprintf() macro
+extern int g_debug_level;
 
 // Server mode flag - true when running as HTTP API server (--server)
 // When true, the system operates in stateless request/response mode

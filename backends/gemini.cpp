@@ -7,6 +7,9 @@
 
 using json = nlohmann::json;
 
+// Global cancellation flag (defined in main.cpp)
+extern bool g_generation_cancelled;
+
 // GeminiTokenizer implementation
 GeminiTokenizer::GeminiTokenizer(const std::string& model_name)
     : model_name_(model_name) {
@@ -86,11 +89,12 @@ bool GeminiBackend::initialize(const std::string& model_name, const std::string&
         LOG_INFO("Gemini model " + model_name_ + " API context size: " + std::to_string(api_context_size));
     }
 
-    // Determine final context size and auto_evict_ flag
+    // Determine final context size and auto_evict flag
+    bool auto_evict;
     if (max_context_size_ == 0) {
         // User didn't specify - use API's limit
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
         LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
     } else if (max_context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
@@ -98,21 +102,23 @@ bool GeminiBackend::initialize(const std::string& model_name, const std::string&
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
     } else if (max_context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
-        auto_evict_ = true;
+        auto_evict = true;
         LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
-        auto_evict_ = false;
+        auto_evict = false;
         LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
+    context_manager_->auto_evict = auto_evict;
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+              std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("GeminiBackend initialized with model: " + model_name_);
     initialized_ = true;
@@ -131,7 +137,7 @@ std::string GeminiBackend::generate(int max_tokens) {
     LOG_DEBUG("Gemini generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
 
     // Proactive eviction if enabled (when user's context < API's context)
-    if (auto_evict_) {
+    if (context_manager_->auto_evict) {
         int estimated_tokens = estimate_context_tokens();
         LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
 
@@ -250,6 +256,8 @@ size_t GeminiBackend::query_model_context_size(const std::string& model_name) {
 std::string GeminiBackend::parse_gemini_response(const std::string& response_json) {
     // TODO: Parse Gemini response format
     // Extract candidates[0].content.parts[0].text
+    // TODO: Also parse usageMetadata.promptTokenCount and usageMetadata.candidatesTokenCount
+    // Call update_message_tokens_from_api(prompt_tokens, completion_tokens);
     return "TODO: Parse response";
 }
 std::string GeminiBackend::generate_from_session(const SessionContext& session, int max_tokens) {

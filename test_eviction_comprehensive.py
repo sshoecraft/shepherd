@@ -25,7 +25,7 @@ CONTEXT_PROFILES = {
         "description": "Ultra-small for rapid eviction testing",
     },
     "tiny": {
-        "size": 2048,
+        "size": 4096,  # Changed from 2048 to 4096
         "description": "Small context for fast boundary testing",
     },
     "small": {
@@ -33,12 +33,12 @@ CONTEXT_PROFILES = {
         "description": "Moderate context for pattern testing",
     },
     "medium": {
-        "size": 32768,
-        "description": "Realistic context for stress testing",
+        "size": 16384,  # Changed from 32768 to 16384
+        "description": "Medium context for testing",
     },
     "large": {
-        "size": 131072,  # 128K
-        "description": "Production-scale context",
+        "size": 32768,  # Changed from 131072 to 32768
+        "description": "Large context for stress testing",
     }
 }
 
@@ -448,8 +448,11 @@ class EvictionTestSuite:
 
     def test_7_2_client_smaller_than_server(self, result: TestResult):
         """Client context < server context - client should handle eviction"""
-        # Use small client context
-        self.current_test_context = 2048
+        # Note: current_test_context is already set by run_test() before calling this function
+        # Verify that client context is smaller than server
+        if self.current_test_context >= self.server_context_size:
+            result.error = f"Test setup error: client context ({self.current_test_context}) >= server context ({self.server_context_size})"
+            return
 
         messages = [self.create_message("system", 50)]
 
@@ -507,10 +510,10 @@ class EvictionTestSuite:
     def run_all_tests(self):
         """Run all tests based on test mode"""
 
-        # Category 1: Boundary Conditions
+        # Category 1: Boundary Conditions - Test sequence: 4k, 8k, 16k, 32k, server default
         if self.test_mode in ["fast", "standard", "full"]:
             print(f"\n{'='*70}")
-            print("Category 1: Boundary Condition Tests (TINY: 2048 tokens)")
+            print("Category 1: Boundary Condition Tests (4K context)")
             print(f"{'='*70}")
 
             self.run_test("1.1", "Context Exactly at Limit",
@@ -522,16 +525,104 @@ class EvictionTestSuite:
             self.run_test("1.4", "System + User Fill Context (Cannot Evict)",
                          self.test_1_4_cannot_evict, "tiny")
 
-        # Category 2: Message Size Variations
+            print(f"\n{'='*70}")
+            print("Category 1: Boundary Condition Tests (8K context)")
+            print(f"{'='*70}")
+
+            self.run_test("1.1b", "Context Exactly at Limit",
+                         self.test_1_1_exact_capacity, "small")
+            self.run_test("1.2b", "One Token Over Limit",
+                         self.test_1_2_one_token_over, "small")
+            self.run_test("1.3b", "Massively Over Limit (50% overage)",
+                         self.test_1_3_massive_overage, "small")
+            self.run_test("1.4b", "System + User Fill Context (Cannot Evict)",
+                         self.test_1_4_cannot_evict, "small")
+
+            print(f"\n{'='*70}")
+            print("Category 1: Boundary Condition Tests (16K context)")
+            print(f"{'='*70}")
+
+            self.run_test("1.1c", "Context Exactly at Limit",
+                         self.test_1_1_exact_capacity, "medium")
+            self.run_test("1.2c", "One Token Over Limit",
+                         self.test_1_2_one_token_over, "medium")
+            self.run_test("1.3c", "Massively Over Limit (50% overage)",
+                         self.test_1_3_massive_overage, "medium")
+            self.run_test("1.4c", "System + User Fill Context (Cannot Evict)",
+                         self.test_1_4_cannot_evict, "medium")
+
+            print(f"\n{'='*70}")
+            print("Category 1: Boundary Condition Tests (32K context)")
+            print(f"{'='*70}")
+
+            self.run_test("1.1d", "Context Exactly at Limit",
+                         self.test_1_1_exact_capacity, "large")
+            self.run_test("1.2d", "One Token Over Limit",
+                         self.test_1_2_one_token_over, "large")
+            self.run_test("1.3d", "Massively Over Limit (50% overage)",
+                         self.test_1_3_massive_overage, "large")
+            self.run_test("1.4d", "System + User Fill Context (Cannot Evict)",
+                         self.test_1_4_cannot_evict, "large")
+
+            print(f"\n{'='*70}")
+            print("Category 1: Boundary Condition Tests (Server Default)")
+            print(f"{'='*70}")
+
+            self.run_test("1.1e", "Context Exactly at Limit",
+                         self.test_1_1_exact_capacity, "use_server_default")
+            self.run_test("1.2e", "One Token Over Limit",
+                         self.test_1_2_one_token_over, "use_server_default")
+            self.run_test("1.3e", "Massively Over Limit (50% overage)",
+                         self.test_1_3_massive_overage, "use_server_default")
+            self.run_test("1.4e", "System + User Fill Context (Cannot Evict)",
+                         self.test_1_4_cannot_evict, "use_server_default")
+
+        # Category 2: Message Size Variations - Test sequence: 4k, 8k, 16k, 32k, server default
         if self.test_mode in ["fast", "standard", "full"]:
             print(f"\n{'='*70}")
-            print("Category 2: Message Size Variation Tests")
+            print("Category 2: Message Size Variation Tests (4K context)")
             print(f"{'='*70}")
 
             self.run_test("2.1", "Tiny Messages (< 10 tokens)",
                          self.test_2_1_tiny_messages, "tiny")
             self.run_test("2.2", "Mixed Size Distribution",
+                         self.test_2_2_mixed_sizes, "tiny")
+
+            print(f"\n{'='*70}")
+            print("Category 2: Message Size Variation Tests (8K context)")
+            print(f"{'='*70}")
+
+            self.run_test("2.1b", "Tiny Messages (< 10 tokens)",
+                         self.test_2_1_tiny_messages, "small")
+            self.run_test("2.2b", "Mixed Size Distribution",
                          self.test_2_2_mixed_sizes, "small")
+
+            print(f"\n{'='*70}")
+            print("Category 2: Message Size Variation Tests (16K context)")
+            print(f"{'='*70}")
+
+            self.run_test("2.1c", "Tiny Messages (< 10 tokens)",
+                         self.test_2_1_tiny_messages, "medium")
+            self.run_test("2.2c", "Mixed Size Distribution",
+                         self.test_2_2_mixed_sizes, "medium")
+
+            print(f"\n{'='*70}")
+            print("Category 2: Message Size Variation Tests (32K context)")
+            print(f"{'='*70}")
+
+            self.run_test("2.1d", "Tiny Messages (< 10 tokens)",
+                         self.test_2_1_tiny_messages, "large")
+            self.run_test("2.2d", "Mixed Size Distribution",
+                         self.test_2_2_mixed_sizes, "large")
+
+            print(f"\n{'='*70}")
+            print("Category 2: Message Size Variation Tests (Server Default)")
+            print(f"{'='*70}")
+
+            self.run_test("2.1e", "Tiny Messages (< 10 tokens)",
+                         self.test_2_1_tiny_messages, "use_server_default")
+            self.run_test("2.2e", "Mixed Size Distribution",
+                         self.test_2_2_mixed_sizes, "use_server_default")
 
         # Category 7: Client vs Server Mismatch
         if self.test_mode in ["fast", "standard", "full"]:
@@ -541,8 +632,24 @@ class EvictionTestSuite:
 
             self.run_test("7.1", "Detect Server Context Size",
                          self.test_7_1_detect_server_context, "use_server_default")
-            self.run_test("7.2", "Client Context < Server (Auto-Eviction)",
+
+            print(f"\n{'='*70}")
+            print("Category 7: Client Smaller Tests - 4K, 8K, 16K, 32K")
+            print(f"{'='*70}")
+
+            self.run_test("7.2a", "Client Context < Server (Auto-Eviction) - 4K",
                          self.test_7_2_client_smaller_than_server, "tiny")
+            self.run_test("7.2b", "Client Context < Server (Auto-Eviction) - 8K",
+                         self.test_7_2_client_smaller_than_server, "small")
+            self.run_test("7.2c", "Client Context < Server (Auto-Eviction) - 16K",
+                         self.test_7_2_client_smaller_than_server, "medium")
+            self.run_test("7.2d", "Client Context < Server (Auto-Eviction) - 32K",
+                         self.test_7_2_client_smaller_than_server, "large")
+
+            print(f"\n{'='*70}")
+            print("Category 7: Client Larger Tests")
+            print(f"{'='*70}")
+
             self.run_test("7.3", "Client Context > Server (Server Rejects)",
                          self.test_7_3_client_larger_than_server,
                          lambda s: s * 2)
@@ -622,7 +729,7 @@ def main():
         description="Comprehensive Eviction Test Suite for Shepherd"
     )
     parser.add_argument("--api-base",
-                       default="http://192.168.1.166:8080/v1",
+                       default="http://192.168.1.166:8000/v1",
                        help="API base URL")
     parser.add_argument("--model",
                        default="gpt-4",

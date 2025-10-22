@@ -10,7 +10,7 @@ set -e
 
 # Configuration
 SHEPHERD="./shepherd"
-SERVER="http://192.168.1.166:8080/v1"
+SERVER="http://192.168.1.166:8000/v1"
 MODEL="gpt-4"
 TEST_DIR="/tmp/shepherd_eviction_test_$$"
 LOG_FILE="${TEST_DIR}/shepherd.log"

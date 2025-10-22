@@ -17,6 +17,9 @@
 #include "../llama.cpp/common/chat.h"
 #endif
 
+// Global cancellation flag (defined in main.cpp)
+extern bool g_generation_cancelled;
+
 // LlamaCppTokenizer implementation
 LlamaCppTokenizer::LlamaCppTokenizer(void* model)
     : model_(model) {
@@ -60,8 +63,8 @@ std::string LlamaCppTokenizer::get_tokenizer_name() const {
 LlamaCppContextManager::LlamaCppContextManager(size_t max_context_tokens)
     : ContextManager(max_context_tokens) {
     // Disable auto-eviction - llama.cpp manages eviction via KV cache callbacks
-    auto_evict_on_add_ = false;
-    LOG_DEBUG("LlamaCpp context manager initialized (auto_evict_on_add=false, KV cache manages eviction)");
+    auto_evict = false;
+    LOG_DEBUG("LlamaCpp context manager initialized (auto_evict=false, KV cache manages eviction)");
 }
 
 std::string LlamaCppContextManager::get_context_for_inference() {
@@ -209,15 +212,20 @@ std::pair<int, int> LlamaCppContextManager::get_token_range_for_messages(int sta
     int start_pos = 0;
     int end_pos = 0;
 
-    // Calculate start position (sum of all tokens before start_msg_index)
+    // Calculate start position (sum of CACHED tokens before start_msg_index)
+    // CRITICAL: Only count messages actually in KV cache (in_kv_cache=true)
     for (int i = 0; i < start_msg_index; i++) {
-        start_pos += messages_[i].token_count;
+        if (messages_[i].in_kv_cache) {
+            start_pos += messages_[i].token_count;
+        }
     }
 
-    // Calculate end position (sum of all tokens up to and including end_msg_index)
+    // Calculate end position (sum of CACHED tokens up to and including end_msg_index)
     end_pos = start_pos;
     for (int i = start_msg_index; i <= end_msg_index; i++) {
-        end_pos += messages_[i].token_count;
+        if (messages_[i].in_kv_cache) {
+            end_pos += messages_[i].token_count;
+        }
     }
 
     LOG_DEBUG("Message range [" + std::to_string(start_msg_index) + ", " + std::to_string(end_msg_index) +
@@ -422,6 +430,20 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
     // Don't create context manager yet - wait until model is loaded to get actual context size
     tokenizer_ = std::make_unique<LlamaCppTokenizer>(nullptr); // Model set later
     LOG_DEBUG("LlamaCppBackend created with max_context_size: " + std::to_string(max_context_size_));
+}
+
+void LlamaCppBackend::log_token_state(const std::string& context) const {
+    if (g_debug_level >= 3) {
+        int cached_msg_tokens = context_manager_->get_cached_message_tokens();
+        int kv_cache_tokens = get_context_token_count();
+        int max_tokens = static_cast<int>(max_context_size_);
+
+        dprintf(3, "%s: Messages(in_kv=true)=%d/%d, KV_cache=%d/%d %s",
+                context.c_str(),
+                cached_msg_tokens, max_tokens,
+                kv_cache_tokens, max_tokens,
+                (cached_msg_tokens != kv_cache_tokens) ? "*** DRIFT ***" : "");
+    }
 }
 
 LlamaCppBackend::~LlamaCppBackend() {
@@ -754,8 +776,8 @@ void LlamaCppBackend::add_system_message(const std::string& custom_prompt) {
         template_node_
     );
 
-    int token_count = context_manager_->count_tokens(formatted_content);
-    Message system_msg(Message::SYSTEM, formatted_content, token_count);
+    int estimated_tokens = context_manager_->count_tokens(formatted_content);
+    Message system_msg(Message::SYSTEM, formatted_content, estimated_tokens);
     system_msg.in_kv_cache = false;  // Not cached yet
     context_manager_->add_message(system_msg);
 
@@ -763,6 +785,19 @@ void LlamaCppBackend::add_system_message(const std::string& custom_prompt) {
     auto& messages = context_manager_->get_messages();
     if (!messages.empty()) {
         format_and_decode_message(messages.back());
+
+        // Update context manager's token count with actual formatted count
+        int actual_tokens = messages.back().token_count;
+        int token_diff = actual_tokens - estimated_tokens;
+        if (token_diff != 0) {
+            dprintf(3, "TOKEN ADJUST: estimated=%d, actual=%d, diff=%d",
+                    estimated_tokens, actual_tokens, token_diff);
+            context_manager_->adjust_token_count(token_diff);
+            LOG_DEBUG("Adjusted token count by " + std::to_string(token_diff) +
+                     " (estimated: " + std::to_string(estimated_tokens) +
+                     ", actual: " + std::to_string(actual_tokens) + ")");
+        }
+
         // Save the formatted token count (updated by format_and_decode_message)
         system_formatted_tokens_ = messages.back().token_count;
     }
@@ -771,8 +806,8 @@ void LlamaCppBackend::add_system_message(const std::string& custom_prompt) {
 }
 
 void LlamaCppBackend::add_user_message(const std::string& content) {
-    int token_count = context_manager_->count_tokens(content);
-    Message user_msg(Message::USER, content, token_count);
+    int estimated_tokens = context_manager_->count_tokens(content);
+    Message user_msg(Message::USER, content, estimated_tokens);
     user_msg.in_kv_cache = false;  // Not cached yet
     context_manager_->add_message(user_msg);
 
@@ -780,16 +815,30 @@ void LlamaCppBackend::add_user_message(const std::string& content) {
     auto& messages = context_manager_->get_messages();
     if (!messages.empty()) {
         format_and_decode_message(messages.back());
+
+        // Update context manager's token count with actual formatted count
+        int actual_tokens = messages.back().token_count;
+        int token_diff = actual_tokens - estimated_tokens;
+        if (token_diff != 0) {
+            dprintf(3, "TOKEN ADJUST: estimated=%d, actual=%d, diff=%d",
+                    estimated_tokens, actual_tokens, token_diff);
+            context_manager_->adjust_token_count(token_diff);
+            LOG_DEBUG("Adjusted token count by " + std::to_string(token_diff) +
+                     " (estimated: " + std::to_string(estimated_tokens) +
+                     ", actual: " + std::to_string(actual_tokens) + ")");
+        }
+
         // Save the formatted token count (updated by format_and_decode_message)
         current_user_formatted_tokens_ = messages.back().token_count;
     }
 
     LOG_DEBUG("Added user message to LlamaCpp backend and decoded to KV cache");
+    log_token_state("After add_user_message");
 }
 
 void LlamaCppBackend::add_tool_result(const std::string& tool_name, const std::string& content, const std::string& tool_call_id) {
-    int token_count = context_manager_->count_tokens(content);
-    Message tool_msg(Message::TOOL, content, token_count);
+    int estimated_tokens = context_manager_->count_tokens(content);
+    Message tool_msg(Message::TOOL, content, estimated_tokens);
     tool_msg.tool_name = tool_name;
     tool_msg.tool_call_id = tool_call_id;
     tool_msg.in_kv_cache = false;  // Not cached yet
@@ -799,18 +848,43 @@ void LlamaCppBackend::add_tool_result(const std::string& tool_name, const std::s
     auto& messages = context_manager_->get_messages();
     if (!messages.empty()) {
         format_and_decode_message(messages.back());
+
+        // Update context manager's token count with actual formatted count
+        int actual_tokens = messages.back().token_count;
+        int token_diff = actual_tokens - estimated_tokens;
+        if (token_diff != 0) {
+            dprintf(3, "TOKEN ADJUST: estimated=%d, actual=%d, diff=%d",
+                    estimated_tokens, actual_tokens, token_diff);
+            context_manager_->adjust_token_count(token_diff);
+            LOG_DEBUG("Adjusted token count by " + std::to_string(token_diff) +
+                     " (estimated: " + std::to_string(estimated_tokens) +
+                     ", actual: " + std::to_string(actual_tokens) + ")");
+        }
     }
 
     LOG_DEBUG("Added tool result to LlamaCpp backend and decoded to KV cache: " + tool_name);
+    log_token_state("After add_tool_result");
 }
 
 void LlamaCppBackend::add_assistant_message(const std::string& content) {
-    int token_count = context_manager_->count_tokens(content);
-    Message assistant_msg(Message::ASSISTANT, content, token_count);
+    // Use the actual KV cache token count which includes generation prompt + content + closing tag
+    // This was set by generate() to include all template overhead
+    int estimated_tokens = context_manager_->count_tokens(content);
+    Message assistant_msg(Message::ASSISTANT, content, last_assistant_kv_tokens_);
     // Assistant message is already in KV cache because it was decoded during generation
     assistant_msg.in_kv_cache = true;
     context_manager_->add_message(assistant_msg);
+
+    // Log the difference so we can see the template overhead
+    int token_diff = last_assistant_kv_tokens_ - estimated_tokens;
+    if (token_diff != 0) {
+        LOG_DEBUG("Assistant message KV tokens: " + std::to_string(last_assistant_kv_tokens_) +
+                 " (content: " + std::to_string(estimated_tokens) +
+                 ", template overhead: " + std::to_string(token_diff) + ")");
+    }
+
     LOG_DEBUG("Added assistant message to LlamaCpp backend (already in KV cache from generation)");
+    log_token_state("After add_assistant_message");
 }
 
 std::string LlamaCppBackend::get_backend_name() const {
@@ -888,6 +962,15 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         return 0;  // Signal failure: eviction cannot proceed
     }
 
+    // Verify messages to evict are actually in KV cache
+    const auto& messages = context_manager_->get_messages();
+    for (int i = start_msg; i <= end_msg; i++) {
+        if (!messages[i].in_kv_cache) {
+            LOG_ERROR("Cannot evict message " + std::to_string(i) + " - not in KV cache!");
+            return 0;  // Signal failure
+        }
+    }
+
     // Get token positions for these messages
     auto [start_pos, end_pos] = llama_ctx_mgr->get_token_range_for_messages(start_msg, end_msg);
 
@@ -895,6 +978,9 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         LOG_ERROR("Cannot calculate token positions for eviction");
         return 0;  // Signal failure: eviction cannot proceed
     }
+
+    dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]",
+            start_msg, end_msg, start_pos, end_pos);
 
     LOG_INFO("Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
              "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]");
@@ -921,6 +1007,10 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     int num_messages = end_msg - start_msg + 1;
     LOG_INFO("Successfully evicted " + std::to_string(num_messages) + " messages (" +
              std::to_string(tokens_removed) + " tokens) from KV cache");
+
+    // KV cache is the source of truth - query actual state if needed
+    dprintf(2, "KV cache after eviction: %d tokens", get_context_token_count());
+    log_token_state("After eviction");
 
     // Return the new head position (where freed space begins) as required by callback API
     // After removing [start_pos, end_pos] and shifting down, the new head is start_pos
@@ -957,6 +1047,24 @@ void LlamaCppBackend::shutdown() {
 
     initialized_ = false;
     LOG_DEBUG("LlamaCppBackend shutdown complete");
+}
+
+int LlamaCppBackend::get_context_token_count() const {
+#ifdef ENABLE_LLAMACPP
+    if (!model_ctx_) {
+        return 0;
+    }
+
+    // Query actual KV cache state - this is the source of truth
+    llama_memory_t mem = llama_get_memory(static_cast<llama_context*>(model_ctx_));
+    llama_pos actual_max_pos = llama_memory_seq_pos_max(mem, 0);  // sequence 0
+
+    // max_pos is the highest position (0-based), so +1 for token count
+    // Return -1 (empty cache) as 0
+    return (actual_max_pos >= 0) ? (actual_max_pos + 1) : 0;
+#else
+    return 0;
+#endif
 }
 
 std::string LlamaCppBackend::generate(int max_tokens) {
@@ -1106,7 +1214,7 @@ std::string LlamaCppBackend::generate(int max_tokens) {
 
     // Suppress streaming when tools are available OR in server mode
     // Server mode should NEVER stream output (it goes to server.log)
-    bool suppress_stream = server_mode_ || !available_tools.empty();
+    bool suppress_stream = g_server_mode || !available_tools.empty();
     std::string raw_response = run_inference("", max_tokens, suppress_stream);  // Empty prompt since everything is cached
     LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
     LOG_DEBUG("Raw response: " + raw_response);
@@ -1114,13 +1222,14 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     // CRITICAL FIX: After generation, add the closing tag to KV cache
     // The generation prompt added assistant_start_tag, and run_inference() generated tokens,
     // but we never added the assistant_end_tag closing tag! This causes malformed context on next generate()
+    int n_closing = 0;
     if (!model_config_.assistant_end_tag.empty()) {
         // Tokenize and add the closing tag to KV cache
         const llama_vocab* vocab = llama_model_get_vocab(static_cast<llama_model*>(model_));
         std::vector<llama_token> closing_tokens(16);
-        int n_closing = llama_tokenize(vocab, model_config_.assistant_end_tag.c_str(),
-                                        model_config_.assistant_end_tag.length(),
-                                        closing_tokens.data(), closing_tokens.size(), false, true);
+        n_closing = llama_tokenize(vocab, model_config_.assistant_end_tag.c_str(),
+                                    model_config_.assistant_end_tag.length(),
+                                    closing_tokens.data(), closing_tokens.size(), false, true);
 
         if (n_closing > 0) {
             closing_tokens.resize(n_closing);
@@ -1137,6 +1246,11 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     // This is the total number of tokens in the KV cache before generation
     last_prompt_tokens_ = context_manager_->get_total_tokens();
 
+    // Store the actual tokens added to KV cache for this assistant message
+    // This includes: generation_prompt + generated_tokens + closing_tag
+    // Note: last_completion_tokens_ is set by run_inference() to n_generated
+    last_assistant_kv_tokens_ = n_tokens + last_completion_tokens_ + n_closing;
+
     // Return response directly - main will handle tool parsing and cleanup
     return raw_response;
 }
@@ -1152,6 +1266,9 @@ std::string LlamaCppBackend::get_context_with_tools() {
 
 std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming) {
 #ifdef ENABLE_LLAMACPP
+    // Reset cancellation flag at start of generation
+    g_generation_cancelled = false;
+
     if (!model_ || !model_ctx_) {
         LOG_ERROR("llama.cpp model or context not initialized");
         return "Error: Model not initialized";
@@ -1207,8 +1324,27 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         prompt_tokens.resize(n_prompt_tokens);
         LOG_DEBUG("Evaluating " + std::to_string(n_prompt_tokens) + " prompt tokens");
 
+        // Check if prompt alone is larger than entire context window
+        if (n_prompt_tokens > static_cast<int>(max_context_size_)) {
+            LOG_ERROR("Prompt too large for context: " + std::to_string(n_prompt_tokens) + " tokens exceeds max context size " +
+                      std::to_string(max_context_size_));
+            llama_sampler_free(sampler);
+            if (g_server_mode) {
+                throw ContextFullException("Prompt too large: " + std::to_string(n_prompt_tokens) +
+                                          " tokens exceeds context limit of " + std::to_string(max_context_size_));
+            }
+            return "Error: Prompt too large for context window";
+        }
+
         // Evaluate prompt tokens in batches using configured batch size
         for (size_t i = 0; i < prompt_tokens.size(); i += n_batch_) {
+            // Check for cancellation between batches
+            if (g_generation_cancelled) {
+                LOG_INFO("Generation cancelled during prompt processing");
+                llama_sampler_free(sampler);
+                return "";
+            }
+
             int batch_size = std::min(n_batch_, static_cast<int>(prompt_tokens.size() - i));
 
             llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
@@ -1244,6 +1380,12 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     auto gen_start_time = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < max_gen_tokens; i++) {
+        // Check for cancellation (from SIGUSR1 signal)
+        if (g_generation_cancelled) {
+            LOG_INFO("Generation cancelled by signal");
+            break;
+        }
+
         // Sample next token
         llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
 
@@ -1427,6 +1569,22 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 
     LOG_DEBUG("Decoding " + std::to_string(n_tokens) + " tokens for new message (updated msg.token_count)");
 
+    // Check if message alone is larger than entire context window
+    if (n_tokens > static_cast<int>(max_context_size_)) {
+        LOG_ERROR("Message too large for context: " + std::to_string(n_tokens) + " tokens exceeds max context size " +
+                  std::to_string(max_context_size_));
+        if (g_server_mode) {
+            throw ContextFullException("Message too large: " + std::to_string(n_tokens) +
+                                      " tokens exceeds context limit of " + std::to_string(max_context_size_));
+        }
+        return false;
+    }
+
+    // CRITICAL: Mark message as in KV cache BEFORE decoding.
+    // This ensures that if eviction is triggered mid-decode, the eviction logic
+    // has an accurate view of which messages are (at least partially) in the cache.
+    msg.in_kv_cache = true;
+
     // Start timing for prompt processing (prefill) speed
     auto prefill_start_time = std::chrono::high_resolution_clock::now();
 
@@ -1450,6 +1608,8 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
                     decode_failed = true;
                     break;
                 } else {
+                    // If decode fails permanently, un-mark it from cache
+                    msg.in_kv_cache = false;
                     LOG_ERROR("Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts");
                     return false;
                 }
@@ -1469,8 +1629,9 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     double prefill_seconds = prefill_duration.count() / 1000.0;
     double prefill_tokens_per_second = (n_tokens > 0 && prefill_seconds > 0) ? (n_tokens / prefill_seconds) : 0.0;
 
-    // Mark message as successfully cached
-    msg.in_kv_cache = true;
+    // KV cache is the source of truth - use get_context_token_count() to query actual state
+    dprintf(2, "KV cache after decode: %d tokens", get_context_token_count());
+    log_token_state("After decode to KV cache");
 
     // Always show performance metrics to stderr (visible even without debug mode)
     std::cerr << "\033[90m[Prefill: " << n_tokens << " tokens, "
@@ -1498,9 +1659,6 @@ std::string LlamaCppBackend::generate_from_session(const SessionContext& session
     }
 
     LOG_DEBUG("LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
-
-    // Set server mode flag to suppress ALL streaming output
-    server_mode_ = true;
 
     // PREFIX CACHING: Compare SessionContext with what's already cached
     // Only add NEW messages that aren't already in KV cache
@@ -1547,12 +1705,15 @@ std::string LlamaCppBackend::generate_from_session(const SessionContext& session
         LOG_DEBUG("Cleared KV cache from token position " + std::to_string(clear_from_pos));
 
         // Remove diverged messages from context_manager
+        size_t msgs_before = cached_messages.size();
         while (cached_messages.size() > matching_prefix) {
             context_manager_->get_messages().pop_back();
         }
+        size_t msgs_removed = msgs_before - cached_messages.size();
 
         // CRITICAL: Recalculate token count after removing messages
         // pop_back() doesn't update current_token_count_, so we must recalculate
+        dprintf(2, "DIVERGENCE: removed %zu messages, recalculating tokens", msgs_removed);
         context_manager_->recalculate_total_tokens();
         LOG_DEBUG("Recalculated total tokens after clearing: " + std::to_string(context_manager_->get_total_tokens()));
     }
@@ -1647,9 +1808,6 @@ std::string LlamaCppBackend::generate_from_session(const SessionContext& session
 
     // Now call regular generate() which will use the populated KV cache
     std::string result = generate(max_tokens);
-
-    // Reset server mode flag for future interactive use
-    server_mode_ = false;
 
     return result;
 #else

@@ -268,6 +268,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wno-unused-but-set-variable
         -Wno-ignored-attributes
         -Wno-maybe-uninitialized
+        -Wno-unused-function
     )
 endif()
 

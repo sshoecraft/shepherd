@@ -55,6 +55,9 @@ public:
     // Get MCP servers configuration (if any)
     std::string get_mcp_config() const { return mcp_config_; }
 
+    // Get memory database path
+    std::string get_memory_database() const { return memory_database_; }
+
     // Web search configuration
     std::string get_web_search_provider() const { return web_search_provider_; }
     std::string get_web_search_api_key() const { return web_search_api_key_; }
@@ -100,6 +103,7 @@ private:
     std::string system_prompt_;  // Custom system prompt (optional)
     std::string mcp_config_;  // Raw JSON string for MCP servers
     std::string custom_config_path_;  // Custom config file path (optional)
+    std::string memory_database_;  // RAG memory database path (optional, default: ~/.shepherd/memory.db)
     std::string max_db_size_str_;  // Maximum RAG database size string (e.g., "10G")
     size_t max_db_size_;  // Cached parsed size in bytes
 

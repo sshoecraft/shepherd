@@ -60,6 +60,10 @@ void get_global_args(int& argc, char**& argv) {
 // Global debug flag
 bool g_debug_mode = false;
 
+// Global debug level (0=off, 1-9=increasing verbosity)
+// Used by dprintf() macro in debug.h for fine-grained debug control
+int g_debug_level = 0;
+
 // Global server mode flag (accessed by context_manager and backends)
 bool g_server_mode = false;
 
@@ -68,7 +72,7 @@ bool g_server_mode = false;
 bool g_eof_received = false;
 
 // Global cancellation flag
-std::atomic<bool> g_generation_cancelled{false};
+bool g_generation_cancelled = false;
 
 // Terminal state management
 struct termios g_original_term;
@@ -296,7 +300,7 @@ static void print_usage(int, char** argv) {
     printf("    %s mcp <add|remove|list> [args...]\n", argv[0]);
     printf("\nOptions:\n");
     printf("    -c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
-    printf("    -d, --debug        Enable debug mode\n");
+    printf("    -d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
     printf("    -l, --log-file     Log to file instead of console\n");
     printf("    -m, --model        Model name or file (overrides config)\n");
     printf("    --model_path       Model directory path (overrides config, e.g., ~/models)\n");
@@ -305,6 +309,7 @@ static void print_usage(int, char** argv) {
     printf("    --api-base         API base URL (for OpenAI-compatible APIs)\n");
     printf("    --context-size     Set context window size (0 = use model's full context, default: from config)\n");
     printf("    --max-tokens       Set max generation tokens (default: auto)\n");
+    printf("    --memory-db        Path to RAG memory database (default: ~/.shepherd/memory.db)\n");
     printf("    --nomcp            Disable MCP system (no MCP servers loaded)\n");
     printf("    --template         Custom chat template file (Jinja format, llamacpp only)\n");
     printf("    --temperature      Sampling temperature 0.0-2.0 (default: 0.7, local backends)\n");
@@ -319,9 +324,9 @@ static void print_usage(int, char** argv) {
     printf("    --tp N             Tensor parallelism: number of GPUs (0=auto/all, local backends)\n");
     printf("    --pp N             Pipeline parallelism: number of stages (0=auto, 1=disabled, local backends)\n");
     printf("    --server           Start HTTP API server mode (OpenAI-compatible)\n");
-    printf("    --port PORT        Server port (default: 8080, requires --server)\n");
+    printf("    --port PORT        Server port (default: 8000, requires --server)\n");
     printf("    --host HOST        Server host to bind to (default: 0.0.0.0, requires --server)\n");
-    printf("    --no-truncate      Disable tool result truncation (may cause context overflow)\n");
+    printf("    --truncate         Enable tool result truncation\n");
     printf("    -h, --help         Show this help message\n");
     printf("\nMCP Management:\n");
     printf("    mcp list                              List all configured MCP servers\n");
@@ -354,6 +359,12 @@ static void signal_handler(int signal) {
     restore_terminal();
     printf("\n\nReceived signal %d, shutting down gracefully...\n", signal);
     exit(0);
+}
+
+static void cancel_handler(int signal) {
+    // Set cancellation flag when SIGUSR1 received (from FastAPI on client disconnect)
+    g_generation_cancelled = true;
+    LOG_INFO("Received SIGUSR1 - cancelling generation");
 }
 
 #if 0
@@ -808,7 +819,7 @@ int main(int argc, char** argv) {
     bool debug_override = false;
     bool no_mcp = false;
     bool server_mode = false;
-    bool no_truncate = false;
+    bool truncate = false;
     std::string log_file;
     std::string config_file_path;
     std::string model_override;
@@ -817,7 +828,8 @@ int main(int argc, char** argv) {
     std::string api_key_override;
     std::string api_base_override;
     std::string template_override;
-    int server_port = 8080;
+    std::string memory_db_override;
+    int server_port = 8000;
     std::string server_host = "0.0.0.0";
     int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
     int max_tokens_override = 0;
@@ -835,7 +847,7 @@ int main(int argc, char** argv) {
 
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
-        {"debug", no_argument, 0, 'd'},
+        {"debug", optional_argument, 0, 'd'},
         {"log-file", required_argument, 0, 'l'},
         {"model", required_argument, 0, 'm'},
         {"model_path", required_argument, 0, 1018},
@@ -844,6 +856,7 @@ int main(int argc, char** argv) {
         {"api-base", required_argument, 0, 1004},
         {"context-size", required_argument, 0, 1000},
         {"max-tokens", required_argument, 0, 1001},
+        {"memory-db", required_argument, 0, 1023},
         {"nomcp", no_argument, 0, 1005},
         {"template", required_argument, 0, 1006},
         {"temperature", required_argument, 0, 1007},
@@ -857,7 +870,7 @@ int main(int argc, char** argv) {
         {"server", no_argument, 0, 1015},
         {"port", required_argument, 0, 1016},
         {"host", required_argument, 0, 1017},
-        {"no-truncate", no_argument, 0, 1019},
+        {"truncate", no_argument, 0, 1019},
         {"tp", required_argument, 0, 1020},
         {"pp", required_argument, 0, 1021},
         {"gpu-layers", required_argument, 0, 1022},
@@ -874,6 +887,12 @@ int main(int argc, char** argv) {
                 break;
             case 'd':
                 debug_override = true;
+                // Parse optional debug level (default to 1 if not specified)
+                if (optarg) {
+                    g_debug_level = atoi(optarg);
+                } else {
+                    g_debug_level = 1;
+                }
                 break;
             case 'l':
                 log_file = optarg;
@@ -983,8 +1002,8 @@ int main(int argc, char** argv) {
             case 1017: // --host
                 server_host = optarg;
                 break;
-            case 1019: // --no-truncate
-                no_truncate = true;
+            case 1019: // --truncate
+                truncate = true;
                 break;
             case 1020: // --tp
                 tp_override = std::atoi(optarg);
@@ -1007,6 +1026,9 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 break;
+            case 1023: // --memory-db
+                memory_db_override = optarg;
+                break;
             case 'h':
                 print_usage(argc, argv);
                 return 0;
@@ -1025,7 +1047,7 @@ int main(int argc, char** argv) {
 
     if (g_debug_mode) {
         logger.set_log_level(LogLevel::DEBUG);
-        std::cout << "Debug mode enabled" << std::endl;
+        std::cout << "Debug mode enabled (level " << g_debug_level << ")" << std::endl;
     } else {
         // Suppress INFO logs unless in debug mode
         logger.set_log_level(LogLevel::WARN);
@@ -1059,8 +1081,8 @@ int main(int argc, char** argv) {
     if (context_size_override >= 0) {  // -1 means not set, 0+ are valid values
         config.set_context_size(context_size_override);
     }
-    if (no_truncate) {
-        config.set_truncate_tool_results(false);
+    if (truncate) {
+        config.set_truncate_tool_results(true);
     }
     if (tp_override >= 0) {  // -1 means not set, 0+ are valid values
         config.set_tensor_parallel(tp_override);
@@ -1140,6 +1162,7 @@ int main(int argc, char** argv) {
     // Set up signal handlers for graceful shutdown
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    signal(SIGUSR1, cancel_handler);  // For cancellation from FastAPI on client disconnect
 
     try {
         // Create backend manager
@@ -1212,13 +1235,32 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // Initialize RAG system with default path
+        // Initialize RAG system with specified or default path
         std::string db_path;
-        try {
-            db_path = Config::get_home_directory() + "/.shepherd/memory.db";
-        } catch (const ConfigError& e) {
-            LOG_ERROR("Failed to determine home directory: " + std::string(e.what()));
-            return 1;
+        if (!memory_db_override.empty()) {
+            // Command-line override takes precedence
+            db_path = memory_db_override;
+            // Expand ~ if present
+            if (db_path[0] == '~') {
+                db_path = Config::get_home_directory() + db_path.substr(1);
+            }
+            LOG_INFO("Using memory database from command line: " + db_path);
+        } else if (!config.get_memory_database().empty()) {
+            // Config file value
+            db_path = config.get_memory_database();
+            // Expand ~ if present
+            if (db_path[0] == '~') {
+                db_path = Config::get_home_directory() + db_path.substr(1);
+            }
+            LOG_INFO("Using memory database from config: " + db_path);
+        } else {
+            // Default
+            try {
+                db_path = Config::get_home_directory() + "/.shepherd/memory.db";
+            } catch (const ConfigError& e) {
+                LOG_ERROR("Failed to determine home directory: " + std::string(e.what()));
+                return 1;
+            }
         }
         if (!RAGManager::initialize(db_path, config.get_max_db_size())) {
             LOG_ERROR("Failed to initialize RAG system");
@@ -1755,29 +1797,26 @@ User: "What is the private variable in config.cpp?"
                             }
                         }
 
-                        // Truncate large tool results to prevent context overflow (if enabled)
-                        if (config.get_truncate_tool_results()) {
-                            // Use actual tokenizer to count tokens accurately
-                            int actual_tool_result_tokens = backend->get_context_manager().count_tokens(tool_result);
+                        // Calculate tool result size to check if truncation is needed
+                        int actual_tool_result_tokens = backend->get_context_manager().count_tokens(tool_result);
+                        int current_total_tokens = backend->get_context_manager().get_total_tokens();
 
-                            // Get current total tokens from context manager (includes ALL messages: system, user, assistant, tools)
-                            int current_total_tokens = backend->get_context_manager().get_total_tokens();
+                        // Reserve space for model's response - scale with context size
+                        size_t min_response_tokens = 2000; // Minimum 2K tokens for response
+                        size_t context_based_reserve = context_size / 4; // Reserve 25% of context for response
+                        size_t reserved_for_response = std::max(min_response_tokens, context_based_reserve);
 
-                            // Reserve space for model's response - scale with context size
-                            // Small contexts need proportionally more space for generation
-                            size_t min_response_tokens = 2000; // Minimum 2K tokens for response
-                            size_t context_based_reserve = context_size / 4; // Reserve 25% of context for response
-                            size_t reserved_for_response = std::max(min_response_tokens, context_based_reserve);
+                        int max_tool_result_tokens = static_cast<int>(context_size) - current_total_tokens - static_cast<int>(reserved_for_response);
+                        if (max_tool_result_tokens < 500) {
+                            max_tool_result_tokens = 500; // Minimum fallback if context is tiny
+                        }
 
+                        // Truncate if: (1) user enabled --truncate flag, OR (2) result is too large for available space
+                        if (config.get_truncate_tool_results() || actual_tool_result_tokens > max_tool_result_tokens) {
                             LOG_DEBUG("Context calculation: size=" + std::to_string(context_size) +
                                      ", current_total=" + std::to_string(current_total_tokens) +
                                      ", tool_result=" + std::to_string(actual_tool_result_tokens) +
                                      ", reserved=" + std::to_string(reserved_for_response));
-
-                            int max_tool_result_tokens = static_cast<int>(context_size) - current_total_tokens - static_cast<int>(reserved_for_response);
-                            if (max_tool_result_tokens < 500) {
-                                max_tool_result_tokens = 500; // Minimum fallback if context is tiny
-                            }
 
                             LOG_DEBUG("Max tool result: " + std::to_string(max_tool_result_tokens) + " tokens allowed, actual: " +
                                      std::to_string(actual_tool_result_tokens) + " tokens");

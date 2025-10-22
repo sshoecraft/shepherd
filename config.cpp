@@ -22,7 +22,8 @@ void Config::set_defaults() {
     api_base_ = "";  // Optional API base URL
     system_prompt_ = "";  // Optional custom system prompt
 
-    // RAG database size limit (10 GB default)
+    // RAG database defaults
+    memory_database_ = "";  // Empty = use default ~/.shepherd/memory.db
     max_db_size_str_ = "10G";
     max_db_size_ = parse_size_string(max_db_size_str_);
 
@@ -50,8 +51,8 @@ void Config::set_defaults() {
     tensor_parallel_ = 0;   // 0 = auto (use all available GPUs), >0 = specific number of GPUs
     pipeline_parallel_ = 0; // 0 = auto, 1 = disabled, >1 = number of stages
 
-    // Tool result truncation (enabled by default)
-    truncate_tool_results_ = true;
+    // Tool result truncation (disabled by default)
+    truncate_tool_results_ = false;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -233,6 +234,11 @@ void Config::load() {
         }
         if (config_json.contains("truncate")) {
             truncate_tool_results_ = config_json["truncate"].get<bool>();
+        }
+
+        // Load RAG memory database path (optional)
+        if (config_json.contains("memory_database")) {
+            memory_database_ = config_json["memory_database"];
         }
 
         // Load RAG database size limit (optional, supports both string and numeric formats)

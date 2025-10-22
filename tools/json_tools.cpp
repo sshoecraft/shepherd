@@ -231,7 +231,7 @@ std::string serialize_json_value(const JsonValue& value) {
 
 std::vector<ParameterDef> ParseJSONTool::get_parameters_schema() const {
     return {
-        {"json", "string", "The JSON string to parse", true, ""}
+        {"json", "string", "The JSON string to parse", true, "", "", {}}
     };
 }
 
@@ -266,7 +266,7 @@ std::map<std::string, std::any> ParseJSONTool::execute(const std::map<std::strin
 
 std::vector<ParameterDef> SerializeJSONTool::get_parameters_schema() const {
     return {
-        {"data", "string", "The data to serialize to JSON", true, ""}
+        {"data", "string", "The data to serialize to JSON", true, "", "", {}}
     };
 }
 
@@ -318,8 +318,8 @@ std::map<std::string, std::any> SerializeJSONTool::execute(const std::map<std::s
 
 std::vector<ParameterDef> QueryJSONTool::get_parameters_schema() const {
     return {
-        {"json", "string", "The JSON string to query", true, ""},
-        {"path", "string", "JSONPath expression to query the data", true, ""}
+        {"json", "string", "The JSON string to query", true, "", "", {}},
+        {"path", "string", "JSONPath expression to query the data", true, "", "", {}}
     };
 }
 

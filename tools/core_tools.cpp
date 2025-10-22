@@ -76,9 +76,9 @@ static bool glob_match(const std::string& pattern, const std::string& text) {
 // TaskTool implementation
 std::vector<ParameterDef> TaskTool::get_parameters_schema() const {
     return {
-        {"prompt", "string", "Detailed task description for the agent to perform autonomously", true, ""},
-        {"description", "string", "Short (3-5 word) summary of the task", false, "Task"},
-        {"subagent_type", "string", "Type of specialized agent (general-purpose, statusline-setup, output-style-setup)", false, "general-purpose"}
+        {"prompt", "string", "Detailed task description for the agent to perform autonomously", true, "", "", {}},
+        {"description", "string", "Short (3-5 word) summary of the task", false, "Task", "", {}},
+        {"subagent_type", "string", "Type of specialized agent (general-purpose, statusline-setup, output-style-setup)", false, "general-purpose", "", {}}
     };
 }
 
@@ -103,10 +103,10 @@ std::map<std::string, std::any> TaskTool::execute(const std::map<std::string, st
 // BashTool implementation
 std::vector<ParameterDef> BashTool::get_parameters_schema() const {
     return {
-        {"command", "string", "The bash command to execute", true, ""},
-        {"description", "string", "Clear description of what the command does (5-10 words)", false, "Execute command"},
-        {"timeout", "number", "Optional timeout in milliseconds", false, "120000"},
-        {"run_in_background", "boolean", "Set to true to run command in background", false, "false"}
+        {"command", "string", "The bash command to execute", true, "", "", {}},
+        {"description", "string", "Clear description of what the command does (5-10 words)", false, "Execute command", "", {}},
+        {"timeout", "number", "Optional timeout in milliseconds", false, "120000", "", {}},
+        {"run_in_background", "boolean", "Set to true to run command in background", false, "false", "", {}}
     };
 }
 
@@ -142,8 +142,8 @@ std::map<std::string, std::any> BashTool::execute(const std::map<std::string, st
 // GlobTool implementation
 std::vector<ParameterDef> GlobTool::get_parameters_schema() const {
     return {
-        {"pattern", "string", "Glob pattern to match files (e.g., **/*.js, src/**/*.cpp)", true, ""},
-        {"path", "string", "Directory to search in (defaults to current directory)", false, "."}
+        {"pattern", "string", "Glob pattern to match files (e.g., **/*.js, src/**/*.cpp)", true, "", "", {}},
+        {"path", "string", "Directory to search in (defaults to current directory)", false, ".", "", {}}
     };
 }
 
@@ -195,16 +195,16 @@ std::map<std::string, std::any> GlobTool::execute(const std::map<std::string, st
 // GrepTool implementation
 std::vector<ParameterDef> GrepTool::get_parameters_schema() const {
     return {
-        {"pattern", "string", "Regular expression pattern to search for", true, ""},
-        {"path", "string", "File or directory to search in (defaults to current directory)", false, "."},
-        {"output_mode", "string", "Output format: content, files_with_matches, or count", false, "files_with_matches"},
-        {"case_insensitive", "boolean", "Perform case-insensitive search", false, "false"},
-        {"line_numbers", "boolean", "Show line numbers in output (content mode only)", false, "false"},
-        {"context_after", "number", "Number of lines to show after match", false, "0"},
-        {"context_before", "number", "Number of lines to show before match", false, "0"},
-        {"glob", "string", "Filter files by glob pattern (e.g., *.js)", false, ""},
-        {"multiline", "boolean", "Enable multiline pattern matching", false, "false"},
-        {"head_limit", "number", "Limit output to first N results", false, "0"}
+        {"pattern", "string", "Regular expression pattern to search for", true, "", "", {}},
+        {"path", "string", "File or directory to search in (defaults to current directory)", false, ".", "", {}},
+        {"output_mode", "string", "Output format: content, files_with_matches, or count", false, "files_with_matches", "", {}},
+        {"case_insensitive", "boolean", "Perform case-insensitive search", false, "false", "", {}},
+        {"line_numbers", "boolean", "Show line numbers in output (content mode only)", false, "false", "", {}},
+        {"context_after", "number", "Number of lines to show after match", false, "0", "", {}},
+        {"context_before", "number", "Number of lines to show before match", false, "0", "", {}},
+        {"glob", "string", "Filter files by glob pattern (e.g., *.js)", false, "", "", {}},
+        {"multiline", "boolean", "Enable multiline pattern matching", false, "false", "", {}},
+        {"head_limit", "number", "Limit output to first N results", false, "0", "", {}}
     };
 }
 
@@ -323,10 +323,10 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
 // EditTool implementation
 std::vector<ParameterDef> EditTool::get_parameters_schema() const {
     return {
-        {"file_path", "string", "Absolute path to the file to edit", true, ""},
-        {"old_string", "string", "The exact text to replace", true, ""},
-        {"new_string", "string", "The replacement text", true, ""},
-        {"replace_all", "boolean", "Replace all occurrences (false = replace first only)", false, "false"}
+        {"file_path", "string", "Absolute path to the file to edit", true, "", "", {}},
+        {"old_string", "string", "The exact text to replace", true, "", "", {}},
+        {"new_string", "string", "The replacement text", true, "", "", {}},
+        {"replace_all", "boolean", "Replace all occurrences (false = replace first only)", false, "false", "", {}}
     };
 }
 
@@ -398,8 +398,8 @@ std::map<std::string, std::any> EditTool::execute(const std::map<std::string, st
 // WebFetchTool implementation
 std::vector<ParameterDef> WebFetchTool::get_parameters_schema() const {
     return {
-        {"url", "string", "The URL to fetch content from", true, ""},
-        {"prompt", "string", "What information to extract from the page", false, "Extract content"}
+        {"url", "string", "The URL to fetch content from", true, "", "", {}},
+        {"prompt", "string", "What information to extract from the page", false, "Extract content", "", {}}
     };
 }
 
@@ -446,9 +446,9 @@ std::map<std::string, std::any> WebFetchTool::execute(const std::map<std::string
 // WebSearchTool implementation
 std::vector<ParameterDef> WebSearchTool::get_parameters_schema() const {
     return {
-        {"query", "string", "The search query", true, ""},
-        {"allowed_domains", "array", "Only include results from these domains", false, "", "string"},
-        {"blocked_domains", "array", "Exclude results from these domains", false, "", "string"}
+        {"query", "string", "The search query", true, "", "", {}},
+        {"allowed_domains", "array", "Only include results from these domains", false, "", "string", {}},
+        {"blocked_domains", "array", "Exclude results from these domains", false, "", "string", {}}
     };
 }
 
@@ -515,9 +515,9 @@ std::vector<ParameterDef> TodoWriteTool::get_parameters_schema() const {
 
     // Define the structure of each todo item
     todo_item.object_properties = {
-        {"content", "string", "Task description in imperative form (e.g., 'Run tests')", true, ""},
-        {"status", "string", "Task status: pending, in_progress, or completed", true, "pending"},
-        {"activeForm", "string", "Present continuous form shown during execution (e.g., 'Running tests')", true, ""}
+        {"content", "string", "Task description in imperative form (e.g., 'Run tests')", true, "", "", {}},
+        {"status", "string", "Task status: pending, in_progress, or completed", true, "pending", "", {}},
+        {"activeForm", "string", "Present continuous form shown during execution (e.g., 'Running tests')", true, "", "", {}}
     };
 
     return {todo_item};
@@ -533,8 +533,8 @@ std::map<std::string, std::any> TodoWriteTool::execute(const std::map<std::strin
 // BashOutputTool implementation
 std::vector<ParameterDef> BashOutputTool::get_parameters_schema() const {
     return {
-        {"bash_id", "string", "The shell identifier returned by background Bash execution", true, ""},
-        {"filter", "string", "Optional regex pattern to filter output lines", false, ""}
+        {"bash_id", "string", "The shell identifier returned by background Bash execution", true, "", "", {}},
+        {"filter", "string", "Optional regex pattern to filter output lines", false, "", "", {}}
     };
 }
 
@@ -567,7 +567,7 @@ std::map<std::string, std::any> BashOutputTool::execute(const std::map<std::stri
 // KillShellTool implementation
 std::vector<ParameterDef> KillShellTool::get_parameters_schema() const {
     return {
-        {"shell_id", "string", "The shell identifier to terminate", true, ""}
+        {"shell_id", "string", "The shell identifier to terminate", true, "", "", {}}
     };
 }
 

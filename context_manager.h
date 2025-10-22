@@ -95,6 +95,11 @@ public:
     /// @brief Get total number of messages in hot context
     size_t get_message_count() const;
 
+    /// @brief Get token count from messages marked as in_kv_cache=true
+    /// Used for GPU backends to compare against actual KV cache state
+    /// @return Sum of token_count for all messages where in_kv_cache=true
+    int get_cached_message_tokens() const;
+
     /// @brief Clear all messages from hot context
     virtual void clear();
 
@@ -112,6 +117,10 @@ public:
     /// Used by backends to update token counts from API responses
     std::deque<Message>& get_messages() { return messages_; }
 
+    /// @brief Whether to automatically evict messages when context is full
+    /// Set by backends during initialization based on their eviction strategy
+    bool auto_evict = true;
+
     /// @brief Recalculate total token count from all messages
     /// Used after updating individual message token counts
     void recalculate_total_tokens();
@@ -119,6 +128,10 @@ public:
     /// @brief Get total tokens including JSON overhead
     /// @return Message tokens + JSON structure overhead
     int get_total_tokens() const;
+
+    /// @brief Adjust total token count by a delta (used when actual formatted tokens differ from estimate)
+    /// @param delta Amount to adjust (positive or negative)
+    void adjust_token_count(int delta);
 
     /// @brief Calculate which messages to evict to free required tokens
     /// @param tokens_needed Number of tokens that need to be freed
@@ -163,11 +176,6 @@ protected:
 
     size_t max_context_tokens_;
     int current_token_count_ = 0;
-
-    /// @brief Whether to automatically evict messages when add_message() exceeds token limits
-    /// - true: ContextManager manages eviction (for stateless backends like Gemini/Claude)
-    /// - false: Backend manages eviction via KV cache callbacks (for llama.cpp/TensorRT)
-    bool auto_evict_on_add_ = true;
 };
 
 /// @brief Exception thrown by context managers

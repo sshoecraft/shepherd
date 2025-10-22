@@ -108,6 +108,15 @@ public:
     /// Returns 0 for local backends or if no API call has been made yet
     int get_last_completion_tokens() const { return last_completion_tokens_; }
 
+    /// @brief Get current token count in context
+    /// Default implementation uses ContextManager's tracked count (for API backends)
+    /// GPU backends (llama.cpp, TensorRT) should override to query actual state
+    /// @return Number of tokens currently in context/KV cache
+    virtual int get_context_token_count() const {
+        if (!context_manager_) return 0;
+        return context_manager_->get_total_tokens();
+    }
+
     /// @brief Clear all context
     void clear_context() { context_manager_->clear(); }
 
@@ -183,11 +192,6 @@ protected:
     /// Local backends should leave these at 0
     int last_prompt_tokens_ = 0;
     int last_completion_tokens_ = 0;
-
-    /// @brief Whether to proactively evict when estimated tokens exceed limit
-    /// - true: Check before API call and evict if needed (Grok, Ollama, or when user_context < api_context)
-    /// - false: Rely on API returning 400 error when over limit
-    bool auto_evict_ = false;
 };
 
 /// @brief Factory for creating backend managers

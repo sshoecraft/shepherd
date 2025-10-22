@@ -11,6 +11,9 @@
 
 using json = nlohmann::json;
 
+// Global cancellation flag (defined in main.cpp)
+extern bool g_generation_cancelled;
+
 // Fallback model info table (used if docs scraping fails)
 static const AnthropicModelInfo FALLBACK_MODEL_INFO[] = {
     {"claude-sonnet-4-5-20250929", 200000, 64000},
@@ -123,11 +126,12 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
     size_t api_context_size = query_model_context_size(model_name_);
     LOG_INFO("Anthropic model " + model_name_ + " API context size: " + std::to_string(api_context_size));
 
-    // Determine final context size and auto_evict_ flag
+    // Determine final context size and auto_evict flag
+    bool auto_evict;
     if (max_context_size_ == 0) {
         // User didn't specify - use API's limit
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
         LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
     } else if (max_context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
@@ -135,21 +139,23 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
     } else if (max_context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
-        auto_evict_ = true;
+        auto_evict = true;
         LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
-        auto_evict_ = false;
+        auto_evict = false;
         LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
+    context_manager_->auto_evict = auto_evict;
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+              std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("AnthropicBackend initialized with model: " + model_name_);
     initialized_ = true;
@@ -168,7 +174,7 @@ std::string AnthropicBackend::generate(int max_tokens) {
     LOG_DEBUG("Anthropic generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
 
     // Proactive eviction if enabled (when user's context < API's context)
-    if (auto_evict_) {
+    if (context_manager_->auto_evict) {
         int estimated_tokens = estimate_context_tokens();
         LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
 
@@ -322,29 +328,73 @@ std::string AnthropicBackend::generate(int max_tokens) {
             request["tools"] = tools_json_;
         }
 
-        // Convert to string
-        std::string request_json = request.dump();
+        // Use centralized retry logic with automatic eviction
+        return generate_with_retry(
+            // Lambda 1: Build request JSON from current context
+            [this, actual_max_tokens]() -> json {
+                json req;
+                req["model"] = model_name_;
+                req["max_tokens"] = actual_max_tokens;
 
-        // Log full request for debugging
-        LOG_DEBUG("=== Full Anthropic API Request ===");
-        LOG_DEBUG(request_json);
-        LOG_DEBUG("=== End Request ===");
+                // Read messages from context manager
+                const auto& messages = context_manager_->get_messages();
+                std::string system_content;
+                req["messages"] = json::array();
 
-        // Make API call
-        std::string response_json = make_api_request(request_json);
-        if (response_json.empty()) {
-            throw BackendManagerError("Anthropic API request failed");
-        }
+                for (const auto& msg : messages) {
+                    if (msg.type == Message::SYSTEM) {
+                        system_content = msg.content;
+                    } else if (msg.type == Message::USER) {
+                        req["messages"].push_back({{"role", "user"}, {"content", msg.content}});
+                    } else if (msg.type == Message::ASSISTANT) {
+                        json assistant_content;
+                        try {
+                            json parsed = json::parse(msg.content);
+                            if (parsed.contains("name") && parsed.contains("parameters")) {
+                                assistant_content = json::array({{{"type", "tool_use"}, {"id", parsed.value("id", "")}, {"name", parsed["name"]}, {"input", parsed["parameters"]}}});
+                            } else {
+                                assistant_content = msg.content;
+                            }
+                        } catch (const json::exception&) {
+                            assistant_content = msg.content;
+                        }
+                        req["messages"].push_back({{"role", "assistant"}, {"content", assistant_content}});
+                    } else if (msg.type == Message::TOOL) {
+                        req["messages"].push_back({{"role", "user"}, {"content", json::array({{{"type", "tool_result"}, {"tool_use_id", msg.tool_call_id}, {"content", msg.content}}})}});
+                    }
+                }
 
-        LOG_DEBUG("Anthropic API response: " + response_json.substr(0, 500));
+                if (!system_content.empty()) {
+                    req["system"] = system_content;
+                }
 
-        // Parse response
-        std::string response_text = parse_anthropic_response(response_json);
-        if (response_text.empty()) {
-            throw BackendManagerError("Failed to parse Anthropic response");
-        }
+                if (!tools_json_.empty()) {
+                    req["tools"] = tools_json_;
+                }
 
-        return response_text;
+                return req;
+            },
+            // Lambda 2: Execute API request and return response
+            [this](const std::string& request_json) -> std::string {
+                LOG_DEBUG("=== Full Anthropic API Request ===");
+                LOG_DEBUG(request_json);
+                LOG_DEBUG("=== End Request ===");
+
+                std::string response_json = make_api_request(request_json);
+                if (response_json.empty()) {
+                    throw BackendManagerError("Anthropic API request failed");
+                }
+
+                LOG_DEBUG("Anthropic API response: " + response_json.substr(0, 500));
+
+                std::string response_text = parse_anthropic_response(response_json);
+                if (response_text.empty()) {
+                    throw BackendManagerError("Failed to parse Anthropic response");
+                }
+
+                return response_text;
+            }
+        );
     } catch (const json::exception& e) {
         throw BackendManagerError("JSON error in generate: " + std::string(e.what()));
     }
@@ -441,7 +491,7 @@ std::string AnthropicBackend::make_api_request(const std::string& json_payload) 
 
     if (res != CURLE_OK) {
         LOG_ERROR("CURL request failed: " + std::string(curl_easy_strerror(res)));
-        return "";
+        throw BackendManagerError("CURL request failed: " + std::string(curl_easy_strerror(res)));
     }
 
     // Check HTTP response code
@@ -449,8 +499,27 @@ std::string AnthropicBackend::make_api_request(const std::string& json_payload) 
     curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (http_code != 200) {
-        LOG_ERROR("Anthropic API error (HTTP " + std::to_string(http_code) + "): " + response_body);
-        return "";
+        // Try to parse error message from response body
+        std::string error_msg = "API request failed with status " + std::to_string(http_code);
+
+        if (!response_body.empty()) {
+            try {
+                auto error_json = json::parse(response_body);
+                if (error_json.contains("error")) {
+                    if (error_json["error"].is_object() && error_json["error"].contains("message")) {
+                        error_msg = error_json["error"]["message"].get<std::string>();
+                    } else if (error_json["error"].is_string()) {
+                        error_msg = error_json["error"].get<std::string>();
+                    }
+                }
+            } catch (const json::exception&) {
+                // If JSON parsing fails, use the raw response body
+                error_msg += ": " + response_body.substr(0, 200);
+            }
+        }
+
+        LOG_ERROR("Anthropic API error (HTTP " + std::to_string(http_code) + "): " + error_msg);
+        throw BackendManagerError(error_msg);
     }
 
     return response_body;
@@ -561,6 +630,22 @@ std::string AnthropicBackend::parse_anthropic_response(const std::string& respon
             std::string error_msg = j["error"].contains("message") ? j["error"]["message"].get<std::string>() : "Unknown error";
             LOG_ERROR("Anthropic API error: " + error_msg);
             return "";
+        }
+
+        // Extract usage data from API response and store for server to return
+        if (j.contains("usage") && j["usage"].is_object()) {
+            last_prompt_tokens_ = j["usage"].value("input_tokens", 0);
+            last_completion_tokens_ = j["usage"].value("output_tokens", 0);
+            LOG_DEBUG("Usage from API: input=" + std::to_string(last_prompt_tokens_) +
+                      " output=" + std::to_string(last_completion_tokens_) +
+                      " total=" + std::to_string(last_prompt_tokens_ + last_completion_tokens_));
+
+            // Update message token counts and EMA ratio
+            update_message_tokens_from_api(last_prompt_tokens_, last_completion_tokens_);
+        } else {
+            // Reset to 0 if no usage data (shouldn't happen with real APIs)
+            last_prompt_tokens_ = 0;
+            last_completion_tokens_ = 0;
         }
 
         // Extract content - handle both text and tool_use blocks

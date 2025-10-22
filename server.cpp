@@ -45,9 +45,10 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
         // Child process - run FastAPI server
         close(parent_fd);
 
-        // Pass socket fd to Python via command line
+        // Pass socket fd and parent PID to Python via command line
         std::string fd_str = std::to_string(child_fd);
         std::string port_str = std::to_string(server_port);
+        std::string parent_pid_str = std::to_string(getppid());  // Parent C++ process PID for cancellation signaling
 
         // Find Python interpreter
         const char* python = "python3";
@@ -75,6 +76,7 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
               "--fd", fd_str.c_str(),
               "--port", port_str.c_str(),
               "--host", server_host.c_str(),
+              "--parent-pid", parent_pid_str.c_str(),
               nullptr);
 
         // If execl returns, it failed
@@ -238,8 +240,9 @@ int run_server_mode(std::unique_ptr<BackendManager>& backend,
                 int completion_tokens = backend->get_last_completion_tokens();
 
                 if (prompt_tokens == 0 && completion_tokens == 0) {
-                    // Local backend - use ContextManager estimate
-                    prompt_tokens = backend->get_context_manager().get_total_tokens();
+                    // Local backend - query actual context state via backend
+                    // (llamacpp queries KV cache, API backends use tracked count)
+                    prompt_tokens = backend->get_context_token_count();
                     completion_tokens = 0;  // TODO: Track separately for local backends
                 }
 

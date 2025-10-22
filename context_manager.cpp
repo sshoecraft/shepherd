@@ -47,7 +47,7 @@ void ContextManager::add_message(const Message& message) {
 
     // Check if we need to evict BEFORE adding (only if auto-eviction is enabled)
     // For backends with KV cache (llama.cpp, TensorRT), eviction is handled by KV cache callbacks
-    if (auto_evict_on_add_ && needs_eviction(message.token_count)) {
+    if (auto_evict && needs_eviction(message.token_count)) {
         // Calculate how many tokens we need to free to fit this message
         int tokens_over = get_total_tokens() + message.token_count - static_cast<int>(get_available_tokens());
 
@@ -81,7 +81,12 @@ void ContextManager::add_message(const Message& message) {
 
     // Add the message to our deque
     messages_.push_back(message);
+
+    dprintf(2, "BEFORE increment: current_token_count_=%d, adding=%d",
+            current_token_count_, message.token_count);
     current_token_count_ += message.token_count;
+    dprintf(2, "AFTER increment: current_token_count_=%d/%zu",
+            current_token_count_, max_context_tokens_);
 
     // Track system messages (they're preserved during eviction)
     if (message.type == Message::SYSTEM && messages_.size() <= system_message_count_ + 1) {
@@ -165,11 +170,30 @@ int ContextManager::get_total_tokens() const {
     return current_token_count_ + calculate_json_overhead();
 }
 
+int ContextManager::get_cached_message_tokens() const {
+    int cached_tokens = 0;
+    for (const auto& msg : messages_) {
+        if (msg.in_kv_cache) {
+            cached_tokens += msg.token_count;
+        }
+    }
+    return cached_tokens;
+}
+
 void ContextManager::recalculate_total_tokens() {
+    int old_count = current_token_count_;
     current_token_count_ = 0;
     for (const auto& message : messages_) {
         current_token_count_ += message.token_count;
     }
+    dprintf(3, "RECALCULATE: old=%d, new=%d, messages=%zu",
+            old_count, current_token_count_, messages_.size());
+}
+
+void ContextManager::adjust_token_count(int delta) {
+    dprintf(3, "ADJUST: current=%d, delta=%d, new=%d",
+            current_token_count_, delta, current_token_count_ + delta);
+    current_token_count_ += delta;
 }
 
 std::pair<int, int> ContextManager::calculate_messages_to_evict(int tokens_needed, size_t max_evict_index) const {
@@ -411,17 +435,26 @@ bool ContextManager::evict_messages_by_index(int start_msg, int end_msg) {
         LOG_DEBUG("Could not extract clean Q&A pair for archiving");
     }
 
-    // Remove messages from deque and update token count
+    // Calculate evicted tokens for logging before erasing
+    int evicted_tokens = 0;
     for (int i = start_msg; i <= end_msg; i++) {
-        current_token_count_ -= messages_[i].token_count;
+        evicted_tokens += messages_[i].token_count;
+        dprintf(5, "EVICT msg[%d]: %d tokens (role=%s)",
+                i, messages_[i].token_count, messages_[i].get_role().c_str());
     }
 
-    // Erase evicted messages - do NOT insert a notice here!
-    // Notices should be added through normal message flow, not inserted mid-deque
+    // Erase evicted messages from the deque
     messages_.erase(messages_.begin() + start_msg, messages_.begin() + end_msg + 1);
 
+    // CRITICAL: Recalculate the total token count from the remaining messages
+    // This eliminates any drift that may have accumulated.
+    recalculate_total_tokens();
+
+    dprintf(2, "EVICT: removed %d tokens, current=%d/%zu",
+            evicted_tokens, current_token_count_, max_context_tokens_);
+
     int num_messages = end_msg - start_msg + 1;
-    LOG_INFO("Successfully evicted " + std::to_string(num_messages) + " messages, added eviction notice");
+    LOG_INFO("Successfully evicted " + std::to_string(num_messages) + " messages");
     LOG_DEBUG("Remaining tokens: " + std::to_string(current_token_count_) + "/" +
               std::to_string(max_context_tokens_));
 

@@ -10,10 +10,13 @@ import json
 import time
 import uuid
 import argparse
+import signal
+import asyncio
 from typing import Optional, List, Dict
 import socket
+from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import uvicorn
 
@@ -126,10 +129,11 @@ app = FastAPI(
 )
 
 shepherd: Optional[ShepherdClient] = None
+parent_pid: int = 0  # C++ parent process PID for sending cancellation signals
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(req: Request, request: ChatCompletionRequest):
     """OpenAI-compatible chat completions endpoint"""
 
     if request.stream:
@@ -151,8 +155,34 @@ async def chat_completions(request: ChatCompletionRequest):
     if request.tools:
         tools = [tool for tool in request.tools]
 
+    # Run shepherd.generate() in a thread pool so we can check for disconnects
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_event_loop()
+
+    # Start generation in background thread
+    generation_task = loop.run_in_executor(executor, shepherd.generate, messages, parameters, tools)
+
+    # Check for disconnects while generation is running
+    disconnect_detected = False
+    while not generation_task.done():
+        if await req.is_disconnected():
+            disconnect_detected = True
+            # Client disconnected - send SIGUSR1 to parent C++ process
+            try:
+                os.kill(parent_pid, signal.SIGUSR1)
+            except Exception as e:
+                print(f"Failed to send cancellation signal: {e}", file=sys.stderr)
+            break
+        # Check every 100ms
+        await asyncio.sleep(0.1)
+
+    # If disconnect detected, wait a bit for cancellation to take effect, then raise error
+    if disconnect_detected:
+        await asyncio.sleep(0.5)  # Give C++ time to cancel
+        raise HTTPException(499, "Client disconnected")
+
     try:
-        shepherd_response = shepherd.generate(messages, parameters, tools)
+        shepherd_response = await generation_task
     except Exception as e:
         error_msg = str(e)
         # Check if this is a context limit error (client error, not server error)
@@ -252,16 +282,21 @@ async def health():
 # ============================================================================
 
 def main():
-    global shepherd
+    global shepherd, parent_pid
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--fd", type=int, required=True,
                        help="Socket file descriptor from parent process")
-    parser.add_argument("--port", type=int, default=8080,
+    parser.add_argument("--port", type=int, default=8000,
                        help="Port to listen on")
     parser.add_argument("--host", type=str, default="0.0.0.0",
                        help="Host to bind to")
+    parser.add_argument("--parent-pid", type=int, required=True,
+                       help="Parent C++ process PID for cancellation signaling")
     args = parser.parse_args()
+
+    # Store parent PID for cancellation signaling
+    parent_pid = args.parent_pid
 
     try:
         shepherd = ShepherdClient(args.fd)

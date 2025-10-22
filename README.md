@@ -383,7 +383,7 @@ This README describes Shepherd, a production-grade LLM inference system...
 import requests
 
 # Start conversation
-response = requests.post("http://localhost:8080/v1/chat/completions", json={
+response = requests.post("http://localhost:8000/v1/chat/completions", json={
     "model": "llama-3.1-70b-instruct",
     "messages": [
         {"role": "user", "content": "What's the weather like?"}
@@ -444,7 +444,7 @@ Shepherd can run as an HTTP server providing an OpenAI-compatible REST API for *
 
 ```bash
 # Start server with llamacpp backend
-./shepherd --server --port 8080 --backend llamacpp --model /path/to/model.gguf
+./shepherd --server --port 8000 --backend llamacpp --model /path/to/model.gguf
 
 # Start with specific configuration
 ./shepherd --server --config server_config.json
@@ -453,12 +453,12 @@ Shepherd can run as an HTTP server providing an OpenAI-compatible REST API for *
 Shepherd API Server starting...
 Backend: llamacpp
 Model: /models/qwen-3-30b.gguf
-Listening on: http://0.0.0.0:8080
+Listening on: http://0.0.0.0:8000
 
 Endpoints:
-  POST http://0.0.0.0:8080/v1/chat/completions
-  GET  http://0.0.0.0:8080/v1/models
-  GET  http://0.0.0.0:8080/health
+  POST http://0.0.0.0:8000/v1/chat/completions
+  GET  http://0.0.0.0:8000/v1/models
+  GET  http://0.0.0.0:8000/health
 ```
 
 ### API Endpoints
@@ -577,7 +577,7 @@ import openai
 
 client = openai.OpenAI(
     api_key="dummy",  # Not used
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:8000/v1"
 )
 
 # Request 1: Send initial message
@@ -653,7 +653,7 @@ import openai
 
 client = openai.OpenAI(
     api_key="dummy",
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:8000/v1"
 )
 
 # Multi-turn conversation
@@ -681,7 +681,7 @@ while True:
 
 ```bash
 # Single request
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4",
@@ -691,7 +691,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 
 # With tools
-curl -X POST http://localhost:8080/v1/chat/completions \
+curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4",
@@ -725,7 +725,7 @@ Add to `shepherd.json`:
     "server_mode": {
         "enabled": true,
         "host": "0.0.0.0",
-        "port": 8080
+        "port": 8000
     },
     "backend": "llamacpp",
     "model_path": "/models/model.gguf"
@@ -735,7 +735,7 @@ Add to `shepherd.json`:
 Or use command-line options:
 
 ```bash
-./shepherd --server --host 0.0.0.0 --port 8080 --backend llamacpp --model /path/to/model.gguf
+./shepherd --server --host 0.0.0.0 --port 8000 --backend llamacpp --model /path/to/model.gguf
 ```
 
 ### Important Notes

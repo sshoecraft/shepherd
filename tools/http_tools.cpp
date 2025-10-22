@@ -96,9 +96,9 @@ public:
 
 std::vector<ParameterDef> HTTPRequestTool::get_parameters_schema() const {
     return {
-        {"url", "string", "The URL to make the HTTP request to", true, ""},
-        {"method", "string", "HTTP method (GET, POST, PUT, DELETE)", false, "GET"},
-        {"body", "string", "Optional request body (JSON format)", false, ""}
+        {"url", "string", "The URL to make the HTTP request to", true, "", "", {}},
+        {"method", "string", "HTTP method (GET, POST, PUT, DELETE)", false, "GET", "", {}},
+        {"body", "string", "Optional request body (JSON format)", false, "", "", {}}
     };
 }
 
@@ -152,7 +152,7 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
 
 std::vector<ParameterDef> HTTPGetTool::get_parameters_schema() const {
     return {
-        {"url", "string", "The URL to make the HTTP GET request to", true, ""}
+        {"url", "string", "The URL to make the HTTP GET request to", true, "", "", {}}
     };
 }
 
@@ -197,8 +197,8 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
 
 std::vector<ParameterDef> HTTPPostTool::get_parameters_schema() const {
     return {
-        {"url", "string", "The URL to make the HTTP POST request to", true, ""},
-        {"body", "string", "Optional request body (JSON format)", false, ""}
+        {"url", "string", "The URL to make the HTTP POST request to", true, "", "", {}},
+        {"body", "string", "Optional request body (JSON format)", false, "", "", {}}
     };
 }
 

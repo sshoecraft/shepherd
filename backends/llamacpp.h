@@ -119,6 +119,9 @@ public:
     bool is_ready() const override;
     void shutdown() override;
 
+    // Override to query actual KV cache state instead of tracked count
+    int get_context_token_count() const override;
+
     // Evict messages from KV cache to free space
     // Returns the new head position (where freed space begins), or UINT32_MAX on failure
     uint32_t evict_to_free_space(uint32_t tokens_needed) override;
@@ -173,6 +176,10 @@ private:
     /// @return True if successful, false otherwise
     bool format_and_decode_message(Message& msg);
 
+    /// @brief Log token state comparison (messages vs KV cache) at debug level 3+
+    /// @param context Description of where this is being called from
+    void log_token_state(const std::string& context) const;
+
 #ifdef ENABLE_LLAMACPP
     void* model_ctx_ = nullptr; // llama_context*
     void* model_ = nullptr;     // llama_model*
@@ -219,12 +226,10 @@ private:
     std::vector<float> tensor_split_;  // Proportion for each GPU (e.g., [1.0, 1.0] for even split across 2 GPUs)
     std::vector<void*> gpu_devices_;  // Device pointers (ggml_backend_dev_t*) for multi-GPU (NULL-terminated)
 
-    // Server mode flag - suppresses all streaming output
-    bool server_mode_ = false;
-
     // Formatted token counts (including all template overhead)
     int system_formatted_tokens_ = 0;
     int current_user_formatted_tokens_ = 0;
+    int last_assistant_kv_tokens_ = 0;  // Actual tokens in KV cache for last assistant message (prompt + content + closing)
 
 #endif
 };

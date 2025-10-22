@@ -21,7 +21,7 @@ Shepherd is an interactive program that requires a terminal. Automated testing w
 1. **Shepherd Server Running:**
    ```bash
    # On server machine (192.168.1.166)
-   ./shepherd --server --port 8080 \
+   ./shepherd --server --port 8000 \
      --backend llamacpp \
      --model /path/to/model.gguf \
      --context-size 98304
@@ -45,7 +45,7 @@ cd /Users/steve/src/shepherd/build
 # Test 1: Tiny context (2048 tokens)
 ./shepherd \
   --backend openai \
-  --api-base http://192.168.1.166:8080/v1 \
+  --api-base http://192.168.1.166:8000/v1 \
   --model gpt-4 \
   --context-size 2048 \
   --rag-db /tmp/eviction_test_tiny.db
@@ -53,7 +53,7 @@ cd /Users/steve/src/shepherd/build
 # Test 2: Small context (8192 tokens)
 ./shepherd \
   --backend openai \
-  --api-base http://192.168.1.166:8080/v1 \
+  --api-base http://192.168.1.166:8000/v1 \
   --model gpt-4 \
   --context-size 8192 \
   --rag-db /tmp/eviction_test_small.db
@@ -61,7 +61,7 @@ cd /Users/steve/src/shepherd/build
 # Test 3: Micro context (512 tokens) - rapid eviction
 ./shepherd \
   --backend openai \
-  --api-base http://192.168.1.166:8080/v1 \
+  --api-base http://192.168.1.166:8000/v1 \
   --model gpt-4 \
   --context-size 512 \
   --rag-db /tmp/eviction_test_micro.db

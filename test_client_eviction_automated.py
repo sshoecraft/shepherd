@@ -24,7 +24,7 @@ import re
 # ============================================================================
 
 SHEPHERD_BINARY = "./shepherd"
-SERVER_API_BASE = "http://192.168.1.166:8080/v1"
+SERVER_API_BASE = "http://192.168.1.166:8000/v1"
 SERVER_MODEL = "gpt-4"
 
 CONTEXT_PROFILES = {

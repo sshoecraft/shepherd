@@ -10,9 +10,9 @@
 
 std::vector<ParameterDef> ExecuteCommandTool::get_parameters_schema() const {
     return {
-        {"command", "string", "The shell command to execute", true, ""},
-        {"working_dir", "string", "Optional working directory for command execution", false, ""},
-        {"timeout", "number", "Optional timeout in seconds (not currently enforced)", false, "30"}
+        {"command", "string", "The shell command to execute", true, "", "", {}},
+        {"working_dir", "string", "Optional working directory for command execution", false, "", "", {}},
+        {"timeout", "number", "Optional timeout in seconds (not currently enforced)", false, "30", "", {}}
     };
 }
 
@@ -84,8 +84,8 @@ std::map<std::string, std::any> ExecuteCommandTool::execute(const std::map<std::
 
 std::vector<ParameterDef> GetEnvironmentVariableTool::get_parameters_schema() const {
     return {
-        {"name", "string", "The name of the environment variable to retrieve", true, ""},
-        {"default", "string", "Optional default value if variable is not set", false, ""}
+        {"name", "string", "The name of the environment variable to retrieve", true, "", "", {}},
+        {"default", "string", "Optional default value if variable is not set", false, "", "", {}}
     };
 }
 

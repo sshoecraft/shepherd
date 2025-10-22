@@ -2,8 +2,10 @@
 
 #include "../backend_manager.h"
 #include "../http_client.h"
+#include "../nlohmann/json.hpp"
 #include <memory>
 #include <vector>
+#include <functional>
 
 /// @brief Simple context manager for API backends
 /// Just stores messages in memory - no special formatting
@@ -97,6 +99,14 @@ protected:
     /// Starts at 4.0 chars/token, refines based on API responses
     float chars_per_token_ = 4.0f;
 
+    /// @brief Baseline token count from first API call (System + warmup User message)
+    /// This is the fixed baseline we use for all subsequent delta calculations
+    int baseline_tokens_ = 0;
+
+    /// @brief Flag to track if this is the first API call (warmup turn)
+    /// First call establishes the baseline, subsequent calls use delta calculation
+    bool first_call_ = true;
+
     /// @brief Estimate total tokens in current context using adaptive ratio
     /// @return Estimated token count
     int estimate_context_tokens() const;
@@ -111,4 +121,29 @@ protected:
     /// Fixes bug where eviction aborted because messages had token_count=0
     /// @param estimated_tokens Total estimated tokens in context
     void evict_with_estimation(int estimated_tokens);
+
+    /// @brief Estimate tokens for a single message using EMA ratio
+    /// @param content Message content
+    /// @return Estimated token count
+    int estimate_message_tokens(const std::string& content) const;
+
+    /// @brief Update message token counts from API response
+    /// Updates the last user message with prompt tokens and adds assistant message with completion tokens
+    /// Also updates EMA ratio for better future estimates
+    /// @param prompt_tokens Total prompt tokens from API (all messages sent)
+    /// @param completion_tokens Assistant response tokens from API
+    void update_message_tokens_from_api(int prompt_tokens, int completion_tokens);
+
+    /// @brief Execute API request with automatic retry on context overflow
+    /// Implements reactive eviction: when API returns context overflow error,
+    /// evicts oldest messages and retries (only in CLI mode, not server mode)
+    /// @param build_request_func Lambda that builds the JSON request from current context
+    /// @param execute_request_func Lambda that makes the API call and returns response
+    /// @param max_retries Maximum number of retry attempts (default 3)
+    /// @return Final response string after successful request or all retries exhausted
+    std::string generate_with_retry(
+        std::function<nlohmann::json()> build_request_func,
+        std::function<std::string(const std::string&)> execute_request_func,
+        int max_retries = 3
+    );
 };

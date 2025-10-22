@@ -7,6 +7,9 @@
 
 using json = nlohmann::json;
 
+// Global cancellation flag (defined in main.cpp)
+extern bool g_generation_cancelled;
+
 // GrokBackend implementation
 GrokBackend::GrokBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
@@ -42,22 +45,44 @@ bool GrokBackend::initialize(const std::string& model_name, const std::string& a
         return false;
     }
 
-    // Query the actual context size for this model
-    size_t actual_context_size = query_model_context_size(model_name_);
-    if (actual_context_size > 0) {
-        max_context_size_ = actual_context_size;
-        LOG_INFO("Grok model " + model_name_ + " context size: " + std::to_string(actual_context_size));
+    // Query the API's context size for this model
+    size_t api_context_size = query_model_context_size(model_name_);
+    if (api_context_size == 0) {
+        LOG_ERROR("Failed to query context size for " + model_name_);
+        return false;
+    }
+    LOG_INFO("Grok model " + model_name_ + " API context size: " + std::to_string(api_context_size));
+
+    // Determine final context size and auto_evict flag
+    bool auto_evict;
+    if (max_context_size_ == 0) {
+        // User didn't specify - use API's limit
+        max_context_size_ = api_context_size;
+        auto_evict = false; // Rely on API 400 errors
+        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
+    } else if (max_context_size_ > api_context_size) {
+        // User requested more than API supports - cap at API limit
+        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
+                 " exceeds API limit " + std::to_string(api_context_size) +
+                 ", capping at API limit");
+        max_context_size_ = api_context_size;
+        auto_evict = false; // Rely on API 400 errors
+    } else if (max_context_size_ < api_context_size) {
+        // User requested less than API supports - need proactive eviction
+        auto_evict = true;
+        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
+                 " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
-        LOG_WARN("Failed to query context size for " + model_name_ + ", using default: " + std::to_string(max_context_size_));
+        // User's limit equals API limit - rely on API errors
+        auto_evict = false;
+        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
     }
 
-    // Create the shared context manager with actual model context size
+    // Create the shared context manager with final context size
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
-
-    // Grok silently truncates - always use proactive eviction
-    auto_evict_ = true;
-    LOG_DEBUG("Grok backend: auto_evict enabled (API does not return context errors)");
+    context_manager_->auto_evict = auto_evict;
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+              std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("GrokBackend initialized with model: " + model_name_);
     initialized_ = true;
@@ -76,21 +101,23 @@ std::string GrokBackend::generate(int max_tokens) {
     LOG_DEBUG("Grok generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
 
     // Proactive eviction for Grok (since Grok silently truncates instead of returning errors)
-    int estimated_tokens = estimate_context_tokens();
-    LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
+    if (context_manager_->auto_evict) {
+        int estimated_tokens = estimate_context_tokens();
+        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
 
-    if (estimated_tokens > static_cast<int>(max_context_size_)) {
-        if (g_server_mode) {
-            // Server mode: throw exception, let client handle it
-            throw ContextManagerError(
-                "Context limit exceeded: estimated " +
-                std::to_string(estimated_tokens) + " tokens but limit is " +
-                std::to_string(max_context_size_) + " tokens. Client must manage context window.");
-        } else {
-            // CLI mode: proactively evict to make room
-            LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
-                     " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-            evict_with_estimation(estimated_tokens);
+        if (estimated_tokens > static_cast<int>(max_context_size_)) {
+            if (g_server_mode) {
+                // Server mode: throw exception, let client handle it
+                throw ContextManagerError(
+                    "Context limit exceeded: estimated " +
+                    std::to_string(estimated_tokens) + " tokens but limit is " +
+                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
+            } else {
+                // CLI mode: proactively evict to make room
+                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
+                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
+                evict_with_estimation(estimated_tokens);
+            }
         }
     }
 
@@ -189,6 +216,8 @@ size_t GrokBackend::query_model_context_size(const std::string& model_name) {
 std::string GrokBackend::parse_grok_response(const std::string& response_json) {
     // TODO: Parse Grok response format (OpenAI-compatible)
     // Extract choices[0].message.content
+    // TODO: Also parse usage.prompt_tokens and usage.completion_tokens (OpenAI format)
+    // Call update_message_tokens_from_api(prompt_tokens, completion_tokens);
     return "TODO: Parse response";
 }
 

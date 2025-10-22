@@ -18,8 +18,8 @@ std::string SearchMemoryTool::parameters() const {
 
 std::vector<ParameterDef> SearchMemoryTool::get_parameters_schema() const {
     return {
-        {"query", "string", "The search query to find relevant information", true, ""},
-        {"max_results", "string", "Maximum number of results to return", false, "5"}
+        {"query", "string", "The search query to find relevant information", true, "", "", {}},
+        {"max_results", "string", "Maximum number of results to return", false, "5", "", {}}
     };
 }
 
@@ -190,8 +190,8 @@ std::string SetFactTool::parameters() const {
 
 std::vector<ParameterDef> SetFactTool::get_parameters_schema() const {
     return {
-        {"key", "string", "Identifier for the fact to store", true, ""},
-        {"value", "string", "Content of the fact to store", true, ""}
+        {"key", "string", "Identifier for the fact to store", true, "", "", {}},
+        {"value", "string", "Content of the fact to store", true, "", "", {}}
     };
 }
 
@@ -229,7 +229,7 @@ std::string GetFactTool::parameters() const {
 
 std::vector<ParameterDef> GetFactTool::get_parameters_schema() const {
     return {
-        {"key", "string", "Identifier of the fact to retrieve", true, ""}
+        {"key", "string", "Identifier of the fact to retrieve", true, "", "", {}}
     };
 }
 
@@ -267,7 +267,7 @@ std::string ClearFactTool::parameters() const {
 
 std::vector<ParameterDef> ClearFactTool::get_parameters_schema() const {
     return {
-        {"key", "string", "Identifier of the fact to clear", true, ""}
+        {"key", "string", "Identifier of the fact to clear", true, "", "", {}}
     };
 }
 
@@ -305,8 +305,8 @@ std::string StoreMemoryTool::parameters() const {
 
 std::vector<ParameterDef> StoreMemoryTool::get_parameters_schema() const {
     return {
-        {"question", "string", "The question text to store", true, ""},
-        {"answer", "string", "The answer text to store", true, ""}
+        {"question", "string", "The question text to store", true, "", "", {}},
+        {"answer", "string", "The answer text to store", true, "", "", {}}
     };
 }
 
@@ -344,7 +344,7 @@ std::string ClearMemoryTool::parameters() const {
 
 std::vector<ParameterDef> ClearMemoryTool::get_parameters_schema() const {
     return {
-        {"question", "string", "The exact question to delete from memory", true, ""}
+        {"question", "string", "The exact question to delete from memory", true, "", "", {}}
     };
 }
 

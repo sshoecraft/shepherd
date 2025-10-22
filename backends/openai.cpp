@@ -7,6 +7,9 @@
 
 using json = nlohmann::json;
 
+// Global cancellation flag (defined in main.cpp)
+extern bool g_generation_cancelled;
+
 // OpenAIBackend implementation
 OpenAIBackend::OpenAIBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
@@ -57,11 +60,12 @@ bool OpenAIBackend::initialize(const std::string& model_name, const std::string&
         LOG_INFO("OpenAI model " + model_name_ + " API context size: " + std::to_string(api_context_size));
     }
 
-    // Determine final context size and auto_evict_ flag
+    // Determine final context size and auto_evict flag
+    bool auto_evict;
     if (max_context_size_ == 0) {
         // User didn't specify - use API's limit
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
         LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
     } else if (max_context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
@@ -69,21 +73,23 @@ bool OpenAIBackend::initialize(const std::string& model_name, const std::string&
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
         max_context_size_ = api_context_size;
-        auto_evict_ = false; // Rely on API 400 errors
+        auto_evict = false; // Rely on API 400 errors
     } else if (max_context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
-        auto_evict_ = true;
+        auto_evict = true;
         LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
-        auto_evict_ = false;
+        auto_evict = false;
         LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
     context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens");
+    context_manager_->auto_evict = auto_evict;
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+              std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("OpenAIBackend initialized with model: " + model_name_);
     initialized_ = true;
@@ -102,7 +108,7 @@ std::string OpenAIBackend::generate(int max_tokens) {
     LOG_DEBUG("OpenAI generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
 
     // Proactive eviction if enabled (when user's context < API's context)
-    if (auto_evict_) {
+    if (context_manager_->auto_evict) {
         int estimated_tokens = estimate_context_tokens();
         LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
 
@@ -201,28 +207,69 @@ std::string OpenAIBackend::generate(int max_tokens) {
         LOG_DEBUG("Added " + std::to_string(tools_json_.size()) + " tools to OpenAI request");
     }
 
-    // Make API call
-    std::string request_json = request.dump();
-    if (request_json.length() <= 2000) {
-        LOG_DEBUG("Full OpenAI API request: " + request_json);
-    } else {
-        LOG_DEBUG("OpenAI API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
-        LOG_DEBUG("OpenAI API request length: " + std::to_string(request_json.length()) + " bytes");
-    }
-    std::string response_body = make_api_request(request_json);
+    // Use centralized retry logic with automatic eviction
+    return generate_with_retry(
+        // Lambda 1: Build request JSON from current context
+        [this, max_tokens]() -> json {
+            json req;
+            req["model"] = model_name_;
 
-    if (response_body.empty()) {
-        throw BackendManagerError("API request failed or returned empty response");
-    }
+            if (max_tokens > 0) {
+                req["max_tokens"] = max_tokens;
+            }
 
-    // Parse response to extract content
-    std::string response = parse_openai_response(response_body);
+            // Format messages for OpenAI API
+            req["messages"] = json::array();
+            const auto& messages = context_manager_->get_messages();
 
-    // Return response directly - main will add it to context
-    return response;
+            for (const auto& msg : messages) {
+                json message_obj;
+
+                if (msg.type == Message::SYSTEM) {
+                    message_obj["role"] = "system";
+                    message_obj["content"] = msg.content;
+                } else if (msg.type == Message::USER) {
+                    message_obj["role"] = "user";
+                    message_obj["content"] = msg.content;
+                } else if (msg.type == Message::ASSISTANT) {
+                    message_obj["role"] = "assistant";
+                    message_obj["content"] = msg.content;
+                } else if (msg.type == Message::TOOL) {
+                    message_obj["role"] = "tool";
+                    message_obj["content"] = msg.content;
+                    if (!msg.tool_call_id.empty()) {
+                        message_obj["tool_call_id"] = msg.tool_call_id;
+                    }
+                }
+
+                req["messages"].push_back(message_obj);
+            }
+
+            // Add tools if available
+            if (!tools_json_.empty()) {
+                req["tools"] = tools_json_;
+            }
+
+            return req;
+        },
+        // Lambda 2: Execute API request and return response
+        [this](const std::string& request_json) -> std::string {
+            std::string response_body = make_api_request(request_json);
+
+            if (response_body.empty()) {
+                throw BackendManagerError("API request failed or returned empty response");
+            }
+
+            // Parse response to extract content
+            return parse_openai_response(response_body);
+        }
+    );
 }
 
 std::string OpenAIBackend::generate_from_session(const SessionContext& session, int max_tokens) {
+    // Reset cancellation flag at start of generation
+    g_generation_cancelled = false;
+
     if (!is_ready()) {
         throw BackendManagerError("OpenAI backend not initialized");
     }
@@ -294,6 +341,12 @@ std::string OpenAIBackend::generate_from_session(const SessionContext& session, 
 
         request["tools"] = tools_array;
         LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to OpenAI request from SessionContext");
+    }
+
+    // Check for cancellation before making API call
+    if (g_generation_cancelled) {
+        LOG_INFO("Generation cancelled before API call");
+        return "";
     }
 
     // Make API call
@@ -370,9 +423,27 @@ std::string OpenAIBackend::make_api_request(const std::string& json_payload) {
     HttpResponse response = http_client_->post(api_endpoint_, json_payload, headers);
 
     if (!response.is_success()) {
-        LOG_ERROR("API request failed with status " + std::to_string(response.status_code) +
-                  ": " + response.error_message);
-        return "";
+        // Try to parse error message from response body
+        std::string error_msg = "API request failed with status " + std::to_string(response.status_code);
+
+        if (!response.body.empty()) {
+            try {
+                auto error_json = json::parse(response.body);
+                if (error_json.contains("error")) {
+                    if (error_json["error"].is_object() && error_json["error"].contains("message")) {
+                        error_msg = error_json["error"]["message"].get<std::string>();
+                    } else if (error_json["error"].is_string()) {
+                        error_msg = error_json["error"].get<std::string>();
+                    }
+                }
+            } catch (const json::exception&) {
+                // If JSON parsing fails, use the raw response body
+                error_msg += ": " + response.body.substr(0, 200);
+            }
+        }
+
+        LOG_ERROR("OpenAI API error (HTTP " + std::to_string(response.status_code) + "): " + error_msg);
+        throw BackendManagerError(error_msg);
     }
 
     return response.body;
@@ -551,6 +622,9 @@ std::string OpenAIBackend::parse_openai_response(const std::string& response_jso
             LOG_DEBUG("Usage from API: prompt=" + std::to_string(last_prompt_tokens_) +
                       " completion=" + std::to_string(last_completion_tokens_) +
                       " total=" + std::to_string(last_prompt_tokens_ + last_completion_tokens_));
+
+            // Update message token counts and EMA ratio
+            update_message_tokens_from_api(last_prompt_tokens_, last_completion_tokens_);
         } else {
             // Reset to 0 if no usage data (shouldn't happen with real APIs)
             last_prompt_tokens_ = 0;

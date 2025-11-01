@@ -8,6 +8,7 @@
 #include "cli.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
+#include "version.h"
 
 #include <iostream>
 #include <fstream>
@@ -87,6 +88,7 @@ static void print_usage(int, char** argv) {
 	printf("	--port PORT		   Server port (default: 8000, requires --server)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --server)\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
+	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
 	printf("\nMCP Management:\n");
 	printf("	mcp list							  List all configured MCP servers\n");
@@ -612,13 +614,14 @@ int main(int argc, char** argv) {
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
 		{"truncate", required_argument, 0, 1019},
+		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
 
 	int opt;
 	int option_index = 0;
-	while ((opt = getopt_long(argc, argv, "c:dl:m:h", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:dl:m:vh", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'c':
 				config_file_path = optarg;
@@ -682,6 +685,9 @@ int main(int argc, char** argv) {
 			case 1023: // --memory-db
 				memory_db_override = optarg;
 				break;
+			case 'v':
+				printf("Shepherd version %s\n", SHEPHERD_VERSION);
+				return 0;
 			case 'h':
 				print_usage(argc, argv);
 				return 0;

@@ -109,8 +109,12 @@ private:
     /// @brief Static callback for curl header function
     static size_t header_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
 
+    /// @brief Static callback for curl progress function (used for cancellation)
+    static int progress_callback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow);
+
     /// @brief Static callback for streaming write function
     static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userdata);
+
 
     /// @brief Structure for streaming callback data
     struct StreamCallbackData {

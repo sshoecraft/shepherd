@@ -46,7 +46,7 @@ std::map<std::string, std::any> ExecuteCommandTool::execute(const std::map<std::
         std::string stderr_output;
 
         // Use popen to capture stdout
-        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(full_command.c_str(), "r"), pclose);
+        std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(full_command.c_str(), "r"), pclose);
 
         if (!pipe) {
             result["error"] = std::string("failed to execute command");
@@ -137,7 +137,7 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
         std::array<char, 128> buffer;
         std::string output;
 
-        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
+        std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(command.c_str(), "r"), pclose);
 
         if (!pipe) {
             result["error"] = std::string("failed to execute ps command");

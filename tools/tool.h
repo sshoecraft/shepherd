@@ -62,6 +62,22 @@ private:
     std::map<std::string, std::unique_ptr<Tool>> tools_;
 };
 
+// Tool execution result
+struct ToolResult {
+    bool success;
+    std::string content;
+    std::string error;
+
+    ToolResult() : success(false) {}
+    ToolResult(bool s, const std::string& c, const std::string& e = "")
+        : success(s), content(c), error(e) {}
+};
+
+// Execute a tool by name with parameters
+// Returns ToolResult with execution outcome
+ToolResult execute_tool(const std::string& tool_name,
+                       const std::map<std::string, std::any>& parameters);
+
 // Utility functions for std::any conversion
 namespace tool_utils {
     std::string get_string(const std::map<std::string, std::any>& args, const std::string& key, const std::string& default_value = "");

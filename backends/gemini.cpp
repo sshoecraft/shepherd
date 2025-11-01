@@ -7,45 +7,15 @@
 
 using json = nlohmann::json;
 
-// Global cancellation flag (defined in main.cpp)
-extern bool g_generation_cancelled;
-
-// GeminiTokenizer implementation
-GeminiTokenizer::GeminiTokenizer(const std::string& model_name)
-    : model_name_(model_name) {
-    LOG_DEBUG("Gemini tokenizer initialized for model: " + model_name);
-}
-
-int GeminiTokenizer::count_tokens(const std::string& text) {
-    // TODO: Implement SentencePiece tokenization for Gemini
-    // For now, use approximation (roughly 4 chars per token)
-    return static_cast<int>(text.length() / 4.0 + 0.5);
-}
-
-std::vector<int> GeminiTokenizer::encode(const std::string& text) {
-    // TODO: Implement SentencePiece encoding
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
-    }
-    return tokens;
-}
-
-std::string GeminiTokenizer::decode(const std::vector<int>& tokens) {
-    // TODO: Implement SentencePiece decoding
-    return "TODO: Implement Gemini decode";
-}
-
-std::string GeminiTokenizer::get_tokenizer_name() const {
-    return "sentencepiece-" + model_name_;
-}
-
 // GeminiBackend implementation
 GeminiBackend::GeminiBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
     // Don't create context manager yet - wait until model is loaded to get actual context size
-    tokenizer_ = std::make_unique<GeminiTokenizer>("gemini-pro"); // Default model
     LOG_DEBUG("GeminiBackend created");
+
+    // Parse backend-specific config
+    std::string backend_cfg = config.backend_config(get_backend_name());
+    parse_backend_config(backend_cfg);
 }
 
 GeminiBackend::~GeminiBackend() {
@@ -66,9 +36,6 @@ bool GeminiBackend::initialize(const std::string& model_name, const std::string&
 
     model_name_ = model_name.empty() ? "gemini-pro" : model_name;
     api_key_ = api_key;
-
-    // Update tokenizer with correct model name
-    tokenizer_ = std::make_unique<GeminiTokenizer>(model_name_);
 
     // Initialize curl
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -91,33 +58,33 @@ bool GeminiBackend::initialize(const std::string& model_name, const std::string&
 
     // Determine final context size and auto_evict flag
     bool auto_evict;
-    if (max_context_size_ == 0) {
+    if (context_size_ == 0) {
         // User didn't specify - use API's limit
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
-    } else if (max_context_size_ > api_context_size) {
+        LOG_INFO("Using API's context size: " + std::to_string(context_size_) + " (auto_evict=false)");
+    } else if (context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
-        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
+        LOG_WARN("Requested context size " + std::to_string(context_size_) +
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-    } else if (max_context_size_ < api_context_size) {
+    } else if (context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
         auto_evict = true;
-        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
+        LOG_INFO("Using user's context size: " + std::to_string(context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
         auto_evict = false;
-        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
+        LOG_INFO("Using context size: " + std::to_string(context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
-    context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
+    context_manager_ = std::make_unique<ApiContextManager>(context_size_);
     context_manager_->auto_evict = auto_evict;
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(context_size_) + " tokens (auto_evict=" +
               std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("GeminiBackend initialized with model: " + model_name_);
@@ -130,41 +97,10 @@ bool GeminiBackend::initialize(const std::string& model_name, const std::string&
 }
 
 std::string GeminiBackend::generate(int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Gemini backend not initialized");
-    }
-
-    LOG_DEBUG("Gemini generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
-
-    // Proactive eviction if enabled (when user's context < API's context)
-    if (context_manager_->auto_evict) {
-        int estimated_tokens = estimate_context_tokens();
-        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
-
-        if (estimated_tokens > static_cast<int>(max_context_size_)) {
-            if (g_server_mode) {
-                // Server mode: throw exception, let client handle it
-                throw ContextManagerError(
-                    "Context limit exceeded: estimated " +
-                    std::to_string(estimated_tokens) + " tokens but limit is " +
-                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
-            } else {
-                // CLI mode: proactively evict to make room
-                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
-                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-                evict_with_estimation(estimated_tokens);
-            }
-        }
-    }
-
-    // Get current context for API call
-    std::string context_json = context_manager_->get_context_for_inference();
-
-    // TODO: Implement actual Gemini API call
-    std::string response = "Gemini skeleton response";
-
-    // Return response directly - main will add it to context
-    return response;
+    // Use new architecture: build SessionContext and call base class
+    SessionContext session;
+    build_session_from_context(session);
+    return generate_from_session(session, max_tokens);
 }
 
 std::string GeminiBackend::get_backend_name() const {
@@ -175,9 +111,9 @@ std::string GeminiBackend::get_model_name() const {
     return model_name_;
 }
 
-size_t GeminiBackend::get_max_context_size() const {
+size_t GeminiBackend::get_context_size() const {
 #ifdef ENABLE_API_BACKENDS
-    return max_context_size_;
+    return context_size_;
 #else
     return 4096;
 #endif
@@ -260,98 +196,31 @@ std::string GeminiBackend::parse_gemini_response(const std::string& response_jso
     // Call update_message_tokens_from_api(prompt_tokens, completion_tokens);
     return "TODO: Parse response";
 }
-std::string GeminiBackend::generate_from_session(const SessionContext& session, int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Gemini backend not initialized");
+// Old generate_from_session removed - now using base class implementation
+
+// ========== New Architecture Methods ==========
+
+std::string GeminiBackend::format_api_request(const SessionContext& session, int max_tokens) {
+#ifdef ENABLE_API_BACKENDS
+    json request;
+
+    // System instruction (if present)
+    if (!session.system_prompt.empty()) {
+        request["system_instruction"] = {
+            {"parts", json::array({
+                {{"text", session.system_prompt}}
+            })}
+        };
     }
 
-    LOG_DEBUG("Gemini generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+    // Build contents array (user/assistant messages)
+    request["contents"] = json::array();
 
-    // Build Gemini API request JSON from SessionContext
-    // Gemini format: https://ai.google.dev/api/generate-content
-    try {
-        json request;
-
-        // System instruction (if present)
-        for (const auto& msg : session.messages) {
-            if (msg.role == "system") {
-                request["system_instruction"] = {
-                    {"parts", json::array({
-                        {{"text", msg.content}}
-                    })}
-                };
-                break; // Only first system message
-            }
-        }
-
-        // Build contents array (user/assistant messages)
-        request["contents"] = json::array();
-
-        for (const auto& msg : session.messages) {
-            if (msg.role == "user") {
-                // Check if this is a tool result
-                if (!msg.tool_call_id.empty()) {
-                    // Gemini tool results go in function_response format
-                    request["contents"].push_back({
-                        {"role", "user"},
-                        {"parts", json::array({
-                            {
-                                {"function_response", {
-                                    {"name", msg.name},
-                                    {"response", {
-                                        {"content", msg.content}
-                                    }}
-                                }}
-                            }
-                        })}
-                    });
-                } else {
-                    // Regular user message
-                    request["contents"].push_back({
-                        {"role", "user"},
-                        {"parts", json::array({
-                            {{"text", msg.content}}
-                        })}
-                    });
-                }
-            } else if (msg.role == "assistant") {
-                // Gemini uses "model" role for assistant
-                // Check if this is a tool call
-                try {
-                    json parsed = json::parse(msg.content);
-                    if (parsed.contains("name") && parsed.contains("parameters")) {
-                        // Format as function_call for Gemini
-                        request["contents"].push_back({
-                            {"role", "model"},
-                            {"parts", json::array({
-                                {
-                                    {"function_call", {
-                                        {"name", parsed["name"]},
-                                        {"args", parsed["parameters"]}
-                                    }}
-                                }
-                            })}
-                        });
-                    } else {
-                        // Regular text content
-                        request["contents"].push_back({
-                            {"role", "model"},
-                            {"parts", json::array({
-                                {{"text", msg.content}}
-                            })}
-                        });
-                    }
-                } catch (const json::exception&) {
-                    // Not JSON, treat as regular text
-                    request["contents"].push_back({
-                        {"role", "model"},
-                        {"parts", json::array({
-                            {{"text", msg.content}}
-                        })}
-                    });
-                }
-            } else if (msg.role == "tool") {
-                // Tool results in Gemini format
+    for (const auto& msg : session.messages) {
+        if (msg.role == "user") {
+            // Check if this is a tool result
+            if (!msg.tool_call_id.empty()) {
+                // Gemini tool results go in function_response format
                 request["contents"].push_back({
                     {"role", "user"},
                     {"parts", json::array({
@@ -365,82 +234,252 @@ std::string GeminiBackend::generate_from_session(const SessionContext& session, 
                         }
                     })}
                 });
+            } else {
+                // Regular user message
+                request["contents"].push_back({
+                    {"role", "user"},
+                    {"parts", json::array({
+                        {{"text", msg.content}}
+                    })}
+                });
             }
-            // Skip system messages (already handled above)
-        }
-
-        // Format tools from SessionContext for Gemini API
-        if (!session.tools.empty()) {
-            json function_declarations = json::array();
-
-            for (const auto& tool_def : session.tools) {
-                json function_decl;
-                function_decl["name"] = tool_def.name;
-                function_decl["description"] = tool_def.description;
-
-                // Parse parameters JSON or use default schema
-                if (!tool_def.parameters_json.empty()) {
-                    try {
-                        function_decl["parameters"] = json::parse(tool_def.parameters_json);
-                    } catch (const json::exception& e) {
-                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
-                        function_decl["parameters"] = {
-                            {"type", "object"},
-                            {"properties", json::object()},
-                            {"required", json::array()}
-                        };
-                    }
+        } else if (msg.role == "assistant") {
+            // Gemini uses "model" role for assistant
+            // Check if this is a tool call
+            try {
+                json parsed = json::parse(msg.content);
+                if (parsed.contains("name") && parsed.contains("parameters")) {
+                    // Format as function_call for Gemini
+                    request["contents"].push_back({
+                        {"role", "model"},
+                        {"parts", json::array({
+                            {
+                                {"function_call", {
+                                    {"name", parsed["name"]},
+                                    {"args", parsed["parameters"]}
+                                }}
+                            }
+                        })}
+                    });
                 } else {
-                    function_decl["parameters"] = {
-                        {"type", "object"},
-                        {"properties", json::object()},
-                        {"required", json::array()}
-                    };
+                    // Regular text content
+                    request["contents"].push_back({
+                        {"role", "model"},
+                        {"parts", json::array({
+                            {{"text", msg.content}}
+                        })}
+                    });
                 }
+            } catch (const json::exception&) {
+                // Not JSON, treat as regular text
+                request["contents"].push_back({
+                    {"role", "model"},
+                    {"parts", json::array({
+                        {{"text", msg.content}}
+                    })}
+                });
+            }
+        } else if (msg.role == "tool") {
+            // Tool results in Gemini format
+            request["contents"].push_back({
+                {"role", "user"},
+                {"parts", json::array({
+                    {
+                        {"function_response", {
+                            {"name", msg.name},
+                            {"response", {
+                                {"content", msg.content}
+                            }}
+                        }}
+                    }
+                })}
+            });
+        }
+        // Skip system messages (already handled above)
+    }
 
-                function_declarations.push_back(function_decl);
+    // Format tools from SessionContext for Gemini API
+    if (!session.tools.empty()) {
+        json function_declarations = json::array();
+
+        for (const auto& tool_def : session.tools) {
+            json function_decl;
+            function_decl["name"] = tool_def.name;
+            function_decl["description"] = tool_def.description;
+
+            // Parameters are already JSON object
+            if (!tool_def.parameters.empty()) {
+                function_decl["parameters"] = tool_def.parameters;
+            } else {
+                function_decl["parameters"] = {
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                };
             }
 
-            request["tools"] = json::array({
-                {{"function_declarations", function_declarations}}
-            });
-            LOG_DEBUG("Added " + std::to_string(function_declarations.size()) + " tools to Gemini request from SessionContext");
+            function_declarations.push_back(function_decl);
         }
 
-        // Generation config
-        if (max_tokens > 0) {
-            request["generation_config"] = {
-                {"max_output_tokens", max_tokens}
-            };
+        request["tools"] = json::array({
+            {{"function_declarations", function_declarations}}
+        });
+    }
+
+    // Generation config
+    if (max_tokens > 0) {
+        request["generation_config"] = {
+            {"max_output_tokens", max_tokens}
+        };
+    }
+
+    return request.dump();
+#else
+    return "";
+#endif
+}
+
+int GeminiBackend::extract_tokens_to_evict(const std::string& error_message) {
+    // Gemini format: "The input token count (8122182) exceeds the maximum number of tokens allowed (1048576)."
+
+    size_t count_pos = error_message.find("input token count (");
+    size_t allowed_pos = error_message.find("tokens allowed (");
+
+    if (count_pos != std::string::npos && allowed_pos != std::string::npos) {
+        try {
+            // Extract actual token count
+            size_t start = count_pos + 19;
+            size_t end = error_message.find(")", start);
+            int actual_tokens = std::stoi(error_message.substr(start, end - start));
+
+            // Extract max allowed
+            start = allowed_pos + 16;
+            end = error_message.find(")", start);
+            int max_tokens = std::stoi(error_message.substr(start, end - start));
+
+            // Return EXACTLY how much to evict
+            return actual_tokens - max_tokens;
+        } catch (...) {}
+    }
+
+    // Can't parse - return error
+    return -1;
+}
+
+ApiResponse GeminiBackend::parse_api_response(const HttpResponse& http_response) {
+    ApiResponse result;
+    result.raw_response = http_response.body;
+
+#ifdef ENABLE_API_BACKENDS
+    if (http_response.is_success()) {
+        try {
+            json j = json::parse(http_response.body);
+
+            // Extract usage data
+            if (j.contains("usageMetadata") && j["usageMetadata"].is_object()) {
+                result.prompt_tokens = j["usageMetadata"].value("promptTokenCount", 0);
+                result.completion_tokens = j["usageMetadata"].value("candidatesTokenCount", 0);
+            }
+
+            // Extract content from candidates[0].content.parts[0].text
+            if (j.contains("candidates") && j["candidates"].is_array() && !j["candidates"].empty()) {
+                auto& candidate = j["candidates"][0];
+                if (candidate.contains("content") && candidate["content"].contains("parts") &&
+                    candidate["content"]["parts"].is_array() && !candidate["content"]["parts"].empty()) {
+
+                    std::string response_text;
+                    for (const auto& part : candidate["content"]["parts"]) {
+                        if (part.contains("text")) {
+                            response_text += part["text"].get<std::string>();
+                        } else if (part.contains("function_call")) {
+                            // Handle tool calls
+                            json tool_call;
+                            tool_call["name"] = part["function_call"]["name"];
+                            tool_call["parameters"] = part["function_call"]["args"];
+                            response_text += "\n" + tool_call.dump() + "\n";
+                        }
+                    }
+
+                    result.content = response_text;
+                }
+            }
+
+            result.is_error = false;
+        } catch (const json::exception& e) {
+            result.is_error = true;
+            result.error_code = 500;
+            result.error_message = "Failed to parse Gemini response: " + std::string(e.what());
+        }
+    } else {
+        result.is_error = true;
+        result.error_code = http_response.status_code;
+
+        // Parse error message from response body
+        try {
+            json j = json::parse(http_response.body);
+            if (j.contains("error")) {
+                if (j["error"].is_object() && j["error"].contains("message")) {
+                    result.error_message = j["error"]["message"];
+                } else if (j["error"].is_string()) {
+                    result.error_message = j["error"];
+                }
+            }
+        } catch (...) {
+            // If JSON parsing fails, use raw body
+            result.error_message = http_response.body.substr(0, 500);
         }
 
-        // Convert to string
-        std::string request_json = request.dump();
-
-        // Log request for debugging
-        if (request_json.length() <= 2000) {
-            LOG_DEBUG("Full Gemini API request: " + request_json);
+        // Classify error type
+        if (result.error_message.find("context") != std::string::npos &&
+            (result.error_message.find("limit") != std::string::npos ||
+             result.error_message.find("exceed") != std::string::npos ||
+             result.error_message.find("length") != std::string::npos)) {
+            result.error_type = "context_overflow";
+        } else if (http_response.status_code == 429) {
+            result.error_type = "rate_limit";
+        } else if (http_response.status_code == 401) {
+            result.error_type = "auth";
         } else {
-            LOG_DEBUG("Gemini API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
-            LOG_DEBUG("Gemini API request length: " + std::to_string(request_json.length()) + " bytes");
+            result.error_type = "api_error";
+        }
+    }
+#endif
+
+    return result;
+}
+
+std::map<std::string, std::string> GeminiBackend::get_api_headers() {
+    std::map<std::string, std::string> headers;
+#ifdef ENABLE_API_BACKENDS
+    headers["Content-Type"] = "application/json";
+    headers["x-goog-api-key"] = api_key_;
+#endif
+    return headers;
+}
+
+std::string GeminiBackend::get_api_endpoint() {
+#ifdef ENABLE_API_BACKENDS
+    // Gemini endpoint includes the model name: /v1beta/models/{model}:generateContent
+    return api_endpoint + model_name_ + ":generateContent";
+#else
+    return "";
+#endif
+}
+
+void GeminiBackend::parse_specific_config(const std::string& json) {
+    if (json.empty() || json == "{}") {
+        return;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(json);
+
+        if (j.contains("api_endpoint")) {
+            api_endpoint = j["api_endpoint"].get<std::string>();
+            LOG_DEBUG("Gemini: Set api_endpoint = " + api_endpoint);
         }
 
-        // Make API call (currently stubbed)
-        std::string response_json = make_api_request(request_json);
-        if (response_json.empty()) {
-            throw BackendManagerError("Gemini API request failed");
-        }
-
-        LOG_DEBUG("Gemini API response: " + response_json.substr(0, 500));
-
-        // Parse response (currently stubbed)
-        std::string response_text = parse_gemini_response(response_json);
-        if (response_text.empty()) {
-            throw BackendManagerError("Failed to parse Gemini response");
-        }
-
-        return response_text;
-    } catch (const json::exception& e) {
-        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to parse Gemini-specific config: " + std::string(e.what()));
     }
 }

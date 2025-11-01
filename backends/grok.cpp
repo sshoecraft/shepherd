@@ -7,14 +7,15 @@
 
 using json = nlohmann::json;
 
-// Global cancellation flag (defined in main.cpp)
-extern bool g_generation_cancelled;
-
 // GrokBackend implementation
 GrokBackend::GrokBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
     // Don't create context manager yet - wait until model is loaded to get actual context size
     LOG_DEBUG("GrokBackend created");
+
+    // Parse backend-specific config
+    std::string backend_cfg = config.backend_config(get_backend_name());
+    parse_backend_config(backend_cfg);
 }
 
 GrokBackend::~GrokBackend() {
@@ -55,33 +56,33 @@ bool GrokBackend::initialize(const std::string& model_name, const std::string& a
 
     // Determine final context size and auto_evict flag
     bool auto_evict;
-    if (max_context_size_ == 0) {
+    if (context_size_ == 0) {
         // User didn't specify - use API's limit
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
-    } else if (max_context_size_ > api_context_size) {
+        LOG_INFO("Using API's context size: " + std::to_string(context_size_) + " (auto_evict=false)");
+    } else if (context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
-        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
+        LOG_WARN("Requested context size " + std::to_string(context_size_) +
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-    } else if (max_context_size_ < api_context_size) {
+    } else if (context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
         auto_evict = true;
-        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
+        LOG_INFO("Using user's context size: " + std::to_string(context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
         auto_evict = false;
-        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
+        LOG_INFO("Using context size: " + std::to_string(context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
-    context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
+    context_manager_ = std::make_unique<ApiContextManager>(context_size_);
     context_manager_->auto_evict = auto_evict;
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(context_size_) + " tokens (auto_evict=" +
               std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("GrokBackend initialized with model: " + model_name_);
@@ -94,41 +95,10 @@ bool GrokBackend::initialize(const std::string& model_name, const std::string& a
 }
 
 std::string GrokBackend::generate(int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Grok backend not initialized");
-    }
-
-    LOG_DEBUG("Grok generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
-
-    // Proactive eviction for Grok (since Grok silently truncates instead of returning errors)
-    if (context_manager_->auto_evict) {
-        int estimated_tokens = estimate_context_tokens();
-        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
-
-        if (estimated_tokens > static_cast<int>(max_context_size_)) {
-            if (g_server_mode) {
-                // Server mode: throw exception, let client handle it
-                throw ContextManagerError(
-                    "Context limit exceeded: estimated " +
-                    std::to_string(estimated_tokens) + " tokens but limit is " +
-                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
-            } else {
-                // CLI mode: proactively evict to make room
-                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
-                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-                evict_with_estimation(estimated_tokens);
-            }
-        }
-    }
-
-    // Get current context for API call
-    std::string context_json = context_manager_->get_context_for_inference();
-
-    // TODO: Implement actual Grok API call
-    std::string response = "Grok skeleton response";
-
-    // Return response directly - main will add it to context
-    return response;
+    // Use new architecture: build SessionContext and call base class
+    SessionContext session;
+    build_session_from_context(session);
+    return generate_from_session(session, max_tokens);
 }
 
 std::string GrokBackend::get_backend_name() const {
@@ -139,9 +109,9 @@ std::string GrokBackend::get_model_name() const {
     return model_name_;
 }
 
-size_t GrokBackend::get_max_context_size() const {
+size_t GrokBackend::get_context_size() const {
 #ifdef ENABLE_API_BACKENDS
-    return max_context_size_;
+    return context_size_;
 #else
     return 4096;
 #endif
@@ -221,109 +191,240 @@ std::string GrokBackend::parse_grok_response(const std::string& response_json) {
     return "TODO: Parse response";
 }
 
-std::string GrokBackend::generate_from_session(const SessionContext& session, int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Grok backend not initialized");
+// Old generate_from_session removed - now using base class implementation
+
+// ========== New Architecture Methods ==========
+// Grok uses OpenAI-compatible format
+
+std::string GrokBackend::format_api_request(const SessionContext& session, int max_tokens) {
+#ifdef ENABLE_API_BACKENDS
+    json request;
+    request["model"] = model_name_;
+
+    if (max_tokens > 0) {
+        request["max_tokens"] = max_tokens;
     }
 
-    LOG_DEBUG("Grok generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+    // Format messages for OpenAI-compatible API
+    request["messages"] = json::array();
 
-    // Build API request JSON from SessionContext
-    // Grok uses OpenAI-compatible format
-    try {
-        json request;
-        request["model"] = model_name_;
+    // Add system message first if present
+    if (!session.system_prompt.empty()) {
+        json system_msg;
+        system_msg["role"] = "system";
+        system_msg["content"] = session.system_prompt;
+        request["messages"].push_back(system_msg);
+    }
 
-        if (max_tokens > 0) {
-            request["max_tokens"] = max_tokens;
+    // Add conversation messages
+    for (const auto& msg : session.messages) {
+        json message_obj;
+        message_obj["role"] = msg.role;
+        message_obj["content"] = msg.content;
+
+        // Add optional fields
+        if (!msg.name.empty()) {
+            message_obj["name"] = msg.name;
+        }
+        if (!msg.tool_call_id.empty()) {
+            message_obj["tool_call_id"] = msg.tool_call_id;
         }
 
-        // Format messages for Grok API from SessionContext (OpenAI-compatible format)
-        request["messages"] = json::array();
+        request["messages"].push_back(message_obj);
+    }
 
-        for (const auto& msg : session.messages) {
-            json message_obj;
-            message_obj["role"] = msg.role;
-            message_obj["content"] = msg.content;
+    // Add tools if available (OpenAI format)
+    if (!session.tools.empty()) {
+        json tools_array = json::array();
 
-            // Add optional fields
-            if (!msg.name.empty()) {
-                message_obj["name"] = msg.name;
+        for (const auto& tool_def : session.tools) {
+            json tool;
+            tool["type"] = "function";
+
+            json function;
+            function["name"] = tool_def.name;
+            function["description"] = tool_def.description;
+
+            // Parameters are already JSON object
+            if (!tool_def.parameters.empty()) {
+                function["parameters"] = tool_def.parameters;
+            } else {
+                function["parameters"] = {
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                };
             }
-            if (!msg.tool_call_id.empty()) {
-                message_obj["tool_call_id"] = msg.tool_call_id;
-            }
 
-            request["messages"].push_back(message_obj);
+            tool["function"] = function;
+            tools_array.push_back(tool);
         }
 
-        // Format tools for Grok API from SessionContext (OpenAI-compatible format)
-        if (!session.tools.empty()) {
-            json tools_array = json::array();
+        request["tools"] = tools_array;
+    }
 
-            for (const auto& tool_def : session.tools) {
-                json tool;
-                tool["type"] = "function";
+    return request.dump();
+#else
+    return "";
+#endif
+}
 
-                json function;
-                function["name"] = tool_def.name;
-                function["description"] = tool_def.description;
+int GrokBackend::extract_tokens_to_evict(const std::string& error_message) {
+    // Grok uses OpenAI-compatible format:
+    // "This model's maximum context length is 16385 tokens. However, your messages resulted in 44366 tokens."
+    // Or shepherd server format: "would need 54721 tokens but limit is 32768 tokens"
 
-                // Parse parameters JSON or use default schema
-                if (!tool_def.parameters_json.empty()) {
-                    try {
-                        function["parameters"] = json::parse(tool_def.parameters_json);
-                    } catch (const json::exception& e) {
-                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
-                        function["parameters"] = {
-                            {"type", "object"},
-                            {"properties", json::object()},
-                            {"required", json::array()}
-                        };
-                    }
-                } else {
-                    function["parameters"] = {
-                        {"type", "object"},
-                        {"properties", json::object()},
-                        {"required", json::array()}
-                    };
+    int actual_tokens = -1;
+    int max_tokens = -1;
+
+    // Try shepherd server format first: "would need X tokens but limit is Y tokens"
+    size_t need_pos = error_message.find("would need ");
+    size_t limit_pos = error_message.find("but limit is ");
+    if (need_pos != std::string::npos && limit_pos != std::string::npos) {
+        try {
+            size_t start = need_pos + 11;
+            size_t end = error_message.find(" tokens", start);
+            actual_tokens = std::stoi(error_message.substr(start, end - start));
+
+            start = limit_pos + 13;
+            end = error_message.find(" tokens", start);
+            max_tokens = std::stoi(error_message.substr(start, end - start));
+        } catch (...) {}
+    }
+
+    // Try OpenAI format: "maximum context length is X tokens. However, your messages resulted in Y tokens"
+    if (actual_tokens == -1 || max_tokens == -1) {
+        size_t max_pos = error_message.find("maximum context length is ");
+        size_t resulted_pos = error_message.find("resulted in ");
+        if (max_pos != std::string::npos && resulted_pos != std::string::npos) {
+            try {
+                size_t start = max_pos + 26;
+                size_t end = error_message.find(" tokens", start);
+                max_tokens = std::stoi(error_message.substr(start, end - start));
+
+                start = resulted_pos + 12;
+                end = error_message.find(" tokens", start);
+                actual_tokens = std::stoi(error_message.substr(start, end - start));
+            } catch (...) {}
+        }
+    }
+
+    if (actual_tokens > 0 && max_tokens > 0) {
+        // Return EXACTLY how much to evict
+        return actual_tokens - max_tokens;
+    }
+
+    // Can't parse - return error
+    return -1;
+}
+
+ApiResponse GrokBackend::parse_api_response(const HttpResponse& http_response) {
+    ApiResponse result;
+    result.raw_response = http_response.body;
+
+#ifdef ENABLE_API_BACKENDS
+    if (http_response.is_success()) {
+        try {
+            json j = json::parse(http_response.body);
+
+            // Extract content (OpenAI-compatible format)
+            if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+                auto& choice = j["choices"][0];
+                if (choice.contains("message") && choice["message"].contains("content")) {
+                    result.content = choice["message"]["content"];
                 }
 
-                tool["function"] = function;
-                tools_array.push_back(tool);
+                // Check for tool calls
+                if (choice["message"].contains("tool_calls")) {
+                    result.tool_calls_json = choice["message"]["tool_calls"].dump();
+                }
             }
 
-            request["tools"] = tools_array;
-            LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to Grok request from SessionContext");
+            // Extract token counts
+            if (j.contains("usage")) {
+                auto& usage = j["usage"];
+                if (usage.contains("prompt_tokens")) {
+                    result.prompt_tokens = usage["prompt_tokens"];
+                }
+                if (usage.contains("completion_tokens")) {
+                    result.completion_tokens = usage["completion_tokens"];
+                }
+            }
+
+            result.is_error = false;
+        } catch (const json::exception& e) {
+            result.is_error = true;
+            result.error_code = 500;
+            result.error_message = "Failed to parse Grok response: " + std::string(e.what());
+        }
+    } else {
+        result.is_error = true;
+        result.error_code = http_response.status_code;
+
+        // Parse error message from response body
+        try {
+            json j = json::parse(http_response.body);
+            if (j.contains("error")) {
+                if (j["error"].is_object() && j["error"].contains("message")) {
+                    result.error_message = j["error"]["message"];
+                } else if (j["error"].is_string()) {
+                    result.error_message = j["error"];
+                }
+            }
+        } catch (...) {
+            result.error_message = http_response.body.substr(0, 500);
         }
 
-        // Convert to string
-        std::string request_json = request.dump();
-
-        // Log request for debugging
-        if (request_json.length() <= 2000) {
-            LOG_DEBUG("Full Grok API request: " + request_json);
+        // Classify error type
+        if (result.error_message.find("context") != std::string::npos &&
+            (result.error_message.find("limit") != std::string::npos ||
+             result.error_message.find("exceed") != std::string::npos ||
+             result.error_message.find("length") != std::string::npos)) {
+            result.error_type = "context_overflow";
+        } else if (http_response.status_code == 429) {
+            result.error_type = "rate_limit";
+        } else if (http_response.status_code == 401) {
+            result.error_type = "auth";
         } else {
-            LOG_DEBUG("Grok API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
-            LOG_DEBUG("Grok API request length: " + std::to_string(request_json.length()) + " bytes");
+            result.error_type = "api_error";
+        }
+    }
+#endif
+
+    return result;
+}
+
+std::map<std::string, std::string> GrokBackend::get_api_headers() {
+    std::map<std::string, std::string> headers;
+#ifdef ENABLE_API_BACKENDS
+    headers["Content-Type"] = "application/json";
+    headers["Authorization"] = "Bearer " + api_key_;
+#endif
+    return headers;
+}
+
+std::string GrokBackend::get_api_endpoint() {
+#ifdef ENABLE_API_BACKENDS
+    return api_endpoint;
+#else
+    return "";
+#endif
+}
+
+void GrokBackend::parse_specific_config(const std::string& json) {
+    if (json.empty() || json == "{}") {
+        return;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(json);
+
+        if (j.contains("api_endpoint")) {
+            api_endpoint = j["api_endpoint"].get<std::string>();
+            LOG_DEBUG("Grok: Set api_endpoint = " + api_endpoint);
         }
 
-        // Make API call (currently stubbed)
-        std::string response_json = make_api_request(request_json);
-        if (response_json.empty()) {
-            throw BackendManagerError("Grok API request failed");
-        }
-
-        LOG_DEBUG("Grok API response: " + response_json.substr(0, 500));
-
-        // Parse response (currently stubbed, OpenAI-compatible format)
-        std::string response_text = parse_grok_response(response_json);
-        if (response_text.empty()) {
-            throw BackendManagerError("Failed to parse Grok response");
-        }
-
-        return response_text;
-    } catch (const json::exception& e) {
-        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to parse Grok-specific config: " + std::string(e.what()));
     }
 }

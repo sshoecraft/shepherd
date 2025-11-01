@@ -1,6 +1,0 @@
-python3.12 convert_checkpoint.py \
-    --model_dir /home/steve/models/Llama-3.1-8B-Instruct-FP8 \
-    --output_dir /home/steve/models/Llama-3.1-8B-Instruct-FP8_ckpt \
-    --dtype float16 \
-    --use_fp8 \
-    --workers 16

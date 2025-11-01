@@ -7,8 +7,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
-option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
 option(ENABLE_LLAMACPP "Enable llama.cpp backend" ON)
+option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
@@ -16,47 +16,51 @@ find_package(OpenSSL REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(CURL REQUIRED libcurl)
 
-# Collect all source files
+# Core source files (from current Makefile)
 set(SHEPHERD_SOURCES
+    # Core sources
     main.cpp
-    server.cpp
-    logger.cpp
+    cli.cpp
+    session.cpp
     config.cpp
+    logger.cpp
+    http_client.cpp
     rag.cpp
-    rag_system.cpp
-    inference_engine.cpp
-    memory_manager.cpp
-    tokenizer.cpp
-    context_manager.cpp
-    backend_manager.cpp
-    model_manager.cpp
-    tools_manager.cpp
-    tools/tool.cpp
-    tools/tool_parser.cpp
+
+    # Backend sources (always included)
+    backends/backend.cpp
+    backends/factory.cpp
+    backends/models.cpp
+
+    # Tool sources
     tools/command_tools.cpp
     tools/core_tools.cpp
     tools/filesystem_tools.cpp
     tools/http_tools.cpp
     tools/json_tools.cpp
-    tools/memory_tools.cpp
     tools/mcp_resource_tools.cpp
+    tools/memory_tools.cpp
+    tools/tool.cpp
+    tools/tool_parser.cpp
+    tools/utf8_sanitizer.cpp
+    tools/web_search.cpp
+
+    # MCP sources
     mcp/mcp_client.cpp
     mcp/mcp_config.cpp
-    mcp/mcp_manager.cpp
+    mcp/mcp.cpp
     mcp/mcp_server.cpp
     mcp/mcp_tool.cpp
+
+    # Server sources
+    server/server.cpp
 )
 
-# Add backend sources
+# Add backend sources conditionally
 if(ENABLE_API_BACKENDS)
     list(APPEND SHEPHERD_SOURCES
-        http_client.cpp
-        web_search.cpp
-        backends/api_backend.cpp
+        backends/api.cpp
         backends/openai.cpp
-        backends/anthropic.cpp
-        backends/gemini.cpp
-        backends/grok.cpp
         backends/ollama.cpp
     )
 endif()
@@ -130,7 +134,7 @@ if(ENABLE_TENSORRT)
     endif()
 endif()
 
-# Link libraries
+# Link standard libraries
 target_link_libraries(shepherd PRIVATE
     ${SQLITE3_LIBRARIES}
     ${CURL_LIBRARIES}
@@ -243,11 +247,34 @@ if(ENABLE_LLAMACPP)
         set(SHARED_LIB_EXT "so")
     endif()
 
+    # Link llama.cpp libraries
+    target_link_directories(shepherd PRIVATE
+        ${LLAMACPP_DIR}/build/bin
+        ${LLAMACPP_DIR}/build/common
+    )
+
+    # Base libraries (all platforms)
     target_link_libraries(shepherd PRIVATE
         ${LLAMACPP_DIR}/build/common/libcommon.a
-        ${LLAMACPP_DIR}/build/bin/libllama.${SHARED_LIB_EXT}
-        ${LLAMACPP_DIR}/build/bin/libggml.${SHARED_LIB_EXT}
-        ${LLAMACPP_DIR}/build/bin/libggml-base.${SHARED_LIB_EXT}
+        llama
+        ggml
+        ggml-base
+        ggml-cpu
+    )
+
+    # Platform-specific GPU libraries
+    if(APPLE)
+        # macOS: Use Metal backend
+        target_link_libraries(shepherd PRIVATE ggml-metal)
+    else()
+        # Linux: Use CUDA backend
+        target_link_libraries(shepherd PRIVATE ggml-cuda)
+    endif()
+
+    # Set RPATH so the executable can find llama.cpp libraries
+    set_target_properties(shepherd PROPERTIES
+        BUILD_RPATH "${LLAMACPP_DIR}/build/bin"
+        INSTALL_RPATH "${LLAMACPP_DIR}/build/bin"
     )
 endif()
 
@@ -259,10 +286,10 @@ if(READLINE_LIB)
     message(STATUS "Using readline for line editing")
 endif()
 
-# Compiler options
+# Compiler options (matching Makefile debug settings)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(shepherd PRIVATE
-        -Wall -Wextra -O2 -g
+        -Wall -Wextra -g -O0 -D_DEBUG
         -Wno-unused-parameter
         -Wno-unused-variable
         -Wno-unused-but-set-variable
@@ -278,8 +305,7 @@ message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
 
 # Install targets
-install(TARGETS shepherd
-        RUNTIME DESTINATION bin)
+install(TARGETS shepherd RUNTIME DESTINATION bin)
 
 # Install server directory for HTTP API mode
 install(DIRECTORY server/
@@ -288,25 +314,3 @@ install(DIRECTORY server/
         PATTERN "*.py"
         PATTERN "*.txt"
         PATTERN "*.md")
-
-# Install systemd service file template
-# Get current user for service file
-execute_process(COMMAND whoami OUTPUT_VARIABLE USER OUTPUT_STRIP_TRAILING_WHITESPACE)
-set(WORKING_DIR ${CMAKE_SOURCE_DIR})
-
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/shepherd.service.in
-               ${CMAKE_CURRENT_BINARY_DIR}/shepherd.service
-               @ONLY)
-
-# Install systemd service file and reload systemd
-if(EXISTS "/etc/systemd/system")
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/shepherd.service
-            DESTINATION /etc/systemd/system)
-
-    # Run systemctl daemon-reload after installing service file
-    install(CODE "execute_process(COMMAND systemctl daemon-reload)")
-
-    message(STATUS "After installation, run:")
-    message(STATUS "  sudo systemctl enable shepherd")
-    message(STATUS "  sudo systemctl restart shepherd")
-endif()

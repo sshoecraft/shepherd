@@ -7,35 +7,31 @@
 #include <memory>
 #endif
 
-/// @brief Gemini-specific tokenizer using SentencePiece library
-class GeminiTokenizer : public Tokenizer {
-public:
-    explicit GeminiTokenizer(const std::string& model_name = "gemini-pro");
-
-    int count_tokens(const std::string& text) override;
-    std::vector<int> encode(const std::string& text) override;
-    std::string decode(const std::vector<int>& tokens) override;
-    std::string get_tokenizer_name() const override;
-
-private:
-    std::string model_name_;
-    // SentencePiece implementation will be added when library is integrated
-};
-
 /// @brief Backend manager for Google Gemini API
 class GeminiBackend : public ApiBackend {
 public:
+    std::string api_endpoint = "https://generativelanguage.googleapis.com/v1beta/models/";
+
     explicit GeminiBackend(size_t max_context_tokens);
     ~GeminiBackend() override;
 
     bool initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path = "") override;
     std::string generate(int max_tokens = 0) override;
-    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
+    // generate_from_session now uses base class implementation that calls our format/parse methods
     std::string get_backend_name() const override;
     std::string get_model_name() const override;
-    size_t get_max_context_size() const override;
+    size_t get_context_size() const override;
     bool is_ready() const override;
     void shutdown() override;
+
+protected:
+    // New architecture: Required virtual methods from ApiBackend
+    std::string format_api_request(const SessionContext& session, int max_tokens) override;
+    int extract_tokens_to_evict(const std::string& error_message) override;
+    ApiResponse parse_api_response(const HttpResponse& http_response) override;
+    std::map<std::string, std::string> get_api_headers() override;
+    std::string get_api_endpoint() override;
+    void parse_specific_config(const std::string& json) override;
 
 private:
     std::string make_api_request(const std::string& json_payload);
@@ -45,7 +41,6 @@ private:
 
 #ifdef ENABLE_API_BACKENDS
     CURL* curl_ = nullptr;
-    std::string api_endpoint_ = "https://generativelanguage.googleapis.com/v1beta/models/";
-    size_t max_context_size_ = 128000; // Gemini Pro context size
+    size_t context_size_ = 128000; // Gemini Pro context size
 #endif
 };

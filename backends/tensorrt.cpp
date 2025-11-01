@@ -468,17 +468,17 @@ bool TensorRTBackend::initialize(const std::string& model_path, const std::strin
             }
         }
 
-        // Only auto-detect context size if not explicitly set (max_context_size_ == 0 means auto)
-        if (max_context_size_ == 0) {
-            max_context_size_ = max_seq_len;
+        // Only auto-detect context size if not explicitly set (context_size_ == 0 means auto)
+        if (context_size_ == 0) {
+            context_size_ = max_seq_len;
             LOG_INFO("Model max sequence length: " + std::to_string(max_seq_len));
         } else {
-            LOG_INFO("Using explicitly configured context size: " + std::to_string(max_context_size_));
+            LOG_INFO("Using explicitly configured context size: " + std::to_string(context_size_));
         }
 
         // Create context manager with the determined context size
-        context_manager_ = std::make_unique<TensorRTContextManager>(max_context_size_);
-        LOG_DEBUG("Created TensorRTContextManager with " + std::to_string(max_context_size_) + " tokens");
+        context_manager_ = std::make_unique<TensorRTContextManager>(context_size_);
+        LOG_DEBUG("Created TensorRTContextManager with " + std::to_string(context_size_) + " tokens");
 
         LOG_INFO("Model requires world_size: " + std::to_string(required_world_size));
 
@@ -696,7 +696,7 @@ std::string TensorRTBackend::generate(int max_tokens) {
         std::string prompt_text = context_manager_->get_context_for_inference();
 
         // Always show full prompt in debug mode - user needs to see exactly what's being sent
-        if (g_debug_mode) {
+        if (g_debug_level) {
             LOG_DEBUG("========== PROMPT BEING SENT TO MODEL ==========");
             LOG_DEBUG(prompt_text);
             LOG_DEBUG("================================================");
@@ -836,7 +836,7 @@ std::string TensorRTBackend::generate(int max_tokens) {
         LOG_DEBUG("Generated " + std::to_string(output_tokens.size()) + " tokens");
 
         // Always show full response in debug mode - user needs to see exactly what model returned
-        if (g_debug_mode) {
+        if (g_debug_level) {
             LOG_DEBUG("========== MODEL RESPONSE ==========");
             LOG_DEBUG(response_text);
             LOG_DEBUG("====================================");
@@ -898,6 +898,12 @@ void TensorRTBackend::add_tool_result(const std::string& tool_name, const std::s
     LOG_DEBUG("Added tool result to TensorRT backend: " + tool_name);
 }
 
+int TensorRTBackend::count_tool_result(const std::string& tool_name, const std::string& content, const std::string& tool_call_id) {
+    // TensorRT formats similarly to llama.cpp - just count raw tokens for now
+    // TODO: If TensorRT uses chat templates, format with template like llamacpp does
+    return context_manager_->count_tokens(content);
+}
+
 void TensorRTBackend::add_assistant_message(const std::string& content) {
     int token_count = context_manager_->count_tokens(content);
     Message assistant_msg(Message::ASSISTANT, content, token_count);
@@ -913,9 +919,9 @@ std::string TensorRTBackend::get_model_name() const {
     return model_name_;
 }
 
-size_t TensorRTBackend::get_max_context_size() const {
+size_t TensorRTBackend::get_context_size() const {
 #ifdef ENABLE_TENSORRT
-    return max_context_size_;
+    return context_size_;
 #else
     return 4096;
 #endif

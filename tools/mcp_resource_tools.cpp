@@ -1,6 +1,7 @@
+
 #include "mcp_resource_tools.h"
-#include "../mcp/mcp_manager.h"
-#include "../logger.h"
+#include "mcp/mcp.h"
+#include "logger.h"
 #include <sstream>
 
 std::string ListMcpResourcesTool::unsanitized_name() const {
@@ -21,7 +22,7 @@ std::map<std::string, std::any> ListMcpResourcesTool::execute(const std::map<std
     std::string server_name = tool_utils::get_string(args, "server", "");
 
     try {
-        auto& manager = MCPManager::instance();
+        auto& manager = MCP::instance();
         std::ostringstream oss;
 
         if (server_name.empty()) {
@@ -113,7 +114,7 @@ std::map<std::string, std::any> ReadMcpResourcesTool::execute(const std::map<std
     LOG_DEBUG("Reading resource '" + uri + "' from server: " + server_name);
 
     try {
-        auto& manager = MCPManager::instance();
+        auto& manager = MCP::instance();
         auto resource_data = manager.read_resource(server_name, uri);
 
         // Format the response

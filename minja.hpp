@@ -29,9 +29,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef __JSON_DEFINED
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::ordered_json;
+#endif
 
 namespace minja {
 

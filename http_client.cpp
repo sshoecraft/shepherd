@@ -4,53 +4,39 @@
 #include <cstring>
 
 HttpClient::HttpClient() {
-#ifdef ENABLE_API_BACKENDS
     curl_ = curl_easy_init();
     if (!curl_) {
         LOG_ERROR("Failed to initialize CURL for HttpClient");
     }
     LOG_DEBUG("HttpClient initialized");
-#else
-    LOG_ERROR("HttpClient: API backends not compiled in");
-#endif
 }
 
 HttpClient::~HttpClient() {
-#ifdef ENABLE_API_BACKENDS
     if (curl_) {
         curl_easy_cleanup(curl_);
         curl_ = nullptr;
     }
     LOG_DEBUG("HttpClient destroyed");
-#endif
 }
 
 void HttpClient::set_timeout(long timeout_seconds) {
-#ifdef ENABLE_API_BACKENDS
     timeout_seconds_ = timeout_seconds;
     LOG_DEBUG("HttpClient timeout set to " + std::to_string(timeout_seconds) + " seconds");
-#endif
 }
 
 void HttpClient::set_ssl_verify(bool verify) {
-#ifdef ENABLE_API_BACKENDS
     ssl_verify_ = verify;
     LOG_DEBUG("HttpClient SSL verify: " + std::string(verify ? "enabled" : "disabled"));
-#endif
 }
 
 void HttpClient::set_ca_bundle(const std::string& ca_bundle_path) {
-#ifdef ENABLE_API_BACKENDS
     ca_bundle_path_ = ca_bundle_path;
     LOG_DEBUG("HttpClient CA bundle: " + ca_bundle_path);
-#endif
 }
 
 void HttpClient::set_verbose(bool verbose) {
-#ifdef ENABLE_API_BACKENDS
     verbose_ = verbose;
     LOG_DEBUG("HttpClient verbose: " + std::string(verbose ? "enabled" : "disabled"));
-#endif
 }
 
 #ifdef ENABLE_API_BACKENDS

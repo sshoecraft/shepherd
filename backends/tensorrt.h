@@ -97,7 +97,7 @@ public:
     void add_system_message(const std::string& content) override;
     std::string get_backend_name() const override;
     std::string get_model_name() const override;
-    size_t get_max_context_size() const override;
+    size_t get_context_size() const override;
     bool is_ready() const override;
     void shutdown() override;
     uint32_t evict_to_free_space(uint32_t tokens_needed) override;
@@ -117,7 +117,7 @@ private:
     void* executor_ = nullptr;    // tensorrt_llm::executor::Executor*
     void* event_manager_ = nullptr;  // std::shared_ptr<KVCacheEventManager>*
     std::string model_path_;
-    size_t max_context_size_ = 8192;
+    size_t context_size_ = 8192;
     uint64_t current_request_id_ = 0;  // Track active request
     bool request_active_ = false;
 

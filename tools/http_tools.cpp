@@ -1,4 +1,5 @@
-#include "../shepherd.h"
+
+#include "shepherd.h"
 #include "http_tools.h"
 #include <map>
 
@@ -9,7 +10,7 @@ private:
         std::array<char, 128> buffer;
         std::string result;
 
-        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(curl_command.c_str(), "r"), pclose);
+        std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(curl_command.c_str(), "r"), pclose);
 
         if (!pipe) {
             throw std::runtime_error("Failed to execute curl command");
@@ -59,10 +60,14 @@ public:
             // Add URL
             curl_cmd += "\"" + url + "\"";
 
+//				dprintf(1,"HTTPClient: Executing: " + curl_cmd + std::endl);
+
+#if 0
             // Debug output controlled by global flag
-            if (g_debug_mode) {
-                std::cout << "HTTPClient: Executing: " << curl_cmd << std::endl;
+            if (g_debug_level) {
+             std::cout << "HTTPClient: Executing: " << curl_cmd << std::endl;
             }
+#endif
 
             std::string output = execute_curl(curl_cmd);
 
@@ -137,10 +142,13 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
             result["error"] = response.error;
         }
 
-        if (g_debug_mode) {
+//		dprintf(1,"HTTPRequest: " + method + " " + url + " -> " + response.status_code + "\n");
+#if 0
+        if (g_debug_level) {
             std::cout << "HTTPRequest: " << method << " " << url
                       << " -> " << response.status_code << std::endl;
         }
+#endif
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error making HTTP request: ") + e.what();
@@ -183,7 +191,7 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
             result["error"] = response.error;
         }
 
-        if (g_debug_mode) {
+        if (g_debug_level) {
             std::cout << "HTTPGet: " << url << " -> " << response.status_code << std::endl;
         }
 
@@ -231,7 +239,7 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
             result["error"] = response.error;
         }
 
-        if (g_debug_mode) {
+        if (g_debug_level) {
             std::cout << "HTTPPost: " << url << " -> " << response.status_code << std::endl;
         }
 

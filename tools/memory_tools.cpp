@@ -1,3 +1,4 @@
+#if 1
 #include "memory_tools.h"
 #include "../rag.h"
 #include "../logger.h"
@@ -27,7 +28,6 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
     std::map<std::string, std::any> result;
 
     if (!RAGManager::is_initialized()) {
-        result["success"] = false;
         result["error"] = std::string("RAG system not initialized");
         return result;
     }
@@ -36,7 +36,6 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
     int max_results = tool_utils::get_int(args, "max_results", 5);
 
     if (query.empty()) {
-        result["success"] = false;
         result["error"] = std::string("Query parameter is required");
         return result;
     }
@@ -48,8 +47,7 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
 
         if (search_results.empty()) {
             LOG_DEBUG("SEARCH_MEMORY: No results found");
-            result["success"] = true;
-            result["content"] = std::string("No archived conversations found matching: " + query);
+            result["output"] = std::string("No archived conversations found matching: " + query);
             return result;
         }
 
@@ -161,14 +159,12 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
                       ", Content preview: " + preview);
         }
 
-        result["success"] = true;
-        result["content"] = oss.str();
+        result["output"] = oss.str();
 
         LOG_DEBUG("SEARCH_MEMORY: Returning " + std::to_string(search_results.size()) + " results to model");
 
     } catch (const std::exception& e) {
         LOG_ERROR("Error searching memory: " + std::string(e.what()));
-        result["success"] = false;
         result["error"] = std::string("Search failed: ") + e.what();
     }
 
@@ -204,11 +200,9 @@ std::map<std::string, std::any> SetFactTool::execute(const std::map<std::string,
     std::string response = RAGManager::execute_set_fact_tool(key, value);
 
     if (response.find("Error:") == 0) {
-        result["success"] = false;
         result["error"] = response;
     } else {
-        result["success"] = true;
-        result["content"] = response;
+        result["output"] = response;
     }
 
     return result;
@@ -242,11 +236,9 @@ std::map<std::string, std::any> GetFactTool::execute(const std::map<std::string,
 
     // "Fact not found" is a successful tool execution, just with no result
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
-        result["success"] = false;
         result["error"] = response;
     } else {
-        result["success"] = true;
-        result["content"] = response;
+        result["output"] = response;
     }
 
     return result;
@@ -280,11 +272,9 @@ std::map<std::string, std::any> ClearFactTool::execute(const std::map<std::strin
 
     // "Fact not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
-        result["success"] = false;
         result["error"] = response;
     } else {
-        result["success"] = true;
-        result["content"] = response;
+        result["output"] = response;
     }
 
     return result;
@@ -319,11 +309,9 @@ std::map<std::string, std::any> StoreMemoryTool::execute(const std::map<std::str
     std::string response = RAGManager::execute_store_memory_tool(question, answer);
 
     if (response.find("Error:") == 0) {
-        result["success"] = false;
         result["error"] = response;
     } else {
-        result["success"] = true;
-        result["content"] = response;
+        result["output"] = response;
     }
 
     return result;
@@ -357,11 +345,9 @@ std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::str
 
     // "Memory not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Memory not found:") != 0) {
-        result["success"] = false;
         result["error"] = response;
     } else {
-        result["success"] = true;
-        result["content"] = response;
+        result["output"] = response;
     }
 
     return result;
@@ -378,3 +364,4 @@ void register_memory_tools() {
     registry.register_tool(std::make_unique<ClearFactTool>());
     LOG_DEBUG("Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact, clear_fact");
 }
+#endif

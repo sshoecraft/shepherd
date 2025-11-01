@@ -15,35 +15,31 @@ struct AnthropicModelInfo {
     int max_output_tokens;
 };
 
-/// @brief Anthropic-specific tokenizer using custom implementation
-class AnthropicTokenizer : public Tokenizer {
-public:
-    explicit AnthropicTokenizer(const std::string& model_name = "claude-3-sonnet");
-
-    int count_tokens(const std::string& text) override;
-    std::vector<int> encode(const std::string& text) override;
-    std::string decode(const std::vector<int>& tokens) override;
-    std::string get_tokenizer_name() const override;
-
-private:
-    std::string model_name_;
-    // Custom Anthropic tokenization implementation will be added
-};
-
 /// @brief Backend manager for Anthropic Claude API with integrated context management
 class AnthropicBackend : public ApiBackend {
 public:
+    std::string api_endpoint = "https://api.anthropic.com/v1/messages";
+
     explicit AnthropicBackend(size_t max_context_tokens);
     ~AnthropicBackend() override;
 
     bool initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path = "") override;
     std::string generate(int max_tokens = 0) override;
-    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
+    // generate_from_session now uses base class implementation that calls our format/parse methods
     std::string get_backend_name() const override;
     std::string get_model_name() const override;
-    size_t get_max_context_size() const override;
+    size_t get_context_size() const override;
     bool is_ready() const override;
     void shutdown() override;
+
+protected:
+    // New architecture: Required virtual methods from ApiBackend
+    std::string format_api_request(const SessionContext& session, int max_tokens) override;
+    int extract_tokens_to_evict(const std::string& error_message) override;
+    ApiResponse parse_api_response(const HttpResponse& http_response) override;
+    std::map<std::string, std::string> get_api_headers() override;
+    std::string get_api_endpoint() override;
+    void parse_specific_config(const std::string& json) override;
 
 private:
     std::string make_api_request(const std::string& json_payload);
@@ -56,7 +52,6 @@ private:
 
 #ifdef ENABLE_API_BACKENDS
     CURL* curl_ = nullptr;
-    std::string api_endpoint_ = "https://api.anthropic.com/v1/messages";
     std::string api_version_;
     nlohmann::json tools_json_;  // Cached tools array for API requests
     bool tools_built_ = false;   // Flag to track if tools have been built

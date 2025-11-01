@@ -20,114 +20,55 @@ public:
     // Save current configuration
     void save() const;
 
-    // Getters
-    std::string get_backend() const { return backend_; }
-    std::string get_model() const { return model_; }
-    std::string get_model_path() const { return model_path_; }
-    size_t get_context_size() const { return context_size_; }
-    std::string get_key() const { return key_; }
-    std::string get_api_base() const { return api_base_; }
-    std::string get_system_prompt() const { return system_prompt_; }
-    size_t get_max_db_size() const { return max_db_size_; }
-
-    // Setters
-    void set_backend(const std::string& backend);
-    void set_model(const std::string& model) { model_ = model; }
-    void set_model_path(const std::string& model_path) { model_path_ = model_path; }
-    void set_context_size(size_t context_size) { context_size_ = context_size; }
-    void set_key(const std::string& key) { key_ = key; }
-    void set_api_base(const std::string& api_base) { api_base_ = api_base; }
-    void set_config_path(const std::string& config_path) { custom_config_path_ = config_path; }
-    void set_max_db_size(const std::string& max_db_size_str) {
-        max_db_size_str_ = max_db_size_str;
-        max_db_size_ = parse_size_string(max_db_size_str);
-    }
-
     // Validation
     void validate() const;
 
     // Get available backends for current platform
     static std::vector<std::string> get_available_backends();
 
-    // Get user's home directory (tries getpwuid first, then HOME env var) - public for edit-system command
+    // Get user's home directory (tries getpwuid first, then HOME env var)
     static std::string get_home_directory();
 
-    // Get MCP servers configuration (if any)
-    std::string get_mcp_config() const { return mcp_config_; }
+    // Backend-specific configuration helper
+    std::string backend_config(const std::string& backend_name) const;
 
-    // Get memory database path
-    std::string get_memory_database() const { return memory_database_; }
+    // Set custom config file path (for command-line override)
+    void set_config_path(const std::string& config_path) { custom_config_path_ = config_path; }
 
-    // Web search configuration
-    std::string get_web_search_provider() const { return web_search_provider_; }
-    std::string get_web_search_api_key() const { return web_search_api_key_; }
-    std::string get_web_search_instance_url() const { return web_search_instance_url_; }
+    // Set backend with validation
+    void set_backend(const std::string& backend);
 
-    // Sampling parameters (for llamacpp backend)
-    float get_temperature() const { return temperature_; }
-    float get_top_p() const { return top_p_; }
-    int get_top_k() const { return top_k_; }
-    int get_min_keep() const { return min_keep_; }
-    float get_penalty_repeat() const { return penalty_repeat_; }
-    float get_penalty_freq() const { return penalty_freq_; }
-    float get_penalty_present() const { return penalty_present_; }
-    int get_penalty_last_n() const { return penalty_last_n_; }
-    int get_gpu_layers() const { return gpu_layers_; }
-    bool get_truncate_tool_results() const { return truncate_tool_results_; }
-    int get_tensor_parallel() const { return tensor_parallel_; }
-    int get_pipeline_parallel() const { return pipeline_parallel_; }
+    // Set max DB size with parsing
+    void set_max_db_size(const std::string& max_db_size_str);
 
-    void set_temperature(float temperature) { temperature_ = temperature; }
-    void set_top_p(float top_p) { top_p_ = top_p; }
-    void set_top_k(int top_k) { top_k_ = top_k; }
-    void set_min_keep(int min_keep) { min_keep_ = min_keep; }
-    void set_penalty_repeat(float penalty_repeat) { penalty_repeat_ = penalty_repeat; }
-    void set_penalty_freq(float penalty_freq) { penalty_freq_ = penalty_freq; }
-    void set_penalty_present(float penalty_present) { penalty_present_ = penalty_present; }
-    void set_penalty_last_n(int penalty_last_n) { penalty_last_n_ = penalty_last_n; }
-    void set_gpu_layers(int gpu_layers) { gpu_layers_ = gpu_layers; }
-    void set_truncate_tool_results(bool truncate) { truncate_tool_results_ = truncate; }
-    void set_tensor_parallel(int tp) { tensor_parallel_ = tp; }
-    void set_pipeline_parallel(int pp) { pipeline_parallel_ = pp; }
+    // Public configuration variables
+    std::string system_message;
+    std::string warmup_message;
+    std::string backend;
+    std::string model;
+    std::string model_path;
+    size_t context_size;
+    std::string key;
+    std::string api_base;
+    std::string system_prompt;
+    std::string mcp_config;
+    std::string memory_database;
+    std::string max_db_size_str;
+    size_t max_db_size;
+    std::string web_search_provider;
+    std::string web_search_api_key;
+    std::string web_search_instance_url;
+    std::map<std::string, std::string> backend_configs;
+    int truncate_limit;
 
 private:
-    // Helper to parse size strings with suffixes (e.g., "10G", "500M")
+    // Internal helpers
     static size_t parse_size_string(const std::string& size_str);
-
-    std::string backend_;
-    std::string model_;
-    std::string model_path_;
-    size_t context_size_;
-    std::string key_;
-    std::string api_base_;  // API base URL for API backends (optional)
-    std::string system_prompt_;  // Custom system prompt (optional)
-    std::string mcp_config_;  // Raw JSON string for MCP servers
-    std::string custom_config_path_;  // Custom config file path (optional)
-    std::string memory_database_;  // RAG memory database path (optional, default: ~/.shepherd/memory.db)
-    std::string max_db_size_str_;  // Maximum RAG database size string (e.g., "10G")
-    size_t max_db_size_;  // Cached parsed size in bytes
-
-    // Web search settings (optional)
-    std::string web_search_provider_;  // "brave", "duckduckgo", "searxng", or empty
-    std::string web_search_api_key_;  // API key (for Brave)
-    std::string web_search_instance_url_;  // Instance URL (for SearXNG)
-
-    // Sampling parameters (for llamacpp backend)
-    float temperature_;
-    float top_p_;
-    int top_k_;
-    int min_keep_;
-    float penalty_repeat_;
-    float penalty_freq_;
-    float penalty_present_;
-    int penalty_last_n_;
-    int gpu_layers_;  // Number of layers to offload to GPU (-1 = all, 0 = none)
-    bool truncate_tool_results_;  // Whether to truncate large tool results (default: true)
-    int tensor_parallel_;  // Number of GPUs to use for tensor parallelism (0 = auto/all available)
-    int pipeline_parallel_;  // Pipeline parallelism stages (0 = auto, 1 = disabled)
-
     std::string get_config_path() const;
     std::string get_default_model_path() const;
     void set_defaults();
     bool is_backend_available(const std::string& backend) const;
+
+    // Internal state
+    std::string custom_config_path_;  // Custom config file path (optional)
 };

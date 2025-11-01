@@ -1,7 +1,7 @@
 #include "core_tools.h"
-#include "../http_client.h"
-#include "../web_search.h"
-#include "../nlohmann/json.hpp"
+#include "http_client.h"
+#include "tools/web_search.h"
+#include "nlohmann/json.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -208,6 +208,27 @@ std::vector<ParameterDef> GrepTool::get_parameters_schema() const {
     };
 }
 
+// Helper: Check if ripgrep (rg) is available
+static bool is_ripgrep_available() {
+    static int cached = -1;  // -1 = not checked, 0 = no, 1 = yes
+    if (cached != -1) {
+        return cached == 1;
+    }
+
+    FILE* fp = popen("which rg 2>/dev/null", "r");
+    if (!fp) {
+        cached = 0;
+        return false;
+    }
+
+    char buf[128];
+    bool found = (fgets(buf, sizeof(buf), fp) != nullptr);
+    pclose(fp);
+
+    cached = found ? 1 : 0;
+    return found;
+}
+
 std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
@@ -227,6 +248,79 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
     }
 
     try {
+        // Use ripgrep if available (much faster and respects .gitignore)
+        if (is_ripgrep_available()) {
+            std::ostringstream cmd;
+            cmd << "rg";
+
+            // Output mode
+            if (output_mode == "files_with_matches") {
+                cmd << " --files-with-matches";
+            } else if (output_mode == "count") {
+                cmd << " --count";
+            }
+            // content mode is default
+
+            // Case sensitivity
+            if (case_insensitive) {
+                cmd << " --ignore-case";
+            }
+
+            // Line numbers
+            if (line_numbers && output_mode == "content") {
+                cmd << " --line-number";
+            }
+
+            // Context
+            if (context_after > 0 && output_mode == "content") {
+                cmd << " -A " << context_after;
+            }
+            if (context_before > 0 && output_mode == "content") {
+                cmd << " -B " << context_before;
+            }
+
+            // Glob filter
+            if (!glob.empty()) {
+                cmd << " --glob '" << glob << "'";
+            }
+
+            // Pattern and path
+            cmd << " '" << pattern << "' '" << path << "' 2>&1";
+
+            FILE* fp = popen(cmd.str().c_str(), "r");
+            if (!fp) {
+                result["error"] = std::string("Failed to execute ripgrep");
+                result["success"] = false;
+                return result;
+            }
+
+            std::ostringstream output;
+            char buf[4096];
+            int match_count = 0;
+
+            while (fgets(buf, sizeof(buf), fp) != nullptr) {
+                output << buf;
+                if (output_mode == "files_with_matches" || output_mode == "content") {
+                    match_count++;
+                }
+            }
+
+            int status = pclose(fp);
+
+            // rg returns 0 if matches found, 1 if no matches, 2 if error
+            if (WEXITSTATUS(status) == 2) {
+                result["error"] = std::string("Ripgrep error: ") + output.str();
+                result["success"] = false;
+                return result;
+            }
+
+            result["content"] = output.str();
+            result["count"] = match_count;
+            result["success"] = true;
+            return result;
+        }
+
+        // Fallback: Use C++ regex but ONLY search current directory (non-recursive)
         std::regex::flag_type flags = std::regex::ECMAScript;
         if (case_insensitive) {
             flags |= std::regex::icase;
@@ -261,16 +355,17 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
                 }
             }
         } else if (fs::is_directory(search_path)) {
-            // Search in directory
-            for (const auto& entry : fs::recursive_directory_iterator(search_path)) {
+            // Search in directory (NON-RECURSIVE to avoid hanging on large directories)
+            // If ripgrep is not available, only search immediate directory
+            for (const auto& entry : fs::directory_iterator(search_path)) {
                 if (!entry.is_regular_file()) continue;
 
                 std::string filepath = entry.path().string();
 
                 // Apply glob filter if specified
                 if (!glob.empty()) {
-                    std::string relative = fs::relative(entry.path(), search_path).string();
-                    if (!glob_match(glob, relative)) {
+                    std::string filename = entry.path().filename().string();
+                    if (!glob_match(glob, filename)) {
                         continue;
                     }
                 }
@@ -463,7 +558,7 @@ std::map<std::string, std::any> WebSearchTool::execute(const std::map<std::strin
         return result;
     }
 
-    auto& search_manager = WebSearchManager::instance();
+    auto& search_manager = WebSearch::instance();
 
     if (!search_manager.is_available()) {
         result["error"] = std::string("Web search not configured. Add 'web_search_provider' to config.json");

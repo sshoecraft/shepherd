@@ -108,6 +108,62 @@ std::string ToolRegistry::get_tools_as_system_prompt() const {
     return prompt;
 }
 
+ToolResult execute_tool(const std::string& tool_name,
+                       const std::map<std::string, std::any>& parameters) {
+    // Get tool from registry
+    Tool* tool = ToolRegistry::instance().get_tool(tool_name);
+
+    if (!tool) {
+        return ToolResult(false, "", "Tool not found: " + tool_name);
+    }
+
+    try {
+        // Execute tool
+        auto result = tool->execute(parameters);
+
+        // Convert result map to string
+        // Tools can return {"content": "..."} or {"output": "..."} or {"error": "..."}
+        std::string output;
+
+        if (result.find("error") != result.end()) {
+            try {
+                output = std::any_cast<std::string>(result["error"]);
+                return ToolResult(false, "", output);
+            } catch (const std::bad_any_cast&) {
+                return ToolResult(false, "", "Tool returned error but couldn't cast to string");
+            }
+        }
+
+        // Check for "content" key (used by most tools)
+        if (result.find("content") != result.end()) {
+            try {
+                output = std::any_cast<std::string>(result["content"]);
+                return ToolResult(true, output);
+            } catch (const std::bad_any_cast&) {
+                return ToolResult(false, "", "Tool returned content but couldn't cast to string");
+            }
+        }
+
+        // Check for "output" key (legacy/alternative)
+        if (result.find("output") != result.end()) {
+            try {
+                output = std::any_cast<std::string>(result["output"]);
+                return ToolResult(true, output);
+            } catch (const std::bad_any_cast&) {
+                return ToolResult(false, "", "Tool returned output but couldn't cast to string");
+            }
+        }
+
+        // Fallback: tool returned something else
+        return ToolResult(false, "", "Tool returned unexpected result format");
+
+    } catch (const std::exception& e) {
+        return ToolResult(false, "", std::string("Tool execution failed: ") + e.what());
+    } catch (...) {
+        return ToolResult(false, "", "Tool execution failed with unknown error");
+    }
+}
+
 namespace tool_utils {
     std::string get_string(const std::map<std::string, std::any>& args, const std::string& key, const std::string& default_value) {
         auto it = args.find(key);

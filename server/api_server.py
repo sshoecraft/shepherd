@@ -17,6 +17,7 @@ import socket
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -24,6 +25,16 @@ import uvicorn
 # ============================================================================
 # OpenAI API Models
 # ============================================================================
+
+class OpenAIError(BaseModel):
+    """OpenAI-compatible error response"""
+    message: str
+    type: str
+    code: Optional[str] = None
+
+class OpenAIErrorResponse(BaseModel):
+    """OpenAI-compatible error response wrapper"""
+    error: OpenAIError
 
 class Message(BaseModel):
     role: str
@@ -90,7 +101,7 @@ class ShepherdClient:
         response = json.loads(response_line)
 
         if response.get("status") != "success":
-            raise RuntimeError(f"Shepherd error: {response.get('error')}")
+            raise RuntimeError(f"{response.get('error')}")
 
         return response
 
@@ -127,6 +138,36 @@ app = FastAPI(
     description="OpenAI-compatible API for Shepherd LLM inference engine",
     version="1.0.0"
 )
+
+# Custom exception handler to return OpenAI-compatible error format
+@app.exception_handler(HTTPException)
+async def openai_exception_handler(request: Request, exc: HTTPException):
+    """Convert FastAPI HTTPException to OpenAI-compatible error format"""
+
+    # Determine error type based on status code
+    if exc.status_code == 400:
+        error_type = "invalid_request_error"
+    elif exc.status_code == 401:
+        error_type = "authentication_error"
+    elif exc.status_code == 429:
+        error_type = "rate_limit_error"
+    elif exc.status_code == 500:
+        error_type = "server_error"
+    else:
+        error_type = "api_error"
+
+    error_response = {
+        "error": {
+            "message": exc.detail,
+            "type": error_type,
+            "code": str(exc.status_code)
+        }
+    }
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response
+    )
 
 shepherd: Optional[ShepherdClient] = None
 parent_pid: int = 0  # C++ parent process PID for sending cancellation signals
@@ -186,11 +227,18 @@ async def chat_completions(req: Request, request: ChatCompletionRequest):
     except Exception as e:
         error_msg = str(e)
         # Check if this is a context limit error (client error, not server error)
-        # Return 400 to match OpenAI API spec
+        # Return 400 with OpenAI-compatible error format
         if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
-            raise HTTPException(400, error_msg)
+            error_response = OpenAIErrorResponse(
+                error=OpenAIError(
+                    message=error_msg,
+                    type="invalid_request_error",
+                    code="context_length_exceeded"
+                )
+            )
+            return JSONResponse(status_code=400, content=error_response.model_dump())
         # All other errors are 500
-        raise HTTPException(500, f"Shepherd error: {error_msg}")
+        raise HTTPException(500, f"{error_msg}")
 
     choice = {
         "index": 0,
@@ -229,7 +277,7 @@ async def list_models():
         # Check if this is a context limit error (client error, not server error)
         if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
             raise HTTPException(400, error_msg)
-        raise HTTPException(500, f"Shepherd error: {error_msg}")
+        raise HTTPException(500, f"{error_msg}")
 
     model_data = [
         ModelInfo(
@@ -253,7 +301,7 @@ async def get_model(model_name: str):
         # Check if this is a context limit error (client error, not server error)
         if any(keyword in error_msg.lower() for keyword in ["context limit", "context window", "maximum context", "context length", "exceeded"]):
             raise HTTPException(400, error_msg)
-        raise HTTPException(500, f"Shepherd error: {error_msg}")
+        raise HTTPException(500, f"{error_msg}")
 
     # Return model info regardless of what name was requested
     # (since we only have one "shepherd" model)

@@ -14,9 +14,18 @@ namespace utf8_sanitizer {
     
     /**
      * Check if a string contains valid UTF-8 sequences.
-     * 
+     *
      * @param input The input string to validate
      * @return True if the string contains only valid UTF-8, false otherwise
      */
     bool is_valid_utf8(const std::string& input);
+
+    /**
+     * Strip control characters (except newline, tab, carriage return) from input.
+     * This removes terminal escape sequences, backspace, DEL, and other control chars.
+     *
+     * @param input The input string that may contain control characters
+     * @return A string with control characters removed
+     */
+    std::string strip_control_characters(const std::string& input);
 }

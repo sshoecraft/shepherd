@@ -134,7 +134,56 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
         } else {
             std::string tool_call_content = response.substr(tool_call_start, tool_call_end - tool_call_start + 12);
 
-            // Extract function name and parameters from the content
+            // Try parsing arg_key/arg_value format first (GLM-4 format)
+            // Format: <tool_call>function_name\n<arg_key>key</arg_key>\n<arg_value>value</arg_value>\n</tool_call>
+            std::regex tool_name_regex("<tool_call>\\s*([a-zA-Z_][a-zA-Z0-9_]*)");
+            std::smatch tool_name_match;
+            if (std::regex_search(tool_call_content, tool_name_match, tool_name_regex)) {
+                std::string tool_name = tool_name_match[1].str();
+                LOG_DEBUG("Found tool name in <tool_call>: " + tool_name);
+
+                // Extract arg_key/arg_value pairs
+                std::map<std::string, std::any> tool_params;
+                std::regex arg_regex("<arg_key>\\s*([^<]+)\\s*</arg_key>\\s*<arg_value>\\s*([\\s\\S]*?)\\s*</arg_value>");
+                std::sregex_iterator arg_it(tool_call_content.begin(), tool_call_content.end(), arg_regex);
+                std::sregex_iterator arg_end;
+
+                for (; arg_it != arg_end; ++arg_it) {
+                    std::string key = (*arg_it)[1].str();
+                    std::string value = (*arg_it)[2].str();
+
+                    // Trim whitespace
+                    size_t start = key.find_first_not_of(" \t\n\r");
+                    size_t end = key.find_last_not_of(" \t\n\r");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        key = key.substr(start, end - start + 1);
+                    }
+
+                    start = value.find_first_not_of(" \t\n\r");
+                    end = value.find_last_not_of(" \t\n\r");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        value = value.substr(start, end - start + 1);
+                    }
+
+                    tool_params[key] = value;
+                    LOG_DEBUG("  Parameter: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : ""));
+                }
+
+                // Build JSON from parameters for raw_json field
+                nlohmann::json params_json;
+                for (const auto& [key, value] : tool_params) {
+                    params_json[key] = std::any_cast<std::string>(value);
+                }
+
+                ToolCall tc;
+                tc.name = tool_name;
+                tc.parameters = tool_params;
+                tc.raw_json = params_json.dump();
+                tc.tool_call_id = "";  // GLM models don't provide call IDs
+                return tc;
+            }
+
+            // Fall back to old <function= format
             auto result = parse_xml_function_block(tool_call_content);
             if (result.has_value()) {
                 return result;

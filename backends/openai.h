@@ -1,54 +1,53 @@
+
 #pragma once
 
-#include "api_backend.h"
-
-#ifdef ENABLE_API_BACKENDS
+#include "api.h"
 #include <memory>
-#include "../nlohmann/json.hpp"
-#endif
+#include "nlohmann/json.hpp"
+#include "http_client.h"
 
 /// @brief Backend manager for OpenAI API with integrated context management
 class OpenAIBackend : public ApiBackend {
 public:
-    explicit OpenAIBackend(size_t max_context_tokens);
+    std::string api_endpoint = "https://api.openai.com/v1/chat/completions";
+    std::string api_key;
+    std::string model_name;
+
+    explicit OpenAIBackend(size_t context_size);
     ~OpenAIBackend() override;
 
-    bool initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path = "") override;
-    std::string generate(int max_tokens = 0) override;
-    std::string generate_from_session(const SessionContext& session, int max_tokens = 0) override;
-    std::string get_backend_name() const override;
-    std::string get_model_name() const override;
-    size_t get_max_context_size() const override;
-    bool is_ready() const override;
-    void shutdown() override;
+	// Implement pure virtual methods from ApiBackend
+	Response parse_http_response(const HttpResponse& http_response) override;
 
-    /// @brief Set custom API base URL (must be called before initialize)
-    void set_api_base(const std::string& api_base);
+	nlohmann::json build_request_from_session(const Session& session, int max_tokens) override;
+
+	nlohmann::json build_request(const Session& session,
+	                              Message::Type type,
+	                              const std::string& content,
+	                              const std::string& tool_name,
+	                              const std::string& tool_id,
+	                              int max_tokens = 0) override;
+
+	std::string parse_response(const nlohmann::json& response) override;
+	int extract_tokens_to_evict(const HttpResponse& response) override;
+	std::map<std::string, std::string> get_api_headers() override;
+	std::string get_api_endpoint() override;
+
+	// Override initialize to add OpenAI-specific setup
+	void initialize(Session& session) override;
 
 private:
-    /// @brief Make HTTP POST request to OpenAI API
-    /// @param json_payload Request payload
-    /// @return API response
-    std::string make_api_request(const std::string& json_payload);
+	/// @brief Query available model from OpenAI API server
+	/// @return Model name from server, or empty string if failed
+	std::string query_available_model();
 
-    /// @brief Make HTTP GET request to OpenAI API
-    /// @param endpoint API endpoint (e.g., "/models/gpt-4")
-    /// @return API response
-    std::string make_get_request(const std::string& endpoint);
+	/// @brief Query model info from OpenAI API to get context size
+	/// @param model_name Model name to query
+	/// @return Context size in tokens, or 0 if failed
+	size_t query_model_context_size(const std::string& model_name);
 
-    /// @brief Query model info from OpenAI API to get context size
-    /// @param model_name Model name to query
-    /// @return Context size in tokens, or 0 if failed
-    size_t query_model_context_size(const std::string& model_name);
-
-    /// @brief Parse OpenAI API response
-    /// @param response_json API response JSON
-    /// @return Generated text content
-    std::string parse_openai_response(const std::string& response_json);
-
-#ifdef ENABLE_API_BACKENDS
-    std::string api_endpoint_ = "https://api.openai.com/v1/chat/completions";
-    nlohmann::json tools_json_;  // Cached tools array for API requests (OpenAI format)
-    // Note: max_context_size_ is inherited from BackendManager base class
-#endif
+	/// @brief Make HTTP GET request to OpenAI API
+	/// @param endpoint API endpoint (e.g., "/models")
+	/// @return API response body
+	std::string make_get_request(const std::string& endpoint);
 };

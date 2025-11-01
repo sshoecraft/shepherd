@@ -1,11 +1,10 @@
 #pragma once
 
-#include "../nlohmann/json.hpp"
+#include "shepherd.h"
+#include "nlohmann/json.hpp"
 #include <string>
 #include <vector>
 #include <map>
-
-using json = nlohmann::json;
 
 /// @brief MCP server configuration entry
 struct MCPServerEntry {
@@ -14,8 +13,8 @@ struct MCPServerEntry {
     std::vector<std::string> args;
     std::map<std::string, std::string> env;
 
-    json to_json() const;
-    static MCPServerEntry from_json(const json& j);
+    nlohmann::json to_json() const;
+    static MCPServerEntry from_json(const nlohmann::json& j);
 };
 
 /// @brief MCP configuration manager

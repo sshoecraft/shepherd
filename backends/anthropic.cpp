@@ -11,9 +11,6 @@
 
 using json = nlohmann::json;
 
-// Global cancellation flag (defined in main.cpp)
-extern bool g_generation_cancelled;
-
 // Fallback model info table (used if docs scraping fails)
 static const AnthropicModelInfo FALLBACK_MODEL_INFO[] = {
     {"claude-sonnet-4-5-20250929", 200000, 64000},
@@ -37,48 +34,19 @@ static std::map<std::string, AnthropicModelInfo> g_discovered_models;
 /* <system_warning>Long conversation debriefing:
 
 This conversation contains 82 messages, which is higher than average.
-When responding in long conversations, Claude should stay helpful and on-topic. This may include continuing to engage on the current topic, suggesting to move in a different direction, offering to start a new conversation, etc.</system_warning> 
+When responding in long conversations, Claude should stay helpful and on-topic. This may include continuing to engage on the current topic, suggesting to move in a different direction, offering to start a new conversation, etc.</system_warning>
 
 <system_warning>Extremely long conversation: 112 total messages (56 user/assistant pairs), well above the 82-message conversation warning.  This conversation is becoming very long. While Claude can continue to be helpful, it should be thoughtful about whether to suggest starting a fresh conversation or wrapping up, especially if: the topic has shifted significantly, the user seems frustrated, or continuing might lead to degraded performance. Claude can naturally offer to start fresh when appropriate.</system_warning> */
-
-
-
-// AnthropicTokenizer implementation
-AnthropicTokenizer::AnthropicTokenizer(const std::string& model_name)
-    : model_name_(model_name) {
-    LOG_DEBUG("Anthropic tokenizer initialized for model: " + model_name);
-}
-
-int AnthropicTokenizer::count_tokens(const std::string& text) {
-    // TODO: Implement custom Anthropic tokenization
-    // For now, use approximation (roughly 4 chars per token)
-    return static_cast<int>(text.length() / 4.0 + 0.5);
-}
-
-std::vector<int> AnthropicTokenizer::encode(const std::string& text) {
-    // TODO: Implement Anthropic encoding
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
-    }
-    return tokens;
-}
-
-std::string AnthropicTokenizer::decode(const std::vector<int>& tokens) {
-    // TODO: Implement Anthropic decoding
-    return "TODO: Implement Anthropic decode";
-}
-
-std::string AnthropicTokenizer::get_tokenizer_name() const {
-    return "anthropic-" + model_name_;
-}
 
 // AnthropicBackend implementation
 AnthropicBackend::AnthropicBackend(size_t max_context_tokens)
     : ApiBackend(max_context_tokens) {
     // Don't create context manager yet - wait until model is loaded to get actual context size
-    tokenizer_ = std::make_unique<AnthropicTokenizer>("claude-3-sonnet"); // Default model
     LOG_DEBUG("AnthropicBackend created");
+
+    // Parse backend-specific config
+    std::string backend_cfg = config.backend_config(get_backend_name());
+    parse_backend_config(backend_cfg);
 }
 
 AnthropicBackend::~AnthropicBackend() {
@@ -99,9 +67,6 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
 
     model_name_ = model_name.empty() ? "claude-3-sonnet" : model_name;
     api_key_ = api_key;
-
-    // Update tokenizer with correct model name
-    tokenizer_ = std::make_unique<AnthropicTokenizer>(model_name_);
 
     // Initialize curl
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -128,33 +93,33 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
 
     // Determine final context size and auto_evict flag
     bool auto_evict;
-    if (max_context_size_ == 0) {
+    if (context_size_ == 0) {
         // User didn't specify - use API's limit
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
-    } else if (max_context_size_ > api_context_size) {
+        LOG_INFO("Using API's context size: " + std::to_string(context_size_) + " (auto_evict=false)");
+    } else if (context_size_ > api_context_size) {
         // User requested more than API supports - cap at API limit
-        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
+        LOG_WARN("Requested context size " + std::to_string(context_size_) +
                  " exceeds API limit " + std::to_string(api_context_size) +
                  ", capping at API limit");
-        max_context_size_ = api_context_size;
+        context_size_ = api_context_size;
         auto_evict = false; // Rely on API 400 errors
-    } else if (max_context_size_ < api_context_size) {
+    } else if (context_size_ < api_context_size) {
         // User requested less than API supports - need proactive eviction
         auto_evict = true;
-        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
+        LOG_INFO("Using user's context size: " + std::to_string(context_size_) +
                  " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
     } else {
         // User's limit equals API limit - rely on API errors
         auto_evict = false;
-        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
+        LOG_INFO("Using context size: " + std::to_string(context_size_) + " (matches API limit, auto_evict=false)");
     }
 
     // Create the shared context manager with final context size
-    context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
+    context_manager_ = std::make_unique<ApiContextManager>(context_size_);
     context_manager_->auto_evict = auto_evict;
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
+    LOG_DEBUG("Created ApiContextManager with " + std::to_string(context_size_) + " tokens (auto_evict=" +
               std::string(auto_evict ? "true" : "false") + ")");
 
     LOG_INFO("AnthropicBackend initialized with model: " + model_name_);
@@ -167,237 +132,10 @@ bool AnthropicBackend::initialize(const std::string& model_name, const std::stri
 }
 
 std::string AnthropicBackend::generate(int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Anthropic backend not initialized");
-    }
-
-    LOG_DEBUG("Anthropic generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
-
-    // Proactive eviction if enabled (when user's context < API's context)
-    if (context_manager_->auto_evict) {
-        int estimated_tokens = estimate_context_tokens();
-        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
-
-        if (estimated_tokens > static_cast<int>(max_context_size_)) {
-            if (g_server_mode) {
-                // Server mode: throw exception, let client handle it
-                throw ContextManagerError(
-                    "Context limit exceeded: estimated " +
-                    std::to_string(estimated_tokens) + " tokens but limit is " +
-                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
-            } else {
-                // CLI mode: proactively evict to make room
-                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
-                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-                evict_with_estimation(estimated_tokens);
-            }
-        }
-    }
-
-    // Calculate available tokens for generation
-    int total_context_tokens = context_manager_->get_total_tokens();
-    size_t context_window = context_manager_->get_max_context_tokens();
-    int available_for_generation = static_cast<int>(context_window) - total_context_tokens - 100; // 100 token buffer
-
-    // Get model-specific max output token limit
-    int max_output_limit = query_max_output_tokens(model_name_);
-
-    // Use calculated available space if max_tokens not specified
-    int actual_max_tokens = (max_tokens > 0) ? max_tokens : available_for_generation;
-
-    // Cap at both available space AND model output limit
-    actual_max_tokens = std::min(actual_max_tokens, available_for_generation);
-    actual_max_tokens = std::min(actual_max_tokens, max_output_limit);
-
-    // Anthropic requires at least 1 token
-    if (actual_max_tokens < 1) {
-        throw BackendManagerError("No tokens available for generation (context full)");
-    }
-
-    LOG_DEBUG("Max tokens for generation: " + std::to_string(actual_max_tokens) +
-              " (available: " + std::to_string(available_for_generation) +
-              ", used: " + std::to_string(total_context_tokens) + "/" + std::to_string(context_window) + ")");
-
-    // Build complete API request JSON directly from messages
-    try {
-        json request;
-
-        // Required fields
-        request["model"] = model_name_;
-        request["max_tokens"] = actual_max_tokens;
-
-        // Read messages from context manager and format for Anthropic API
-        const auto& messages = context_manager_->get_messages();
-
-        // Anthropic format: separate "system" field from "messages" array
-        std::string system_content;
-        request["messages"] = json::array();
-
-        for (const auto& msg : messages) {
-            if (msg.type == Message::SYSTEM) {
-                // Store system message separately
-                system_content = msg.content;
-            } else if (msg.type == Message::USER) {
-                request["messages"].push_back({
-                    {"role", "user"},
-                    {"content", msg.content}
-                });
-            } else if (msg.type == Message::ASSISTANT) {
-                // Check if this is a tool call (JSON format)
-                json assistant_content;
-                try {
-                    json parsed = json::parse(msg.content);
-                    // If it parses as JSON with "name" and "parameters", it's a tool call
-                    if (parsed.contains("name") && parsed.contains("parameters")) {
-                        // Format as tool_use block for Anthropic
-                        assistant_content = json::array({
-                            {
-                                {"type", "tool_use"},
-                                {"id", parsed.value("id", "")},
-                                {"name", parsed["name"]},
-                                {"input", parsed["parameters"]}
-                            }
-                        });
-                    } else {
-                        // Regular text content
-                        assistant_content = msg.content;
-                    }
-                } catch (const json::exception&) {
-                    // Not JSON, treat as regular text
-                    assistant_content = msg.content;
-                }
-
-                request["messages"].push_back({
-                    {"role", "assistant"},
-                    {"content", assistant_content}
-                });
-            } else if (msg.type == Message::TOOL) {
-                // Tool results for Anthropic must be user messages with tool_result content blocks
-                request["messages"].push_back({
-                    {"role", "user"},
-                    {"content", json::array({
-                        {
-                            {"type", "tool_result"},
-                            {"tool_use_id", msg.tool_call_id},
-                            {"content", msg.content}
-                        }
-                    })}
-                });
-            }
-        }
-
-        // Add system field if we have system content
-        if (!system_content.empty()) {
-            request["system"] = system_content;
-        }
-
-        // Build tools array once on first call (lazy initialization after tools are registered)
-        if (!tools_built_) {
-            build_tools_from_registry();
-        }
-
-        // Format tools for Anthropic API if we have any
-        if (!tools_data_.empty() && tools_json_.empty()) {
-            tools_json_ = json::array();
-
-            for (const auto& tool_info : tools_data_) {
-                json tool;
-                tool["name"] = tool_info.name;
-                tool["description"] = tool_info.description;
-
-                // Parse parameters schema (should already be JSON)
-                try {
-                    tool["input_schema"] = json::parse(tool_info.parameters_schema);
-                } catch (const json::exception& e) {
-                    LOG_DEBUG("Tool " + tool_info.name + " has no structured schema, using empty fallback");
-                    // If parsing fails, create a basic schema
-                    tool["input_schema"] = {
-                        {"type", "object"},
-                        {"properties", json::object()},
-                        {"required", json::array()}
-                    };
-                }
-
-                tools_json_.push_back(tool);
-            }
-            LOG_INFO("Formatted " + std::to_string(tools_json_.size()) + " tools for Anthropic API");
-        }
-
-        // Add tools to request
-        if (!tools_json_.empty()) {
-            request["tools"] = tools_json_;
-        }
-
-        // Use centralized retry logic with automatic eviction
-        return generate_with_retry(
-            // Lambda 1: Build request JSON from current context
-            [this, actual_max_tokens]() -> json {
-                json req;
-                req["model"] = model_name_;
-                req["max_tokens"] = actual_max_tokens;
-
-                // Read messages from context manager
-                const auto& messages = context_manager_->get_messages();
-                std::string system_content;
-                req["messages"] = json::array();
-
-                for (const auto& msg : messages) {
-                    if (msg.type == Message::SYSTEM) {
-                        system_content = msg.content;
-                    } else if (msg.type == Message::USER) {
-                        req["messages"].push_back({{"role", "user"}, {"content", msg.content}});
-                    } else if (msg.type == Message::ASSISTANT) {
-                        json assistant_content;
-                        try {
-                            json parsed = json::parse(msg.content);
-                            if (parsed.contains("name") && parsed.contains("parameters")) {
-                                assistant_content = json::array({{{"type", "tool_use"}, {"id", parsed.value("id", "")}, {"name", parsed["name"]}, {"input", parsed["parameters"]}}});
-                            } else {
-                                assistant_content = msg.content;
-                            }
-                        } catch (const json::exception&) {
-                            assistant_content = msg.content;
-                        }
-                        req["messages"].push_back({{"role", "assistant"}, {"content", assistant_content}});
-                    } else if (msg.type == Message::TOOL) {
-                        req["messages"].push_back({{"role", "user"}, {"content", json::array({{{"type", "tool_result"}, {"tool_use_id", msg.tool_call_id}, {"content", msg.content}}})}});
-                    }
-                }
-
-                if (!system_content.empty()) {
-                    req["system"] = system_content;
-                }
-
-                if (!tools_json_.empty()) {
-                    req["tools"] = tools_json_;
-                }
-
-                return req;
-            },
-            // Lambda 2: Execute API request and return response
-            [this](const std::string& request_json) -> std::string {
-                LOG_DEBUG("=== Full Anthropic API Request ===");
-                LOG_DEBUG(request_json);
-                LOG_DEBUG("=== End Request ===");
-
-                std::string response_json = make_api_request(request_json);
-                if (response_json.empty()) {
-                    throw BackendManagerError("Anthropic API request failed");
-                }
-
-                LOG_DEBUG("Anthropic API response: " + response_json.substr(0, 500));
-
-                std::string response_text = parse_anthropic_response(response_json);
-                if (response_text.empty()) {
-                    throw BackendManagerError("Failed to parse Anthropic response");
-                }
-
-                return response_text;
-            }
-        );
-    } catch (const json::exception& e) {
-        throw BackendManagerError("JSON error in generate: " + std::string(e.what()));
-    }
+    // Use new architecture: build SessionContext and call base class
+    SessionContext session;
+    build_session_from_context(session);
+    return generate_from_session(session, max_tokens);
 }
 
 std::string AnthropicBackend::get_backend_name() const {
@@ -408,7 +146,7 @@ std::string AnthropicBackend::get_model_name() const {
     return model_name_;
 }
 
-size_t AnthropicBackend::get_max_context_size() const {
+size_t AnthropicBackend::get_context_size() const {
 #ifdef ENABLE_API_BACKENDS
     return context_manager_ ? context_manager_->get_max_context_tokens() : 200000;
 #else
@@ -476,7 +214,7 @@ std::string AnthropicBackend::make_api_request(const std::string& json_payload) 
     headers = curl_slist_append(headers, ("anthropic-version: " + api_version_).c_str());
 
     // Configure CURL
-    curl_easy_setopt(curl_, CURLOPT_URL, api_endpoint_.c_str());
+    curl_easy_setopt(curl_, CURLOPT_URL, api_endpoint.c_str());
     curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, json_payload.c_str());
     curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, anthropic_write_callback);
@@ -797,86 +535,45 @@ void AnthropicBackend::discover_api_metadata() {
 #endif
 }
 
-std::string AnthropicBackend::generate_from_session(const SessionContext& session, int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Anthropic backend not initialized");
+// Old generate_from_session removed - now using base class implementation
+
+// ========== New Architecture Methods ==========
+
+std::string AnthropicBackend::format_api_request(const SessionContext& session, int max_tokens) {
+#ifdef ENABLE_API_BACKENDS
+    json request;
+
+    // Required fields
+    request["model"] = model_name_;
+
+    // Calculate max_tokens if not provided
+    int actual_max_tokens = max_tokens;
+    if (actual_max_tokens <= 0) {
+        // Estimate available tokens
+        int total_context_tokens = context_manager_->get_total_tokens();
+        size_t context_window = context_manager_->get_max_context_tokens();
+        actual_max_tokens = static_cast<int>(context_window) - total_context_tokens - 100;
+
+        // Cap at model's max output limit
+        int max_output_limit = query_max_output_tokens(model_name_);
+        actual_max_tokens = std::min(actual_max_tokens, max_output_limit);
     }
 
-    LOG_DEBUG("Anthropic generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+    // Anthropic requires at least 1 token
+    if (actual_max_tokens < 1) {
+        actual_max_tokens = 1;
+    }
 
-    // Use configured max output limit if max_tokens not specified
-    int actual_max_tokens = (max_tokens > 0) ? max_tokens : query_max_output_tokens(model_name_);
+    request["max_tokens"] = actual_max_tokens;
 
-    LOG_DEBUG("Max tokens for generation: " + std::to_string(actual_max_tokens));
+    // Anthropic format: separate "system" field from "messages" array
+    request["messages"] = json::array();
 
-    // Build complete API request JSON from SessionContext
-    try {
-        json request;
-
-        // Required fields
-        request["model"] = model_name_;
-        request["max_tokens"] = actual_max_tokens;
-
-        // Anthropic format: separate "system" field from "messages" array
-        request["messages"] = json::array();
-
-        // Process messages from SessionContext
-        for (const auto& msg : session.messages) {
-            if (msg.role == "system") {
-                // Anthropic uses a separate "system" field at the root level
-                request["system"] = msg.content;
-            } else if (msg.role == "user") {
-                // Check if this is a tool result
-                if (!msg.tool_call_id.empty()) {
-                    // Tool results for Anthropic must be user messages with tool_result content blocks
-                    request["messages"].push_back({
-                        {"role", "user"},
-                        {"content", json::array({
-                            {
-                                {"type", "tool_result"},
-                                {"tool_use_id", msg.tool_call_id},
-                                {"content", msg.content}
-                            }
-                        })}
-                    });
-                } else {
-                    // Regular user message
-                    request["messages"].push_back({
-                        {"role", "user"},
-                        {"content", msg.content}
-                    });
-                }
-            } else if (msg.role == "assistant") {
-                // Check if this is a tool call (JSON format)
-                json assistant_content;
-                try {
-                    json parsed = json::parse(msg.content);
-                    // If it parses as JSON with "name" and "parameters", it's a tool call
-                    if (parsed.contains("name") && parsed.contains("parameters")) {
-                        // Format as tool_use block for Anthropic
-                        assistant_content = json::array({
-                            {
-                                {"type", "tool_use"},
-                                {"id", parsed.value("id", "")},
-                                {"name", parsed["name"]},
-                                {"input", parsed["parameters"]}
-                            }
-                        });
-                    } else {
-                        // Regular text content
-                        assistant_content = msg.content;
-                    }
-                } catch (const json::exception&) {
-                    // Not JSON, treat as regular text
-                    assistant_content = msg.content;
-                }
-
-                request["messages"].push_back({
-                    {"role", "assistant"},
-                    {"content", assistant_content}
-                });
-            } else if (msg.role == "tool") {
-                // Tool results for Anthropic must be user messages with tool_result content blocks
+    for (const auto& msg : session.messages) {
+        if (msg.role == "user") {
+            // Check if this is a tool result (has tool_call_id)
+            if (!msg.tool_call_id.empty()) {
+                // Tool results must be user messages with tool_result content blocks
                 request["messages"].push_back({
                     {"role", "user"},
                     {"content", json::array({
@@ -887,72 +584,232 @@ std::string AnthropicBackend::generate_from_session(const SessionContext& sessio
                         }
                     })}
                 });
+            } else {
+                // Regular user message
+                request["messages"].push_back({
+                    {"role", "user"},
+                    {"content", msg.content}
+                });
             }
+        } else if (msg.role == "assistant") {
+            // Check if this is a tool call (JSON format)
+            json assistant_content;
+            try {
+                json parsed = json::parse(msg.content);
+                // If it parses as JSON with "name" and "parameters", it's a tool call
+                if (parsed.contains("name") && parsed.contains("parameters")) {
+                    // Format as tool_use block for Anthropic
+                    assistant_content = json::array({
+                        {
+                            {"type", "tool_use"},
+                            {"id", parsed.value("id", "")},
+                            {"name", parsed["name"]},
+                            {"input", parsed["parameters"]}
+                        }
+                    });
+                } else {
+                    // Regular text content
+                    assistant_content = msg.content;
+                }
+            } catch (const json::exception&) {
+                // Not JSON, treat as regular text
+                assistant_content = msg.content;
+            }
+
+            request["messages"].push_back({
+                {"role", "assistant"},
+                {"content", assistant_content}
+            });
+        }
+    }
+
+    // Add system field if we have system content
+    if (!session.system_prompt.empty()) {
+        request["system"] = session.system_prompt;
+    }
+
+    // Add tools if available from session
+    if (!session.tools.empty()) {
+        json tools_array = json::array();
+
+        for (const auto& tool_def : session.tools) {
+            json tool;
+            tool["name"] = tool_def.name;
+            tool["description"] = tool_def.description;
+
+            // Parameters are already JSON object
+            if (!tool_def.parameters.empty()) {
+                tool["input_schema"] = tool_def.parameters;
+            } else {
+                tool["input_schema"] = {
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                };
+            }
+
+            tools_array.push_back(tool);
         }
 
-        // Format tools from SessionContext for Anthropic API
-        if (!session.tools.empty()) {
-            json tools_array = json::array();
+        request["tools"] = tools_array;
+    }
 
-            for (const auto& tool_def : session.tools) {
-                json tool;
-                tool["name"] = tool_def.name;
-                tool["description"] = tool_def.description;
+    return request.dump();
+#else
+    return "";
+#endif
+}
 
-                // Parse parameters JSON or use default schema
-                if (!tool_def.parameters_json.empty()) {
-                    try {
-                        tool["input_schema"] = json::parse(tool_def.parameters_json);
-                    } catch (const json::exception& e) {
-                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
-                        tool["input_schema"] = {
-                            {"type", "object"},
-                            {"properties", json::object()},
-                            {"required", json::array()}
-                        };
+int AnthropicBackend::extract_tokens_to_evict(const std::string& error_message) {
+    // Anthropic format: "input length and max_tokens exceed context limit: 187254 + 20000 > 204798"
+
+    size_t colon_pos = error_message.find("context limit: ");
+    if (colon_pos != std::string::npos) {
+        try {
+            // Parse "187254 + 20000 > 204798"
+            size_t start = colon_pos + 15;
+            std::string numbers = error_message.substr(start);
+
+            // Extract input tokens
+            size_t plus_pos = numbers.find(" + ");
+            int input_tokens = std::stoi(numbers.substr(0, plus_pos));
+
+            // Extract max_tokens
+            size_t gt_pos = numbers.find(" > ");
+            size_t max_start = plus_pos + 3;
+            int max_output = std::stoi(numbers.substr(max_start, gt_pos - max_start));
+
+            // Extract limit
+            int limit = std::stoi(numbers.substr(gt_pos + 3));
+
+            // Total = input + max_output, need to evict: total - limit
+            return (input_tokens + max_output) - limit;
+        } catch (...) {}
+    }
+
+    return -1;
+}
+
+ApiResponse AnthropicBackend::parse_api_response(const HttpResponse& http_response) {
+    ApiResponse result;
+    result.raw_response = http_response.body;
+
+#ifdef ENABLE_API_BACKENDS
+    if (http_response.is_success()) {
+        try {
+            json j = json::parse(http_response.body);
+
+            // Extract usage data
+            if (j.contains("usage") && j["usage"].is_object()) {
+                result.prompt_tokens = j["usage"].value("input_tokens", 0);
+                result.completion_tokens = j["usage"].value("output_tokens", 0);
+            }
+
+            // Extract content - handle both text and tool_use blocks
+            if (j.contains("content") && j["content"].is_array() && !j["content"].empty()) {
+                std::string response_text;
+
+                // Process all content blocks
+                for (const auto& content_block : j["content"]) {
+                    if (!content_block.contains("type")) continue;
+
+                    std::string block_type = content_block["type"];
+
+                    if (block_type == "text" && content_block.contains("text")) {
+                        // Append text content
+                        response_text += content_block["text"].get<std::string>();
+                        response_text += "\n";
+                    } else if (block_type == "tool_use") {
+                        // Convert tool_use block to JSON format
+                        json tool_call;
+                        tool_call["name"] = content_block["name"];
+                        tool_call["parameters"] = content_block["input"];
+                        tool_call["id"] = content_block["id"];
+
+                        // Add as JSON on its own line
+                        response_text += "\n" + tool_call.dump() + "\n";
                     }
-                } else {
-                    tool["input_schema"] = {
-                        {"type", "object"},
-                        {"properties", json::object()},
-                        {"required", json::array()}
-                    };
                 }
 
-                tools_array.push_back(tool);
+                result.content = response_text;
             }
 
-            request["tools"] = tools_array;
-            LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to Anthropic request from SessionContext");
+            result.is_error = false;
+        } catch (const json::exception& e) {
+            result.is_error = true;
+            result.error_code = 500;
+            result.error_message = "Failed to parse Anthropic response: " + std::string(e.what());
+        }
+    } else {
+        result.is_error = true;
+        result.error_code = http_response.status_code;
+
+        // Parse error message from response body
+        try {
+            json j = json::parse(http_response.body);
+            if (j.contains("error")) {
+                if (j["error"].is_object() && j["error"].contains("message")) {
+                    result.error_message = j["error"]["message"];
+                } else if (j["error"].is_string()) {
+                    result.error_message = j["error"];
+                }
+            }
+        } catch (...) {
+            // If JSON parsing fails, use raw body
+            result.error_message = http_response.body.substr(0, 500);
         }
 
-        // Convert to string
-        std::string request_json = request.dump();
-
-        // Log request for debugging
-        if (request_json.length() <= 2000) {
-            LOG_DEBUG("Full Anthropic API request: " + request_json);
+        // Classify error type
+        if (result.error_message.find("context") != std::string::npos &&
+            (result.error_message.find("limit") != std::string::npos ||
+             result.error_message.find("exceed") != std::string::npos ||
+             result.error_message.find("length") != std::string::npos)) {
+            result.error_type = "context_overflow";
+        } else if (http_response.status_code == 429) {
+            result.error_type = "rate_limit";
+        } else if (http_response.status_code == 401) {
+            result.error_type = "auth";
         } else {
-            LOG_DEBUG("Anthropic API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
-            LOG_DEBUG("Anthropic API request length: " + std::to_string(request_json.length()) + " bytes");
+            result.error_type = "api_error";
+        }
+    }
+#endif
+
+    return result;
+}
+
+std::map<std::string, std::string> AnthropicBackend::get_api_headers() {
+    std::map<std::string, std::string> headers;
+#ifdef ENABLE_API_BACKENDS
+    headers["Content-Type"] = "application/json";
+    headers["x-api-key"] = api_key_;
+    headers["anthropic-version"] = api_version_;
+#endif
+    return headers;
+}
+
+std::string AnthropicBackend::get_api_endpoint() {
+#ifdef ENABLE_API_BACKENDS
+    return api_endpoint;
+#else
+    return "";
+#endif
+}
+
+void AnthropicBackend::parse_specific_config(const std::string& json) {
+    if (json.empty() || json == "{}") {
+        return;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(json);
+
+        if (j.contains("api_endpoint")) {
+            api_endpoint = j["api_endpoint"].get<std::string>();
+            LOG_DEBUG("Anthropic: Set api_endpoint = " + api_endpoint);
         }
 
-        // Make API call
-        std::string response_json = make_api_request(request_json);
-        if (response_json.empty()) {
-            throw BackendManagerError("Anthropic API request failed");
-        }
-
-        LOG_DEBUG("Anthropic API response: " + response_json.substr(0, 500));
-
-        // Parse response
-        std::string response_text = parse_anthropic_response(response_json);
-        if (response_text.empty()) {
-            throw BackendManagerError("Failed to parse Anthropic response");
-        }
-
-        return response_text;
-    } catch (const json::exception& e) {
-        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to parse Anthropic-specific config: " + std::string(e.what()));
     }
 }

@@ -1,423 +1,536 @@
 #include "ollama.h"
-#include "../logger.h"
-#include "../shepherd.h"
-#include "../nlohmann/json.hpp"
-#include "../tools/tool.h"
-#include <sstream>
-#include <algorithm>
+#include "shepherd.h"
+#include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
 
-// Global cancellation flag (defined in main.cpp)
-extern bool g_generation_cancelled;
+OllamaBackend::OllamaBackend(size_t context_size) : ApiBackend(context_size) {
+    // Initialize with config values
+    model_name = config->model;
 
-// OllamaTokenizer implementation
-OllamaTokenizer::OllamaTokenizer(const std::string& model_name)
-    : model_name_(model_name) {
-    LOG_DEBUG("Ollama tokenizer initialized for model: " + model_name);
-}
-
-int OllamaTokenizer::count_tokens(const std::string& text) {
-    // Approximate token count (roughly 4 chars per token)
-    return static_cast<int>(text.length() / 4.0 + 0.5);
-}
-
-std::vector<int> OllamaTokenizer::encode(const std::string& text) {
-    // Placeholder implementation
-    std::vector<int> tokens;
-    for (size_t i = 0; i < text.length(); i += 4) {
-        tokens.push_back(static_cast<int>(text.substr(i, 4).length()));
+    // Set API endpoint from config (api_base or default)
+    if (!config->api_base.empty()) {
+        api_endpoint = config->api_base;
+        // Ensure it has /api/chat endpoint for native Ollama API
+        if (api_endpoint.find("/api/chat") == std::string::npos) {
+            if (api_endpoint.back() != '/') {
+                api_endpoint += "/";
+            }
+            api_endpoint += "api/chat";
+        }
+        LOG_INFO("Using custom Ollama endpoint: " + api_endpoint);
     }
-    return tokens;
-}
+    // else: keep default api_endpoint = "http://localhost:11434/api/chat"
 
-std::string OllamaTokenizer::decode(const std::vector<int>& tokens) {
-    return "Ollama tokenizer decode not implemented";
-}
-
-std::string OllamaTokenizer::get_tokenizer_name() const {
-    return "ollama-" + model_name_;
-}
-
-// OllamaBackend implementation
-OllamaBackend::OllamaBackend(size_t max_context_tokens)
-    : ApiBackend(max_context_tokens) {
-    tokenizer_ = std::make_unique<OllamaTokenizer>("llama3.1:8b"); // Default model
-    LOG_DEBUG("OllamaBackend created");
+    // Parse backend-specific config if available
+    parse_backend_config(config->backend_config("ollama"));
 }
 
 OllamaBackend::~OllamaBackend() {
-    shutdown();
 }
 
-void OllamaBackend::set_api_base(const std::string& api_base) {
-    if (!api_base.empty()) {
-        // Ensure it ends with /v1/chat/completions
-        if (api_base.find("/v1/chat/completions") == std::string::npos) {
-            if (api_base.find("/v1") == std::string::npos) {
-                api_endpoint_ = api_base + "/v1/chat/completions";
-            } else {
-                api_endpoint_ = api_base + "/chat/completions";
-            }
+void OllamaBackend::initialize(Session& session) {
+    LOG_INFO("Initializing Ollama backend...");
+
+    // Auto-detect model if not specified
+    if (model_name.empty()) {
+        LOG_INFO("No model specified, querying server for available models");
+        std::string queried_model = query_available_model();
+        if (!queried_model.empty()) {
+            model_name = queried_model;
+            LOG_INFO("Using model from server: " + model_name);
         } else {
-            api_endpoint_ = api_base;
+            LOG_WARN("Failed to query server for model, will use first API response to determine");
         }
-        LOG_INFO("Ollama API endpoint set to: " + api_endpoint_);
     }
+
+    // Call base class initialize() which handles context size query and calibration
+    ApiBackend::initialize(session);
+
+    // Force auto-eviction for Ollama backend
+    // Ollama silently truncates messages when context is full (no error returned),
+    // so we MUST proactively evict to prevent data loss
+    session.auto_evict = true;
+    LOG_INFO("Auto-eviction enabled for Ollama (prevents silent truncation)");
+
+    LOG_INFO("Ollama backend initialized successfully");
 }
 
-bool OllamaBackend::initialize(const std::string& model_name, const std::string& api_key, const std::string& template_path) {
-    if (initialized_) {
-        LOG_WARN("OllamaBackend already initialized");
-        return true;
+Response OllamaBackend::parse_http_response(const HttpResponse& http_response) {
+    Response resp;
+
+    // Check HTTP status
+    if (!http_response.is_success()) {
+        resp.success = false;
+        resp.code = Response::ERROR;
+        resp.finish_reason = "error";
+
+        // Try to parse error JSON (Ollama uses OpenAI-compatible format)
+        try {
+            json error_json = json::parse(http_response.body);
+            if (error_json.contains("error")) {
+                if (error_json["error"].is_object() && error_json["error"].contains("message")) {
+                    resp.error = error_json["error"]["message"].get<std::string>();
+                } else if (error_json["error"].is_string()) {
+                    resp.error = error_json["error"].get<std::string>();
+                }
+            }
+        } catch (...) {
+            resp.error = http_response.error_message.empty() ? "API request failed" : http_response.error_message;
+        }
+
+        if (resp.error.empty()) {
+            resp.error = http_response.error_message.empty() ? "Unknown API error" : http_response.error_message;
+        }
+
+        return resp;
     }
 
-    // Ollama doesn't require an API key, but we accept it for compatibility
-    model_name_ = model_name.empty() ? "llama3.1:8b" : model_name;
-    api_key_ = api_key.empty() ? "dummy" : api_key;
+    // Parse successful response
+    try {
+        json json_resp = json::parse(http_response.body);
 
-    // Update tokenizer with correct model name
-    tokenizer_ = std::make_unique<OllamaTokenizer>(model_name_);
+        // Check for native Ollama /api/chat format (has "message" directly)
+        if (json_resp.contains("message") && json_resp["message"].is_object()) {
+            const auto& message = json_resp["message"];
 
-    // Query the API's context size for this model
-    size_t api_context_size = query_model_context_size(model_name_);
-    LOG_INFO("Ollama model " + model_name_ + " API context size: " + std::to_string(api_context_size));
+            // Get content
+            if (message.contains("content") && !message["content"].is_null()) {
+                resp.content = message["content"].get<std::string>();
+            }
 
-    // Determine final context size and auto_evict flag
-    bool auto_evict;
-    if (max_context_size_ == 0) {
-        // User didn't specify - use API's limit
-        max_context_size_ = api_context_size;
-        auto_evict = false; // Rely on API 400 errors (with truncate=false)
-        LOG_INFO("Using API's context size: " + std::to_string(max_context_size_) + " (auto_evict=false)");
-    } else if (max_context_size_ > api_context_size) {
-        // User requested more than API supports - cap at API limit
-        LOG_WARN("Requested context size " + std::to_string(max_context_size_) +
-                 " exceeds API limit " + std::to_string(api_context_size) +
-                 ", capping at API limit");
-        max_context_size_ = api_context_size;
-        auto_evict = false; // Rely on API 400 errors
-    } else if (max_context_size_ < api_context_size) {
-        // User requested less than API supports - need proactive eviction
-        auto_evict = true;
-        LOG_INFO("Using user's context size: " + std::to_string(max_context_size_) +
-                 " (smaller than API limit " + std::to_string(api_context_size) + ", auto_evict=true)");
-    } else {
-        // User's limit equals API limit - rely on API errors
-        auto_evict = false;
-        LOG_INFO("Using context size: " + std::to_string(max_context_size_) + " (matches API limit, auto_evict=false)");
-    }
+            // Get finish reason (done_reason in native format)
+            if (json_resp.contains("done_reason")) {
+                resp.finish_reason = json_resp["done_reason"].get<std::string>();
+            }
 
-    // Create the shared context manager with final context size
-    context_manager_ = std::make_unique<ApiContextManager>(max_context_size_);
-    context_manager_->auto_evict = auto_evict;
-    LOG_DEBUG("Created ApiContextManager with " + std::to_string(max_context_size_) + " tokens (auto_evict=" +
-              std::string(auto_evict ? "true" : "false") + ")");
+            // Extract token usage (native Ollama format)
+            if (json_resp.contains("prompt_eval_count")) {
+                resp.prompt_tokens = json_resp["prompt_eval_count"].get<int>();
+            }
+            if (json_resp.contains("eval_count")) {
+                resp.completion_tokens = json_resp["eval_count"].get<int>();
+            }
 
-    LOG_INFO("OllamaBackend initialized with model: " + model_name_);
-    initialized_ = true;
-    return true;
-}
+            // Parse tool calls if present (TODO: check native Ollama tool call format)
+            if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+                for (const auto& tc : message["tool_calls"]) {
+                    ToolParser::ToolCall tool_call;
 
-std::string OllamaBackend::generate(int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Ollama backend not initialized");
-    }
+                    if (tc.contains("function")) {
+                        const auto& func = tc["function"];
+                        if (func.contains("name")) {
+                            tool_call.name = func["name"].get<std::string>();
+                        }
+                        if (func.contains("arguments")) {
+                            // Handle both string and object arguments
+                            if (func["arguments"].is_string()) {
+                                tool_call.raw_json = func["arguments"].get<std::string>();
+                            } else {
+                                tool_call.raw_json = func["arguments"].dump();
+                            }
 
-    LOG_DEBUG("Ollama generate called with " + std::to_string(context_manager_->get_message_count()) + " messages");
+                            // Parse arguments
+                            try {
+                                json args_json = func["arguments"].is_string()
+                                    ? json::parse(func["arguments"].get<std::string>())
+                                    : func["arguments"];
 
-    // Proactive eviction for Ollama (since Ollama silently truncates instead of returning errors)
-    if (context_manager_->auto_evict) {
-        int estimated_tokens = estimate_context_tokens();
-        LOG_DEBUG("Estimated context tokens: " + std::to_string(estimated_tokens) + "/" + std::to_string(max_context_size_));
+                                for (auto it = args_json.begin(); it != args_json.end(); ++it) {
+                                    if (it.value().is_string()) {
+                                        tool_call.parameters[it.key()] = it.value().get<std::string>();
+                                    } else if (it.value().is_number_integer()) {
+                                        tool_call.parameters[it.key()] = it.value().get<int>();
+                                    } else if (it.value().is_number_float()) {
+                                        tool_call.parameters[it.key()] = it.value().get<double>();
+                                    } else if (it.value().is_boolean()) {
+                                        tool_call.parameters[it.key()] = it.value().get<bool>();
+                                    } else {
+                                        tool_call.parameters[it.key()] = it.value().dump();
+                                    }
+                                }
+                            } catch (const std::exception& e) {
+                                LOG_DEBUG("Failed to parse tool arguments: " + std::string(e.what()));
+                            }
+                        }
+                    }
 
-        if (estimated_tokens > static_cast<int>(max_context_size_)) {
-            if (g_server_mode) {
-                // Server mode: throw exception, let client handle it
-                throw ContextManagerError(
-                    "Context limit exceeded: estimated " +
-                    std::to_string(estimated_tokens) + " tokens but limit is " +
-                    std::to_string(max_context_size_) + " tokens. Client must manage context window.");
-            } else {
-                // CLI mode: proactively evict to make room
-                LOG_INFO("Proactively evicting messages (estimated " + std::to_string(estimated_tokens) +
-                         " tokens exceeds limit of " + std::to_string(max_context_size_) + ")");
-                evict_with_estimation(estimated_tokens);
+                    resp.tool_calls.push_back(tool_call);
+                }
             }
         }
+        // Fall back to OpenAI-compatible format (for backwards compatibility)
+        else if (json_resp.contains("choices") && !json_resp["choices"].empty()) {
+            const auto& choice = json_resp["choices"][0];
+
+            if (choice.contains("finish_reason")) {
+                resp.finish_reason = choice["finish_reason"].get<std::string>();
+            }
+
+            if (choice.contains("message")) {
+                const auto& message = choice["message"];
+                if (message.contains("content") && !message["content"].is_null()) {
+                    resp.content = message["content"].get<std::string>();
+                }
+
+                // Parse tool calls (OpenAI format)
+                if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
+                    for (const auto& tc : message["tool_calls"]) {
+                        ToolParser::ToolCall tool_call;
+
+                        if (tc.contains("id")) {
+                            tool_call.tool_call_id = tc["id"].get<std::string>();
+                        }
+
+                        if (tc.contains("function")) {
+                            const auto& func = tc["function"];
+                            if (func.contains("name")) {
+                                tool_call.name = func["name"].get<std::string>();
+                            }
+                            if (func.contains("arguments")) {
+                                std::string args_str = func["arguments"].get<std::string>();
+                                tool_call.raw_json = args_str;
+
+                                try {
+                                    json args_json = json::parse(args_str);
+                                    for (auto it = args_json.begin(); it != args_json.end(); ++it) {
+                                        if (it.value().is_string()) {
+                                            tool_call.parameters[it.key()] = it.value().get<std::string>();
+                                        } else if (it.value().is_number_integer()) {
+                                            tool_call.parameters[it.key()] = it.value().get<int>();
+                                        } else if (it.value().is_number_float()) {
+                                            tool_call.parameters[it.key()] = it.value().get<double>();
+                                        } else if (it.value().is_boolean()) {
+                                            tool_call.parameters[it.key()] = it.value().get<bool>();
+                                        } else {
+                                            tool_call.parameters[it.key()] = it.value().dump();
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    LOG_DEBUG("Failed to parse tool arguments: " + std::string(e.what()));
+                                }
+                            }
+                        }
+
+                        resp.tool_calls.push_back(tool_call);
+                    }
+                }
+            }
+
+            // Extract token usage (OpenAI format)
+            if (json_resp.contains("usage")) {
+                const auto& usage = json_resp["usage"];
+                if (usage.contains("prompt_tokens")) {
+                    resp.prompt_tokens = usage["prompt_tokens"].get<int>();
+                }
+                if (usage.contains("completion_tokens")) {
+                    resp.completion_tokens = usage["completion_tokens"].get<int>();
+                }
+            }
+        }
+
+        resp.success = true;
+        resp.code = Response::SUCCESS;
+
+    } catch (const std::exception& e) {
+        resp.success = false;
+        resp.code = Response::ERROR;
+        resp.finish_reason = "error";
+        resp.error = "Failed to parse API response: " + std::string(e.what());
     }
 
-    // Build API request JSON directly from messages
+    return resp;
+}
+
+nlohmann::json OllamaBackend::build_request_from_session(const Session& session, int max_tokens) {
     json request;
-    request["model"] = model_name_;
+    request["model"] = model_name;
+    request["stream"] = false;
 
     if (max_tokens > 0) {
         request["max_tokens"] = max_tokens;
     }
 
-    request["stream"] = false;
-    request["options"]["num_ctx"] = max_context_size_;  // Set context window
-    request["options"]["truncate"] = false;  // Disable truncation - return error instead
+    // Build messages array
+    json messages = json::array();
 
-    // Build tools array once on first call (lazy initialization after tools are registered)
-    // MUST happen BEFORE building messages array so tools can be appended to system message
-    if (!tools_built_) {
-        build_tools_from_registry();
+    // Add system message if present
+    if (!session.system_message.empty()) {
+        messages.push_back({
+            {"role", "system"},
+            {"content", session.system_message}
+        });
     }
 
-    // Format tools for Ollama API if we have any (uses OpenAI format)
-    if (!tools_data_.empty() && tools_json_.empty()) {
-        tools_json_ = json::array();
+    // Add conversation messages
+    for (const auto& msg : session.messages) {
+        json message;
 
-        for (const auto& tool_info : tools_data_) {
+        switch (msg.type) {
+            case Message::USER:
+                message["role"] = "user";
+                message["content"] = msg.content;
+                break;
+
+            case Message::ASSISTANT:
+                message["role"] = "assistant";
+                message["content"] = msg.content;
+                break;
+
+            case Message::TOOL:
+                message["role"] = "tool";
+                message["content"] = msg.content;
+                if (!msg.tool_call_id.empty()) {
+                    message["tool_call_id"] = msg.tool_call_id;
+                }
+                if (!msg.tool_name.empty()) {
+                    message["name"] = msg.tool_name;
+                }
+                break;
+
+            default:
+                continue;
+        }
+
+        messages.push_back(message);
+    }
+
+    request["messages"] = messages;
+
+    // Add tools if available (OpenAI format)
+    if (!session.tools.empty()) {
+        json tools_array = json::array();
+
+        for (const auto& tool_def : session.tools) {
             json tool;
             tool["type"] = "function";
-            tool["function"] = json::object();
-            tool["function"]["name"] = tool_info.name;
-            tool["function"]["description"] = tool_info.description;
 
-            // Parse parameters schema (should already be JSON)
-            try {
-                tool["function"]["parameters"] = json::parse(tool_info.parameters_schema);
-            } catch (const json::exception& e) {
-                LOG_DEBUG("Tool " + tool_info.name + " has no structured schema, using empty fallback");
-                // If parsing fails, create a basic schema
-                tool["function"]["parameters"] = {
+            json function;
+            function["name"] = tool_def.name;
+            function["description"] = tool_def.description;
+
+            // Parameters are already JSON object
+            if (!tool_def.parameters.empty()) {
+                function["parameters"] = tool_def.parameters;
+            } else {
+                function["parameters"] = {
                     {"type", "object"},
                     {"properties", json::object()},
                     {"required", json::array()}
                 };
             }
 
-            tools_json_.push_back(tool);
+            tool["function"] = function;
+            tools_array.push_back(tool);
         }
-        LOG_INFO("Formatted " + std::to_string(tools_json_.size()) + " tools for Ollama API");
 
-        // TESTING: Append tools list to system message (first message in deque)
-        std::deque<Message>& messages = context_manager_->get_messages();
-        if (!messages.empty() && messages[0].type == Message::SYSTEM) {
-            std::string tools_description = "\n\n**Available Tools:**\n";
-            for (const auto& tool : tools_json_) {
-                std::string name = tool["function"]["name"].get<std::string>();
-                std::string desc = tool["function"]["description"].get<std::string>();
-                tools_description += "- " + name + ": " + desc + "\n";
-            }
-            // Modify the system message content directly
-            messages[0].content += tools_description;
-            LOG_DEBUG("Appended " + std::to_string(tools_json_.size()) + " tools to system message");
-            LOG_DEBUG("System message length now: " + std::to_string(messages[0].content.length()));
-        }
+        request["tools"] = tools_array;
     }
 
-    // Format messages for Ollama API (AFTER tools are appended to system message)
-    request["messages"] = json::array();
-    const auto& messages = context_manager_->get_messages();
+    // Add options with num_ctx to ensure Ollama uses detected context size
+    json options;
+    options["num_ctx"] = context_size;
+    request["options"] = options;
 
-    for (const auto& msg : messages) {
-        json message_obj;
+    return request;
+}
 
-        if (msg.type == Message::SYSTEM) {
-            message_obj["role"] = "system";
-            message_obj["content"] = msg.content;
-        } else if (msg.type == Message::USER) {
-            message_obj["role"] = "user";
-            message_obj["content"] = msg.content;
-        } else if (msg.type == Message::ASSISTANT) {
-            message_obj["role"] = "assistant";
-            message_obj["content"] = msg.content;
-        } else if (msg.type == Message::TOOL) {
-            // Ollama/OpenAI compatible: use user role for tool results
-            message_obj["role"] = "user";
-            message_obj["content"] = msg.content;
-        }
+nlohmann::json OllamaBackend::build_request(const Session& session,
+                                              Message::Type type,
+                                              const std::string& content,
+                                              const std::string& tool_name,
+                                              const std::string& tool_id,
+                                              int max_tokens) {
+    json request;
+    request["model"] = model_name;
+    request["stream"] = false;
 
-        if (!message_obj.empty()) {
-            request["messages"].push_back(message_obj);
-        }
+    if (max_tokens > 0) {
+        request["max_tokens"] = max_tokens;
     }
 
-    // Add tools to request (OpenAI format)
-    if (!tools_json_.empty()) {
-        request["tools"] = tools_json_;
-        LOG_DEBUG("Added " + std::to_string(tools_json_.size()) + " tools to request");
+    // Build messages array
+    json messages = json::array();
+
+    // Add system message if present
+    if (!session.system_message.empty()) {
+        messages.push_back({
+            {"role", "system"},
+            {"content", session.system_message}
+        });
     }
 
-    // Use centralized retry logic with automatic eviction
-    return generate_with_retry(
-        // Lambda 1: Build request JSON from current context
-        [this, max_tokens]() -> json {
-            json req;
-            req["model"] = model_name_;
+    // Add existing messages from session
+    for (const auto& msg : session.messages) {
+        json message;
 
-            if (max_tokens > 0) {
-                req["max_tokens"] = max_tokens;
-            }
+        switch (msg.type) {
+            case Message::USER:
+                message["role"] = "user";
+                message["content"] = msg.content;
+                break;
 
-            req["stream"] = false;
-            req["options"]["num_ctx"] = max_context_size_;
-            req["options"]["truncate"] = false;
+            case Message::ASSISTANT:
+                message["role"] = "assistant";
+                message["content"] = msg.content;
+                // Note: Tool calls are embedded in the content as text, not structured
+                break;
 
-            // Format messages for Ollama API
-            req["messages"] = json::array();
-            const auto& messages = context_manager_->get_messages();
-
-            for (const auto& msg : messages) {
-                json message_obj;
-
-                if (msg.type == Message::SYSTEM) {
-                    message_obj["role"] = "system";
-                    message_obj["content"] = msg.content;
-                } else if (msg.type == Message::USER) {
-                    message_obj["role"] = "user";
-                    message_obj["content"] = msg.content;
-                } else if (msg.type == Message::ASSISTANT) {
-                    message_obj["role"] = "assistant";
-                    message_obj["content"] = msg.content;
-                } else if (msg.type == Message::TOOL) {
-                    message_obj["role"] = "user";
-                    message_obj["content"] = msg.content;
+            case Message::TOOL:
+                message["role"] = "tool";
+                message["content"] = msg.content;
+                if (!msg.tool_call_id.empty()) {
+                    message["tool_call_id"] = msg.tool_call_id;
                 }
-
-                if (!message_obj.empty()) {
-                    req["messages"].push_back(message_obj);
+                if (!msg.tool_name.empty()) {
+                    message["name"] = msg.tool_name;
                 }
-            }
+                break;
 
-            // Add tools if available
-            if (!tools_json_.empty()) {
-                req["tools"] = tools_json_;
-            }
-
-            return req;
-        },
-        // Lambda 2: Execute API request and return response
-        [this](const std::string& request_json) -> std::string {
-            LOG_DEBUG("=== Full Ollama API Request ===");
-            LOG_DEBUG(request_json);
-            LOG_DEBUG("=== End Request ===");
-
-            std::string response_body = make_api_request(request_json);
-
-            if (response_body.empty()) {
-                throw BackendManagerError("API request failed or returned empty response");
-            }
-
-            return parse_ollama_response(response_body);
+            default:
+                continue;
         }
-    );
-}
 
-std::string OllamaBackend::get_backend_name() const {
-    return "ollama";
-}
-
-std::string OllamaBackend::get_model_name() const {
-    return model_name_;
-}
-
-size_t OllamaBackend::get_max_context_size() const {
-    return max_context_size_;
-}
-
-bool OllamaBackend::is_ready() const {
-    return initialized_;
-}
-
-void OllamaBackend::shutdown() {
-    if (!initialized_) {
-        return;
+        messages.push_back(message);
     }
 
-    // HttpClient destructor will handle cleanup
-    http_client_.reset();
+    // Add the new message
+    json new_message;
+    switch (type) {
+        case Message::USER:
+            new_message["role"] = "user";
+            new_message["content"] = content;
+            break;
 
-    initialized_ = false;
-    LOG_DEBUG("OllamaBackend shutdown complete");
-}
+        case Message::TOOL:
+            new_message["role"] = "tool";
+            new_message["content"] = content;
+            if (!tool_id.empty()) {
+                new_message["tool_call_id"] = tool_id;
+            }
+            if (!tool_name.empty()) {
+                new_message["name"] = tool_name;
+            }
+            break;
 
-std::string OllamaBackend::make_api_request(const std::string& json_payload) {
-    if (!http_client_.get()) {
-        LOG_ERROR("HTTP client not initialized");
-        return "";
+        default:
+            break;
     }
 
-    // Prepare headers
+    messages.push_back(new_message);
+    request["messages"] = messages;
+
+    // Add tools if available (OpenAI format)
+    if (!session.tools.empty()) {
+        json tools_array = json::array();
+
+        for (const auto& tool_def : session.tools) {
+            json tool;
+            tool["type"] = "function";
+
+            json function;
+            function["name"] = tool_def.name;
+            function["description"] = tool_def.description;
+
+            // Parameters are already JSON object
+            if (!tool_def.parameters.empty()) {
+                function["parameters"] = tool_def.parameters;
+            } else {
+                function["parameters"] = {
+                    {"type", "object"},
+                    {"properties", json::object()},
+                    {"required", json::array()}
+                };
+            }
+
+            tool["function"] = function;
+            tools_array.push_back(tool);
+        }
+
+        request["tools"] = tools_array;
+    }
+
+    // Add options with num_ctx to ensure Ollama uses detected context size
+    json options;
+    options["num_ctx"] = context_size;
+    request["options"] = options;
+
+    return request;
+}
+
+std::string OllamaBackend::parse_response(const nlohmann::json& response) {
+    // Extract content from OpenAI-compatible response
+    if (response.contains("choices") && !response["choices"].empty()) {
+        const auto& choice = response["choices"][0];
+        if (choice.contains("message") && choice["message"].contains("content")) {
+            return choice["message"]["content"].get<std::string>();
+        }
+    }
+    return "";
+}
+
+int OllamaBackend::extract_tokens_to_evict(const HttpResponse& response) {
+    // Try to extract error message
+    std::string error_message = response.error_message;
+    if (error_message.empty() && !response.body.empty()) {
+        try {
+            auto json_body = json::parse(response.body);
+            if (json_body.contains("error") && json_body["error"].contains("message")) {
+                error_message = json_body["error"]["message"].get<std::string>();
+            }
+        } catch (...) {
+            error_message = response.body;
+        }
+    }
+
+    // Ollama uses OpenAI-compatible error format
+    // "This model's maximum context length is 16385 tokens. However, your messages resulted in 44366 tokens."
+
+    int actual_tokens = -1;
+    int max_tokens = -1;
+
+    // Try OpenAI format
+    size_t max_pos = error_message.find("maximum context length is ");
+    size_t resulted_pos = error_message.find("resulted in ");
+
+    if (max_pos != std::string::npos && resulted_pos != std::string::npos) {
+        try {
+            size_t start = max_pos + 26;
+            size_t end = error_message.find(" tokens", start);
+            max_tokens = std::stoi(error_message.substr(start, end - start));
+
+            start = resulted_pos + 12;
+            end = error_message.find(" tokens", start);
+            actual_tokens = std::stoi(error_message.substr(start, end - start));
+        } catch (...) {}
+    }
+
+    if (actual_tokens > 0 && max_tokens > 0) {
+        return actual_tokens - max_tokens;
+    }
+
+    return -1;
+}
+
+std::map<std::string, std::string> OllamaBackend::get_api_headers() {
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
-    if (!api_key_.empty() && api_key_ != "dummy") {
-        headers["Authorization"] = "Bearer " + api_key_;
-    }
-
-    // Make POST request
-    HttpResponse response = http_client_->post(api_endpoint_, json_payload, headers);
-
-    if (!response.is_success()) {
-        // Try to parse error message from response body
-        std::string error_msg = "API request failed with status " + std::to_string(response.status_code);
-
-        if (!response.body.empty()) {
-            try {
-                auto error_json = json::parse(response.body);
-                if (error_json.contains("error")) {
-                    if (error_json["error"].is_object() && error_json["error"].contains("message")) {
-                        error_msg = error_json["error"]["message"].get<std::string>();
-                    } else if (error_json["error"].is_string()) {
-                        error_msg = error_json["error"].get<std::string>();
-                    }
-                }
-            } catch (const json::exception&) {
-                // If JSON parsing fails, use the raw response body
-                error_msg += ": " + response.body.substr(0, 200);
-            }
-        }
-
-        LOG_ERROR("Ollama API error (HTTP " + std::to_string(response.status_code) + "): " + error_msg);
-        throw BackendManagerError(error_msg);
-    }
-
-    return response.body;
+    // Ollama doesn't require auth, but we can add a dummy header for compatibility
+    headers["Authorization"] = "Bearer ollama";
+    return headers;
 }
 
-std::string OllamaBackend::make_get_request(const std::string& endpoint) {
-    if (!http_client_.get()) {
-        LOG_ERROR("HTTP client not initialized");
-        return "";
-    }
-
-    // Build full URL
-    std::string base_url = api_endpoint_;
-    // Extract base (remove /v1/chat/completions if present)
-    size_t pos = base_url.find("/v1/chat/completions");
-    if (pos != std::string::npos) {
-        base_url = base_url.substr(0, pos);
-    }
-    std::string full_url = base_url + endpoint;
-
-    // Prepare headers
-    std::map<std::string, std::string> headers;
-    if (!api_key_.empty() && api_key_ != "dummy") {
-        headers["Authorization"] = "Bearer " + api_key_;
-    }
-
-    // Make GET request
-    HttpResponse response = http_client_->get(full_url, headers);
-
-    if (!response.is_success()) {
-        LOG_ERROR("Ollama GET request failed with status " + std::to_string(response.status_code) +
-                  ": " + response.error_message);
-        return "";
-    }
-
-    return response.body;
+std::string OllamaBackend::get_api_endpoint() {
+    return api_endpoint;
 }
 
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
-    const size_t DEFAULT_CONTEXT_SIZE = 32768;  // Conservative default for modern models
+    const size_t DEFAULT_CONTEXT_SIZE = 8192;  // Conservative default for Ollama models
 
-    // Try to query from Ollama API: POST /api/show
+    // Try to query from Ollama's /api/show endpoint
     try {
-        if (!http_client_.get()) {
-            LOG_WARN("HTTP client not initialized for Ollama, using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
+        if (!http_client) {
+            LOG_WARN("HTTP client not initialized for Ollama");
             return DEFAULT_CONTEXT_SIZE;
         }
 
@@ -425,9 +538,9 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
         request["model"] = model_name;
         std::string request_str = request.dump();
 
-        // Build full URL for /api/show endpoint (needs POST)
-        std::string base_url = api_endpoint_;
-        size_t pos = base_url.find("/v1/chat/completions");
+        // Build URL for /api/show endpoint (strip /api/chat from endpoint)
+        std::string base_url = api_endpoint;
+        size_t pos = base_url.find("/api/chat");
         if (pos != std::string::npos) {
             base_url = base_url.substr(0, pos);
         }
@@ -437,233 +550,93 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
 
-        HttpResponse response = http_client_->post(show_url, request_str, headers);
+        // Make POST request to /api/show
+        HttpResponse response = http_client->post(show_url, request_str, headers);
 
-        if (!response.is_success()) {
-            LOG_WARN("Failed to query model info from Ollama API, using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
-            return DEFAULT_CONTEXT_SIZE;
-        }
+        if (response.is_success()) {
+            json resp = json::parse(response.body);
 
-        // Parse response to extract context length from model_info
-        json model_data = json::parse(response.body);
+            // Parse model info - look for context_length or num_ctx
+            if (resp.contains("model_info")) {
+                const auto& model_info = resp["model_info"];
 
-        // Try to get context length from model_info (field name varies by model family)
-        if (model_data.contains("model_info") && model_data["model_info"].is_object()) {
-            auto& info = model_data["model_info"];
+                // Search for any field containing "context_length" (e.g., "context_length", "qwen2.context_length")
+                for (auto& [key, value] : model_info.items()) {
+                    if (key.find("context_length") != std::string::npos) {
+                        if (value.is_number()) {
+                            size_t ctx_size = value.get<size_t>();
+                            LOG_DEBUG("Found context_length in model_info[\"" + key + "\"]: " + std::to_string(ctx_size));
+                            return ctx_size;
+                        }
+                    }
+                }
+            }
 
-            // Try different possible field names for context length
-            std::vector<std::string> context_fields = {
-                "llama.context_length",
-                "qwen2.context_length",
-                "mistral.context_length",
-                "gemma.context_length",
-                "phi3.context_length"
-            };
+            // Try alternate fields
+            if (resp.contains("num_ctx")) {
+                return resp["num_ctx"].get<size_t>();
+            }
 
-            for (const auto& field : context_fields) {
-                if (info.contains(field) && info[field].is_number()) {
-                    size_t context_len = info[field].get<size_t>();
-                    LOG_INFO("Retrieved context size from Ollama API (" + field + "): " + std::to_string(context_len));
-                    return context_len;
+            // Try parameters
+            if (resp.contains("parameters")) {
+                const auto& params = resp["parameters"];
+                if (params.contains("num_ctx")) {
+                    return params["num_ctx"].get<size_t>();
                 }
             }
         }
-
-        LOG_WARN("Context length not found in Ollama API response, using default: " + std::to_string(DEFAULT_CONTEXT_SIZE));
-        return DEFAULT_CONTEXT_SIZE;
-
     } catch (const std::exception& e) {
-        LOG_WARN("Error querying Ollama model info: " + std::string(e.what()) + ", using default context size: " + std::to_string(DEFAULT_CONTEXT_SIZE));
-        return DEFAULT_CONTEXT_SIZE;
+        LOG_DEBUG("Failed to query Ollama model context size: " + std::string(e.what()));
     }
+
+    LOG_WARN("Could not query context size for model " + model_name);
+    return 0;  // Let base class try probing
 }
 
-std::string OllamaBackend::parse_ollama_response(const std::string& response_json) {
-    // Parse Ollama/OpenAI compatible response format
-    // Response format: {"choices":[{"message":{"content":"...", "tool_calls":[...]}}]}
-
+std::string OllamaBackend::query_available_model() {
     try {
-        auto j = json::parse(response_json);
-
-        // Extract usage data from API response and store for server to return
-        if (j.contains("usage") && j["usage"].is_object()) {
-            last_prompt_tokens_ = j["usage"].value("prompt_tokens", 0);
-            last_completion_tokens_ = j["usage"].value("completion_tokens", 0);
-            LOG_DEBUG("Usage from API: prompt=" + std::to_string(last_prompt_tokens_) +
-                      " completion=" + std::to_string(last_completion_tokens_) +
-                      " total=" + std::to_string(last_prompt_tokens_ + last_completion_tokens_));
-
-            // Update message token counts and EMA ratio
-            update_message_tokens_from_api(last_prompt_tokens_, last_completion_tokens_);
-        } else {
-            // Reset to 0 if no usage data
-            last_prompt_tokens_ = 0;
-            last_completion_tokens_ = 0;
-        }
-
-        // Validate response structure
-        if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty()) {
-            LOG_ERROR("Invalid Ollama response: missing choices array");
+        if (!http_client) {
+            LOG_WARN("HTTP client not initialized for Ollama");
             return "";
         }
 
-        auto message = j["choices"][0]["message"];
-        std::string response_text;
+        // Build URL for /api/tags endpoint (strip /api/chat from endpoint)
+        std::string base_url = api_endpoint;
+        size_t pos = base_url.find("/api/chat");
+        if (pos != std::string::npos) {
+            base_url = base_url.substr(0, pos);
+        }
+        std::string tags_url = base_url + "/api/tags";
 
-        // Check for tool_calls first (takes priority when present)
-        if (message.contains("tool_calls") && message["tool_calls"].is_array() &&
-            !message["tool_calls"].empty()) {
+        // Prepare headers
+        std::map<std::string, std::string> headers;
+        headers["Content-Type"] = "application/json";
 
-            LOG_DEBUG("Ollama response contains " + std::to_string(message["tool_calls"].size()) + " tool call(s)");
+        // Make GET request to /api/tags
+        LOG_DEBUG("Querying Ollama for available models: " + tags_url);
+        HttpResponse response = http_client->get(tags_url, headers);
 
-            // Process tool calls
-            for (const auto& tool_call : message["tool_calls"]) {
-                if (tool_call["type"] == "function") {
-                    // Convert from OpenAI format to internal format expected by ToolParser
-                    json internal_format;
-                    internal_format["name"] = tool_call["function"]["name"];
+        if (response.is_success()) {
+            json resp = json::parse(response.body);
 
-                    // Parse arguments string to JSON object
-                    std::string args_str = tool_call["function"]["arguments"];
-                    internal_format["parameters"] = json::parse(args_str);
-
-                    // Add tool call ID if present
-                    if (tool_call.contains("id")) {
-                        internal_format["id"] = tool_call["id"];
+            // Parse models list - look for first available model
+            if (resp.contains("models") && resp["models"].is_array() && !resp["models"].empty()) {
+                const auto& models = resp["models"];
+                for (const auto& model : models) {
+                    if (model.contains("name") && model["name"].is_string()) {
+                        std::string name = model["name"].get<std::string>();
+                        LOG_INFO("Found Ollama model: " + name);
+                        return name;
                     }
-
-                    // Add on its own line (for ToolParser detection)
-                    response_text += "\n" + internal_format.dump() + "\n";
-
-                    LOG_DEBUG("Converted tool call: " + internal_format.dump());
                 }
             }
-        }
-
-        // Extract text content (may be present alongside tool_calls or on its own)
-        if (message.contains("content") && !message["content"].is_null()) {
-            std::string content = message["content"].get<std::string>();
-            if (!content.empty()) {
-                response_text += content;
-            }
-        }
-
-        return response_text;
-
-    } catch (const json::exception& e) {
-        LOG_ERROR("JSON parse error in Ollama response: " + std::string(e.what()));
-        return "";
-    }
-}
-
-std::string OllamaBackend::generate_from_session(const SessionContext& session, int max_tokens) {
-    if (!is_ready()) {
-        throw BackendManagerError("Ollama backend not initialized");
-    }
-
-    LOG_DEBUG("Ollama generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
-
-    // Build API request JSON from SessionContext
-    // Ollama uses OpenAI-compatible format
-    try {
-        json request;
-        request["model"] = model_name_;
-
-        if (max_tokens > 0) {
-            request["max_tokens"] = max_tokens;
-        }
-
-        request["stream"] = false;
-        request["options"]["num_ctx"] = max_context_size_;  // Set context window
-        request["options"]["truncate"] = false;  // Disable truncation - return error instead
-
-        // Format messages for Ollama API from SessionContext (OpenAI-compatible format)
-        request["messages"] = json::array();
-
-        for (const auto& msg : session.messages) {
-            json message_obj;
-            message_obj["role"] = msg.role;
-            message_obj["content"] = msg.content;
-
-            // Add optional fields
-            if (!msg.name.empty()) {
-                message_obj["name"] = msg.name;
-            }
-            if (!msg.tool_call_id.empty()) {
-                message_obj["tool_call_id"] = msg.tool_call_id;
-            }
-
-            request["messages"].push_back(message_obj);
-        }
-
-        // Format tools for Ollama API from SessionContext (OpenAI-compatible format)
-        if (!session.tools.empty()) {
-            json tools_array = json::array();
-
-            for (const auto& tool_def : session.tools) {
-                json tool;
-                tool["type"] = "function";
-
-                json function;
-                function["name"] = tool_def.name;
-                function["description"] = tool_def.description;
-
-                // Parse parameters JSON or use default schema
-                if (!tool_def.parameters_json.empty()) {
-                    try {
-                        function["parameters"] = json::parse(tool_def.parameters_json);
-                    } catch (const json::exception& e) {
-                        LOG_DEBUG("Tool " + tool_def.name + " has invalid JSON schema, using empty fallback");
-                        function["parameters"] = {
-                            {"type", "object"},
-                            {"properties", json::object()},
-                            {"required", json::array()}
-                        };
-                    }
-                } else {
-                    function["parameters"] = {
-                        {"type", "object"},
-                        {"properties", json::object()},
-                        {"required", json::array()}
-                    };
-                }
-
-                tool["function"] = function;
-                tools_array.push_back(tool);
-            }
-
-            request["tools"] = tools_array;
-            LOG_DEBUG("Added " + std::to_string(tools_array.size()) + " tools to Ollama request from SessionContext");
-        }
-
-        // Convert to string
-        std::string request_json = request.dump();
-
-        // Log request for debugging
-        if (request_json.length() <= 2000) {
-            LOG_DEBUG("Full Ollama API request: " + request_json);
         } else {
-            LOG_DEBUG("Ollama API request (first 2000 chars): " + request_json.substr(0, 2000) + "...");
-            LOG_DEBUG("Ollama API request length: " + std::to_string(request_json.length()) + " bytes");
+            LOG_DEBUG("Failed to query Ollama models: " + response.error_message);
         }
-
-        // Make API call
-        std::string response_body = make_api_request(request_json);
-
-        if (response_body.empty()) {
-            throw BackendManagerError("Ollama API request failed or returned empty response");
-        }
-
-        LOG_DEBUG("Ollama API response: " + response_body.substr(0, 500));
-
-        // Parse response to extract content
-        std::string response = parse_ollama_response(response_body);
-        if (response.empty()) {
-            throw BackendManagerError("Failed to parse Ollama response");
-        }
-
-        return response;
-    } catch (const json::exception& e) {
-        throw BackendManagerError("JSON error in generate_from_session: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        LOG_DEBUG("Failed to query Ollama available models: " + std::string(e.what()));
     }
+
+    LOG_WARN("Could not query available models from Ollama");
+    return "";
 }

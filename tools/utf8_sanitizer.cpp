@@ -122,4 +122,28 @@ std::string sanitize_utf8(const std::string& input) {
     return result;
 }
 
+std::string strip_control_characters(const std::string& input) {
+    std::string result;
+    result.reserve(input.length());
+
+    for (size_t i = 0; i < input.length(); i++) {
+        unsigned char ch = static_cast<unsigned char>(input[i]);
+
+        // Keep printable ASCII, newlines, tabs, and valid UTF-8 continuation bytes
+        if (ch >= 32 && ch < 127) {
+            // Normal printable ASCII
+            result += ch;
+        } else if (ch == '\n' || ch == '\t' || ch == '\r') {
+            // Allow newline, tab, carriage return
+            result += ch;
+        } else if (ch >= 128) {
+            // UTF-8 multi-byte sequences - keep them
+            result += ch;
+        }
+        // Skip control characters (0-31 except \n, \t, \r) and DEL (127)
+    }
+
+    return result;
+}
+
 } // namespace utf8_sanitizer

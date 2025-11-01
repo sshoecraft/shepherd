@@ -1,0 +1,704 @@
+● Analysis of llama.cpp Backend Implementation
+
+  After thorough analysis of the codebase, here's my assessment of the llama.cpp backend and what needs to be done to bring it to production standards:
+
+  Current Architecture Understanding
+
+  The system has a clean separation between:
+
+  1. Stateless API Backends (OpenAI, Ollama, etc.):
+    - Use ApiBackend base class
+    - Calculate tokens via EMA-based estimation
+    - Handle eviction at the message level
+    - Re-send entire context on each request
+  2. Stateful GPU Backend (llama.cpp):
+    - Uses Backend base class directly
+    - Maintains KV cache for efficiency
+    - Implements prefix caching and divergence detection
+    - Handles eviction at the KV cache level with callbacks
+
+  Critical Production Gaps Identified
+
+  1. Incomplete add_message() Implementation
+
+  - Current State: Returns "not yet implemented" error (backends/llamacpp.cpp:1543)
+  - Impact: CLI mode can't use the transactional message interface
+  - Required: Full implementation that:
+    - Adds messages incrementally to KV cache
+    - Handles divergence detection
+    - Implements proper token counting
+    - Maintains cache consistency
+
+  2. Token Counting Accuracy
+
+  - Current State: count_message_tokens() only counts raw content, not formatted through chat template
+  - Impact: Inaccurate space calculations leading to context overflow
+  - Required: Format through minja template to get exact token count including all overhead
+
+  3. Eviction Logic Issues
+
+  - Current State:
+    - Eviction callback works but has complex edge cases
+    - Inconsistent state tracking between cached_messages and actual KV cache
+    - Missing validation of eviction bounds
+  - Required:
+    - Robust eviction with proper validation
+    - Better synchronization between cached_messages and KV state
+    - Clear separation of concerns between Session-level and KV-level eviction
+
+  4. Server Mode Robustness
+
+  - Current State:
+    - generate_from_session() works but lacks proper error handling
+    - Throws exceptions for context overflow (good)
+    - Missing proper response token counts
+  - Required:
+    - Return accurate prompt/completion tokens like API backends
+    - Better error recovery for partial KV cache failures
+    - Implement proper max_tokens limiting
+
+  5. Missing Response Metadata
+
+  - Current State: Returns only content and basic success/error
+  - Required:
+    - Accurate prompt_tokens and completion_tokens
+    - Proper finish_reason ("stop", "length", "tool_calls")
+    - Tool call extraction moved to backend (not CLI)
+
+  6. State Management Complexity
+
+  - Current State:
+    - Mix of old stateful methods (add_user_message, etc.) and new interface
+    - Complex interaction between cached_messages, Session messages, and KV cache
+    - Divergence detection works but is fragile
+  - Required:
+    - Clean up old code paths (remove #if 0 blocks)
+    - Single source of truth for message state
+    - More robust divergence handling
+
+  7. Tool Handling
+
+  - Current State:
+    - Tool markers extracted but not fully utilized
+    - Tool formatting varies by model family
+    - Tool calls parsed by CLI, not backend
+  - Required:
+    - Backend should parse tool calls and return in Response.tool_calls
+    - Consistent tool formatting across model families
+    - Better integration with minja templates
+
+  8. Memory Management
+
+  - Current State:
+    - KV cache callback mechanism works
+    - Complex pointer management with llama.cpp structures
+    - Potential memory leaks in error paths
+  - Required:
+    - RAII wrappers for llama.cpp resources
+    - Proper cleanup in all error paths
+    - Better resource tracking
+
+  Production-Ready Implementation Requirements
+
+  Priority 1: Core Functionality
+
+  1. Implement add_message() properly for CLI mode
+  2. Fix count_message_tokens() to use chat template formatting
+  3. Add proper token counting to Response structure
+
+  Priority 2: Robustness
+
+  1. Improve eviction logic with better validation
+  2. Add comprehensive error handling and recovery
+  3. Clean up state management complexity
+
+  Priority 3: Feature Parity
+
+  1. Parse tool calls in backend, not CLI
+  2. Return proper response metadata
+  3. Implement max_tokens limiting correctly
+
+  Priority 4: Code Quality
+
+  1. Remove old code paths and #if 0 blocks
+  2. Add RAII wrappers for resource management
+  3. Improve logging and debugging capabilities
+
+  Priority 5: Performance
+
+  1. Optimize prefix caching logic
+  2. Reduce redundant tokenization
+  3. Improve batch processing efficiency
+
+  Key Architectural Decisions Validated
+
+  The architecture correctly maintains:
+  - Stateful KV cache for llama.cpp (efficiency for CLI mode)
+  - Prefix caching for server mode (avoid redundant computation)
+  - Callback-based eviction (interrupt-driven, efficient)
+  - Unified Backend interface (clean abstraction)
+
+  The main issue is incomplete implementation of the new architecture, not the design itself. The design is sound and production-appropriate.
+
+> 2. Token Counting Accuracy
+
+  - Current State: count_message_tokens() only counts raw content, not formatted through chat template
+  - Impact: Inaccurate space calculations leading to context overflow
+  - Required: Format through minja template to get exact token count including all overhead
+: Wait a minute, isn't there a function called count tool result or something like that which does put the raw content through a chat template? ...   - Current State:
+    - Eviction callback works but has complex edge cases
+    - Inconsistent state tracking between cached_messages and actual KV cache
+    - Missing validation of eviction bounds
+: Okay, I don't understand what cached messages is for. Are you telling me we have three separate lists of the messages? We have one in session, and now we have this cached messages, and we have KV-Cached. - Current State:
+    - generate_from_session() works but lacks proper error handling
+    - Throws exceptions for context overflow (good)
+    - Missing proper response token counts
+: Yeah, we need to get rid of this or rename it to add message or whatever. It needs to be the new architecture.  6. State Management Complexity
+
+  - Current State:
+    - Mix of old stateful methods (add_user_message, etc.) and new interface
+    - Complex interaction between cached_messages, Session messages, and KV cache
+    - Divergence detection works but is fragile
+: There should be no old stateful methods. We need to get rid of those in lieu of add message ...   7. Tool Handling
+
+  - Current State:
+    - Tool markers extracted but not fully utilized
+    - Tool formatting varies by model family
+    - Tool calls parsed by CLI, not backend
+: This was fully working in the old architecture. And I thought that's what the models, the entire models class was for. So we could differentiate between different models and not only their chat templates, but tool calls and other 
+differences between them.    2. Add RAII wrappers for resource management : what is a "RAII wrapper?" 
+
+● You're absolutely right on several points. Let me clarify and correct my analysis:
+
+  Token Counting
+
+  You're correct - looking more carefully, format_and_decode_message() in llamacpp.cpp does format through the template and get exact token counts. The issue is that count_message_tokens() doesn't use this same logic. It should be
+  calling the same formatting code to get accurate counts.
+
+  cached_messages Confusion
+
+  You've identified a major complexity issue. Yes, there are THREE lists:
+  1. Session::messages - The authoritative list of messages
+  2. LlamaCppBackend::cached_messages - Duplicate tracking what's in KV cache
+  3. KV cache itself - The actual tokens in llama.cpp memory
+
+  This is unnecessarily complex. The backend should either:
+  - Trust Session::messages and just track KV positions, OR
+  - Query the KV cache directly for state
+
+  The cached_messages appears to be a redundant middle layer that adds complexity without value.
+
+  Architecture Cleanup
+
+  You're absolutely right:
+  - generate_from_session() should be renamed to add_message() and become THE interface
+  - All the old add_user_message(), add_assistant_message(), etc. should be deleted
+  - The #if 0 blocks with old code should be removed entirely
+
+  Tool Handling
+
+  You're correct - the Models class (models.cpp/h) already has all the logic to detect model families and handle their differences. The tool parsing was working and should continue to use that infrastructure. The issue is more about
+  where the parsing happens (backend vs CLI) in the new architecture.
+
+  RAII Wrapper
+
+  RAII stands for "Resource Acquisition Is Initialization" - a C++ pattern where resources are automatically cleaned up when objects go out of scope. For example, instead of:
+
+  llama_context* ctx = llama_init_from_model(...);
+  // ... use ctx ...
+  llama_free(ctx);  // Must remember to call this
+
+  You'd have:
+  class LlamaContext {
+      llama_context* ctx;
+  public:
+      LlamaContext(...) { ctx = llama_init_from_model(...); }
+      ~LlamaContext() { llama_free(ctx); }  // Automatic cleanup
+  };
+
+  But this might be over-engineering for this codebase.
+
+  Simplified Production Requirements
+
+  Based on your feedback, here's what actually needs to be done:
+
+  1. Remove cached_messages entirely - Use Session::messages as single source of truth
+  2. Delete all old stateful methods - Only keep the new add_message() interface
+  3. Rename generate_from_session() to be the main add_message() implementation
+  4. Fix count_message_tokens() to use the same template formatting as actual generation
+  5. Keep using Models class for model-specific differences (it's already working)
+  6. Clean up eviction to work with simplified state management
+
+  The architecture is actually closer to production-ready than I initially assessed - it mainly needs cleanup and removal of the old code paths, not major new functionality.
+
+> "looking more carefully, format_and_decode_message() in llamacpp.cpp does format through the template and get exact token counts. The issue is that count_message_tokens() doesn't use this same logic." ... Don't reuse the old format
+ and decode message. In fact, you don't have to keep the old names for anything. I would prefer that we stick to the new architecture everywhere. So if you need to rename format and decode message to count message tokens, I'm totally
+ fine with that.  also before discarding the code in the #if 0 blocks ensure the code functionality cant be re-used first 
+
+● You're absolutely right. Let me provide a clearer, more actionable plan:
+
+  Reuse Strategy - Extract Useful Logic First
+
+  From format_and_decode_message() - Extract and Adapt:
+
+  - The minja template rendering logic
+  - The tokenization with special token handling
+  - The batch decoding into KV cache
+  - The token counting after formatting
+
+  This should become part of the new count_message_tokens() and the new add_message() implementation.
+
+  From the #if 0 blocks - Check for Reusable Logic:
+
+● Search(pattern: "#if 0", path: "backends/llamacpp.cpp", output_mode: "content")
+  ⎿  Found 10 lines (ctrl+o to expand)
+
+● Bash(grep -n "#if 0" /home/steve/src/shepherd/backends/llamacpp.cpp)
+  ⎿  103:#if 0  // OLD STATEFUL METHOD - NOT USED IN NEW ARCHITECTURE
+
+● Read(backends/llamacpp.cpp)
+  ⎿  Read 115 lines
+
+● Actionable Implementation Plan
+
+  What to Extract and Reuse from Old Code:
+
+  From the #if 0 blocks (lines 103-217):
+
+  Useful patterns to adapt:
+  1. Token adjustment logic - Compare estimated vs actual and log differences
+  2. Immediate decode pattern - Format and decode messages right after adding
+  3. Token tracking - Save system_formatted_tokens, current_user_formatted_tokens
+  4. Assistant message handling - Already in KV cache from generation
+
+  Can be deleted: The context_manager references since we use Session directly now
+
+  From format_and_decode_message() (lines 883-996):
+
+  Extract and adapt:
+  1. Minja template rendering - Move to new count_message_tokens()
+  2. Tokenization logic - Including special token handling
+  3. Batch decoding - With retry logic for KV cache failures
+  4. Performance metrics - Prefill speed calculation
+
+  Simplified State Management
+
+  Current (too complex):
+  - Session::messages (source of truth)
+  - LlamaCppBackend::cached_messages (redundant)
+  - KV cache positions
+
+  New (simplified):
+  - Session::messages (source of truth)
+  - int kv_decoded_up_to_index - Track which messages are in KV cache
+  - Query KV cache directly for token count
+
+  New Architecture Implementation
+
+  1. Proper count_message_tokens()
+
+  int LlamaCppBackend::count_message_tokens(Message::Type type,
+                                           const std::string& content,
+                                           const std::string& tool_name,
+                                           const std::string& tool_id) {
+      // Format message through minja template (extract from format_and_decode_message)
+      // Tokenize with special tokens
+      // Return exact count including all template overhead
+  }
+
+  2. New add_message() for CLI mode
+
+  Adapt from generate_from_session() but for incremental addition:
+  Response LlamaCppBackend::add_message(Session& session, Message::Type type, ...) {
+      // 1. Check if KV cache needs clearing (divergence)
+      // 2. Format and decode new message to KV
+      // 3. Generate response
+      // 4. Parse tool calls if present
+      // 5. Return proper Response with tokens
+  }
+
+  3. Rename/Refactor generate_from_session()
+
+  This becomes the server mode path - keep prefix caching logic but improve:
+  - Add proper token counting to Response
+  - Better error handling
+  - Tool call parsing
+
+  Clean Up Plan
+
+  1. Remove cached_messages entirely - Use index tracking instead
+  2. Delete old methods after extracting useful patterns
+  3. Remove #if 0 blocks after adaptation
+  4. Consolidate duplicate logic between CLI and server paths
+
+  Models Class Usage
+
+  Keep using the existing Models infrastructure for:
+  - Model family detection
+  - Chat template variations
+  - Tool format differences
+  - Special token handling
+
+  This is already working well and doesn't need changes.
+
+  Priority Order
+
+  1. First: Fix count_message_tokens() - Critical for space calculations
+  2. Second: Simplify state management - Remove cached_messages
+  3. Third: Implement proper add_message() for CLI
+  4. Fourth: Clean up old code and consolidate
+  5. Fifth: Add Response metadata (tokens, finish_reason)
+
+  The key insight from your feedback is that we should:
+  - Adapt, not preserve the old code
+  - Simplify state management dramatically
+  - Use the new architecture everywhere with consistent naming
+  - Keep what works (Models class, eviction callbacks)
+
+> ok write the new plan to PLAN.md and then create a todo list and write that to TODO.md 
+
+● Write(PLAN.md)
+  ⎿  Wrote 137 lines to PLAN.md                                                                                                                               
+     # LlamaCpp Backend Refactoring Plan
+     ## Objective
+     Bring the llama.cpp backend to production standards by implementing the new unified architecture, simplifying state management, and removing legacy code.
+     ## Current State Analysis
+     ### Architecture Overview
+     - **API Backends** (OpenAI, Ollama): Stateless, re-send full context each request
+     - **GPU Backend** (llama.cpp): Stateful KV cache, prefix caching, eviction callbacks
+     … +127 lines (ctrl+o to expand)
+
+● Write(TODO.md)
+  ⎿  Wrote 143 lines to TODO.md                                                     
+     # LlamaCpp Backend Refactoring TODO List
+     ## Phase 1: Critical Foundation (Must Do First)
+     ### 1.1 Fix Token Counting ⚠️ CRITICAL
+     - [ ] Extract minja template rendering logic from `format_and_decode_message()`
+     - [ ] Implement new `count_message_tokens()` that formats through template
+     - [ ] Test token counting accuracy against actual KV cache usage
+     - [ ] Ensure all message types (SYSTEM, USER, ASSISTANT, TOOL) are handled
+     … +133 lines (ctrl+o to expand)
+
+> keep in mind this plan/todo will be implemented by sonnet-4.5 so make sure it has all the info it needs 
+
+● Write(TODO.md)
+  ⎿  Updated TODO.md with 143 additions and 95 removals                                                                                                                                                                         
+         1    # LlamaCpp Backend Refactoring TODO List
+         2    
+         3 +  ## Context for Implementation
+         4 +  This refactoring brings the llama.cpp backend in line with the new unified architecture used by API backends. The main goal is to simplify state management and implement the standard Backend interface properly.
+         5 +  
+         6 +  **Key Files:**
+         7 +  - `backends/llamacpp.cpp` - Main implementation file
+         8 +  - `backends/llamacpp.h` - Header with class definition
+         9 +  - `backends/backend.h` - Base class interface to implement
+        10 +  - `backends/api.cpp` - Reference implementation for API backends
+        11 +  - `session.h/cpp` - Session class that manages messages
+        12 +  - `models.cpp` - Model detection and configuration
+        13 +  
+        14 +  **Current Problems:**
+        15 +  1. `add_message()` at line 1534 returns "not implemented" error
+        16 +  2. `cached_messages` duplicates Session::messages unnecessarily
+        17 +  3. `count_message_tokens()` at line 86 doesn't format through chat template
+        18 +  4. Old code in `#if 0` block (lines 103-217) needs extraction then removal
+        19 +  
+        20    ## Phase 1: Critical Foundation (Must Do First)
+        21    
+        22    ### 1.1 Fix Token Counting ⚠️ CRITICAL
+        23 -  - [ ] Extract minja template rendering logic from `format_and_decode_message()`
+        24 -  - [ ] Implement new `count_message_tokens()` that formats through template
+        25 -  - [ ] Test token counting accuracy against actual KV cache usage
+        26 -  - [ ] Ensure all message types (SYSTEM, USER, ASSISTANT, TOOL) are handled
+        23 +  - [ ] **Location:** `backends/llamacpp.cpp:86-94` (current `count_message_tokens()`)
+        24 +  - [ ] **Extract from:** `format_and_decode_message()` at line 883-996
+        25 +    - Extract the minja template rendering logic (around line 891)
+        26 +    - Extract tokenization code (lines 900-909)
+        27 +  - [ ] **Implement:** New `count_message_tokens()` that:
+        28 +    ```cpp
+        29 +    // Format message through minja template (like generate_from_session does)
+        30 +    // Tokenize with llama_tokenize()
+        31 +    // Return exact token count including template overhead
+        32 +    // Should work for all message types: SYSTEM, USER, ASSISTANT, TOOL
+        33 +    ```
+        34 +  - [ ] **Test:** Compare returned count with actual KV cache usage after decode
+        35    
+        36    ### 1.2 Simplify State Management
+        37 -  - [ ] Remove `cached_messages` deque entirely
+        38 -  - [ ] Add `int kv_cache_valid_up_to_index` to track position
+        39 -  - [ ] Update divergence detection to compare Session directly with KV position
+        40 -  - [ ] Remove all references to `cached_messages` throughout the code
+        37 +  - [ ] **Remove:** `cached_messages` deque (line 121 in header, used throughout)
+        38 +  - [ ] **Add:** Simple tracking: `int kv_cache_valid_up_to_index = -1`
+        39 +  - [ ] **Update divergence detection** in `generate_from_session()` (lines 1115-1169):
+        40 +    - Compare Session::messages directly with kv_cache_valid_up_to_index
+        41 +    - No need for cached_messages comparison
+        42 +  - [ ] **Remove:** All code that pushes to `cached_messages` (lines 1194, 1205, 1214, 1224)
+        43 +  - [ ] **Fix:** `evict_to_free_space()` at line 243 to use Session directly
+        44    
+        45    ## Phase 2: Core Implementation
+        46    
+        47    ### 2.1 Implement add_message() for CLI Mode
+        48 -  - [ ] Extract useful patterns from old `add_*_message()` methods
+        49 -  - [ ] Adapt logic from `generate_from_session()` for incremental addition
+        50 -  - [ ] Handle divergence and KV cache clearing
+        51 -  - [ ] Format and decode single message to KV cache
+        52 -  - [ ] Call generation and return proper Response
+        48 +  - [ ] **Location:** `backends/llamacpp.cpp:1534-1553` (current stub)
+        49 +  - [ ] **Reference:** Look at `ApiBackend::add_message()` in `backends/api.cpp:34-194`
+        50 +  - [ ] **Adapt from:** `generate_from_session()` at lines 1100-1267
+        51 +  - [ ] **Extract patterns from old code** (lines 103-217):
+        52 +    - Token adjustment logic (lines 117-127)
+        53 +    - Immediate decode pattern (line 115)
+        54 +    - Token tracking (line 130, 160)
+        55 +  - [ ] **Implementation steps:**
+        56 +    1. Check if new message would diverge from KV cache
+        57 +    2. If diverged, clear KV cache from divergence point
+        58 +    3. Format and decode new message to KV cache
+        59 +    4. Update kv_cache_valid_up_to_index
+        60 +    5. Call `generate()` to create response
+        61 +    6. Parse tool calls if present
+        62 +    7. Return properly populated Response struct
+        63    
+        64    ### 2.2 Enhance Response Structure
+        65 -  - [ ] Add `prompt_tokens` calculation from KV cache state
+        66 -  - [ ] Add `completion_tokens` tracking during generation
+        67 -  - [ ] Implement proper `finish_reason` detection
+        68 -  - [ ] Move tool call parsing from CLI to backend
+        69 -  - [ ] Populate `Response::tool_calls` vector
+        65 +  - [ ] **Location:** Response struct returned by `add_message()` and `generate_from_session()`
+        66 +  - [ ] **Currently:** Only sets content, success, code (see line 1253-1258)
+        67 +  - [ ] **Add prompt_tokens:** Query from `get_context_token_count()` before generation
+        68 +  - [ ] **Add completion_tokens:** Track in `run_inference()` (already at line 812)
+        69 +  - [ ] **Add finish_reason:** Detect in `run_inference()` at line 742-744
+        70 +  - [ ] **Move tool parsing:** From CLI (`cli.cpp:429`) to backend
+        71 +  - [ ] **Use:** `ToolParser::parse_tool_call()` and `backend->get_tool_call_markers()`
+        72    
+        73    ### 2.3 Refactor generate_from_session()
+        74 -  - [ ] Keep prefix caching logic
+        75 -  - [ ] Add proper token counting to Response
+        76 -  - [ ] Improve error handling for partial failures
+        77 -  - [ ] Parse tool calls and populate Response
+        78 -  - [ ] Consider renaming to clarify server mode usage
+        74 +  - [ ] **Location:** Lines 1100-1267
+        75 +  - [ ] **Keep:** Prefix caching logic (lines 1115-1235)
+        76 +  - [ ] **Add:** Proper token counting (like API backends do)
+        77 +  - [ ] **Add:** Tool call parsing before returning Response
+        78 +  - [ ] **Consider:** Rename to clarify it's for server mode batch processing
+        79 +  - [ ] **Fix:** Return accurate prompt_tokens and completion_tokens
+        80    
+        81    ## Phase 3: Code Cleanup
+        82    
+        83    ### 3.1 Remove Legacy Code
+        84 -  - [ ] Delete old `add_system_message()` method
+        85 -  - [ ] Delete old `add_user_message()` method
+        86 -  - [ ] Delete old `add_tool_result()` method
+        87 -  - [ ] Delete old `add_assistant_message()` method
+        88 -  - [ ] Remove all `#if 0` blocks after extracting useful code
+        89 -  - [ ] Remove `format_and_decode_message()` after logic extracted
+        84 +  - [ ] **Delete block:** Lines 103-217 (old stateful methods) after extracting:
+        85 +    - Token adjustment pattern (lines 117-127, 147-157, 180-190)
+        86 +    - system_formatted_tokens tracking (line 130)
+        87 +    - current_user_formatted_tokens tracking (line 160)
+        88 +  - [ ] **Delete:** `format_and_decode_message()` at lines 883-996 after extracting:
+        89 +    - Minja rendering logic
+        90 +    - Tokenization logic
+        91 +    - Batch decode logic
+        92 +    - Performance metrics
+        93 +  - [ ] **Delete:** Empty `get_context_with_tools()` at lines 603-611
+        94    
+        95    ### 3.2 Clean Up Eviction Logic
+        96 -  - [ ] Simplify `evict_to_free_space()` with single state source
+        97 -  - [ ] Add proper bounds validation
+        98 -  - [ ] Improve error messages and logging
+        99 -  - [ ] Test eviction edge cases thoroughly
+        96 +  - [ ] **Location:** `evict_to_free_space()` at lines 243-363
+        97 +  - [ ] **Remove:** All references to `cached_messages`
+        98 +  - [ ] **Use:** Session::messages directly with kv_cache_valid_up_to_index
+        99 +  - [ ] **Simplify:** Message-to-token position calculation
+       100 +  - [ ] **Add:** Better validation of eviction bounds
+       101    
+       102    ## Phase 4: Tool Integration
+       103    
+       104    ### 4.1 Tool Call Parsing
+       105 -  - [ ] Move tool call extraction from CLI to backend
+       106 -  - [ ] Use Models class for model-specific formats
+       107 -  - [ ] Handle both JSON and text-based tool calls
+       108 -  - [ ] Populate Response::tool_calls consistently
+       105 +  - [ ] **Currently:** CLI parses at `cli.cpp:429` using `extract_tool_call()`
+       106 +  - [ ] **Move to:** Backend's `generate()` or Response creation
+       107 +  - [ ] **Use:** `ToolParser::parse_tool_call()` from `tools/tool_parser.h`
+       108 +  - [ ] **Get markers:** From `get_tool_call_markers()` (lines 227-233)
+       109 +  - [ ] **Models class:** Use `ModelConfig` (line 219-225) for model-specific handling
+       110    
+       111    ### 4.2 Tool Formatting
+       112 -  - [ ] Ensure `format_system_message_with_tools()` works for all models
+       113 -  - [ ] Test with Qwen 2.x special formatting
+       114 -  - [ ] Test with Llama 3.x tool schemas
+       115 -  - [ ] Verify tool markers extraction
+       112 +  - [ ] **Location:** `format_system_message_with_tools()` at lines 1001-1096
+       113 +  - [ ] **Test:** Qwen 2.x special formatting (lines 1033-1085)
+       114 +  - [ ] **Test:** Llama 3.x format (lines 1087-1092)
+       115 +  - [ ] **Test:** Generic format (lines 1006-1030)
+       116 +  - [ ] **Verify:** Tool markers extracted in `generate()` at lines 422-486
+       117    
+       118    ## Phase 5: Polish and Optimization
+       119    
+       120    ### 5.1 Performance Metrics
+       121 -  - [ ] Ensure prefill speed (t/s) is displayed
+       122 -  - [ ] Ensure generation speed (t/s) is displayed
+       123 -  - [ ] Add context usage display (X/Y tokens)
+       124 -  - [ ] Track and log token adjustment accuracy
+       121 +  - [ ] **Already displayed:** At lines 803-806 (generation) and 985-987 (prefill)
+       122 +  - [ ] **Ensure:** These work in new `add_message()` implementation
+       123 +  - [ ] **Keep:** Context usage display (context_used/context_max)
+       124    
+       125    ### 5.2 Error Handling
+       126 -  - [ ] Add comprehensive error checks for all llama.cpp calls
+       127 -  - [ ] Implement retry logic where appropriate
+       128 -  - [ ] Add clear error messages for users
+       129 -  - [ ] Handle context overflow gracefully in both modes
+       126 +  - [ ] **Add checks:** For all llama.cpp API calls
+       127 +  - [ ] **Server mode:** Throw `ContextFullException` (lines 266-269, 920-924)
+       128 +  - [ ] **CLI mode:** Return error in Response struct
+       129 +  - [ ] **Retry logic:** Already at lines 937-969 for decode failures
+       130    
+       131    ### 5.3 Memory Management
+       132 -  - [ ] Verify all resources are cleaned up properly
+       133 -  - [ ] Check for memory leaks in error paths
+       134 -  - [ ] Consider RAII wrappers if complexity warrants
+       132 +  - [ ] **Check:** Model and context cleanup in destructor (lines 365-390)
+       133 +  - [ ] **Verify:** Error paths clean up properly
+       134 +  - [ ] **Current:** Manual cleanup is fine, RAII not required
+       135    
+       136 -  ## Phase 6: Testing
+       136 +  ## Code Navigation Reference
+       137    
+       138 -  ### 6.1 Unit Tests
+       139 -  - [ ] Test token counting accuracy
+       140 -  - [ ] Test message formatting
+       141 -  - [ ] Test divergence detection
+       142 -  - [ ] Test eviction calculation
+       138 +  **Key Functions to Understand:**
+       139 +  - `generate_from_session()` (1100-1267) - Server mode implementation
+       140 +  - `generate()` (410-601) - Core generation logic
+       141 +  - `run_inference()` (613-820) - Low-level generation loop
+       142 +  - `evict_to_free_space()` (243-363) - KV cache eviction
+       143 +  - `initialize()` (1270-1532) - Model loading and setup
+       144    
+       145 -  ### 6.2 Integration Tests
+       146 -  - [ ] Test full message flow (CLI mode)
+       147 -  - [ ] Test prefix caching (server mode)
+       148 -  - [ ] Test tool execution loop
+       149 -  - [ ] Test context overflow handling
+       145 +  **Key Data Members to Track:**
+       146 +  - `cached_messages` (line 121 in .h) - TO BE REMOVED
+       147 +  - `model_ctx` (line 112 in .h) - llama.cpp context
+       148 +  - `model` (line 113 in .h) - llama.cpp model
+       149 +  - `template_node` (line 131 in .h) - Minja template parser
+       150 +  - `model_config` (line 137 in .h) - Model family detection
+       151    
+       152 -  ### 6.3 Model Compatibility
+       153 -  - [ ] Test with Qwen 2.x models
+       154 -  - [ ] Test with Llama 3.x models
+       155 -  - [ ] Test with generic models
+       156 -  - [ ] Verify tool calls work across families
+       152 +  **Reference Implementations:**
+       153 +  - `ApiBackend::add_message()` (backends/api.cpp:34-194) - How API backends handle messages
+       154 +  - `ApiBackend::count_message_tokens()` (backends/api.cpp:218-242) - Token counting reference
+       155 +  - `OpenAIBackend::parse_http_response()` (backends/openai.cpp:38-210) - Response population example
+       156    
+       157 -  ## Phase 7: Documentation
+       157 +  ## Testing Commands
+       158    
+       159 -  ### 7.1 Code Documentation
+       160 -  - [ ] Add clear comments to new functions
+       161 -  - [ ] Document the state management approach
+       162 -  - [ ] Explain prefix caching logic
+       163 -  - [ ] Document eviction strategy
+       159 +  ```bash
+       160 +  # Test CLI mode with llama.cpp backend
+       161 +  ./shepherd -b llamacpp -m model.gguf -c 4096
+       162    
+       163 -  ### 7.2 Update RULES.md
+       164 -  - [ ] Document any new patterns introduced
+       165 -  - [ ] Update backend interface documentation
+       166 -  - [ ] Add examples of proper usage
+       163 +  # Test eviction
+       164 +  ./shepherd -b llamacpp -m model.gguf -c 512  # Small context to trigger eviction
+       165    
+       166 -  ## Priority Order
+       166 +  # Test tools
+       167 +  ./shepherd -b llamacpp -m model.gguf --tools
+       168    
+       169 -  **Do First (Blocking Issues):**
+       170 -  1. Fix token counting (1.1)
+       171 -  2. Simplify state management (1.2)
+       172 -  3. Implement add_message (2.1)
+       169 +  # Debug with verbosity
+       170 +  ./shepherd -b llamacpp -m model.gguf -v 3
+       171 +  ```
+       172    
+       173 -  **Do Second (Core Functionality):**
+       174 -  4. Enhance Response structure (2.2)
+       175 -  5. Refactor generate_from_session (2.3)
+       176 -  6. Remove legacy code (3.1)
+       173 +  ## Important Notes for Implementer
+       174    
+       175 -  **Do Third (Polish):**
+       176 -  7. Everything else in order
+       175 +  1. **Session is source of truth** - Don't duplicate its messages
+       176 +  2. **KV cache is stateful** - Must track what's been decoded
+       177 +  3. **Prefix caching is important** - Don't re-decode unchanged messages
+       178 +  4. **Models class works** - Use it for model-specific behavior
+       179 +  5. **Test with different models** - Qwen, Llama, and generic models behave differently
+       180 +  6. **Server mode vs CLI mode** - Server uses generate_from_session (batch), CLI uses add_message (incremental)
+       181 +  7. **Don't break server mode** - It's working, just needs Response metadata
+       182    
+       183 -  ## Notes
+       183 +  ## Success Verification
+       184    
+       185 -  - Each task should be completed and tested before moving to the next
+       186 -  - Keep Models class infrastructure as-is (it's working well)
+       187 -  - Maintain backward compatibility for server mode
+       188 -  - Focus on simplicity over clever optimizations
+       189 -  - Test with multiple model families throughout
+       185   \ No newline at end of file
+       186 +  After implementation, verify:
+       187 +  - [ ] `./shepherd -b llamacpp` works in CLI mode
+       188 +  - [ ] Token counts are accurate (compare logged vs actual)
+       189 +  - [ ] Tools execute properly
+       190 +  - [ ] Eviction works when context fills
+       191 +  - [ ] Server mode still works with prefix caching
+       192 +  - [ ] No memory leaks or crashes
+       193   \ No newline at end of file
+
+● I've created both PLAN.md and TODO.md with comprehensive details for Sonnet 3.5 to implement the refactoring.
+
+  PLAN.md highlights:
+
+  - Clear objective and current state analysis
+  - Simplified state management design (removing cached_messages)
+  - Unified interface architecture
+  - Code reuse strategy
+  - Success criteria
+
+  TODO.md highlights:
+
+  - Specific line numbers for every change location
+  - Reference implementations to study (e.g., ApiBackend::add_message)
+  - Step-by-step instructions for complex tasks
+  - Code navigation reference with key functions and data members
+  - Testing commands to verify implementation
+  - Important context about Session as source of truth, KV cache statefulness, etc.
+
+  The TODO is organized by priority with Phase 1 being critical (token counting and state simplification), followed by core implementation, cleanup, and polish phases.
+
+  Key improvements made for Sonnet 3.5:
+  - Added exact line numbers for all code locations
+  - Included specific extraction instructions (what to take from old code)
+  - Provided reference implementations to study
+  - Added testing/verification steps
+  - Clarified the distinction between CLI mode (incremental) and server mode (batch)
+
+  This should provide all the information needed to implement the refactoring without ambiguity.
+

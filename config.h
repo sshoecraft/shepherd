@@ -44,6 +44,7 @@ public:
     // Public configuration variables
     std::string system_message;
     std::string warmup_message;
+    bool warmup;
     std::string backend;
     std::string model;
     std::string model_path;

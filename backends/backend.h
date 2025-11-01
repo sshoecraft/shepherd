@@ -87,7 +87,6 @@ public:
     int last_completion_tokens;
     int context_token_count;
     bool is_local = false;  // true for GPU/local backends (llamacpp, tensorrt), false for API backends
-	bool warmup;
 
 protected:
     virtual void parse_backend_config(const std::string& json) {

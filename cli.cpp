@@ -346,10 +346,11 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 		cli.restore_terminal();
 
 		// Check if we need to do warmup first
-		if (backend->warmup && !warmup_done) {
-			LOG_DEBUG("Warming up " + backend->name + " model with warmup message...");
-			user_input = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.";
+		if (config->warmup && !warmup_done) {
+			LOG_DEBUG("Warming up with warmup message...");
+			user_input = config->warmup_message;
 			warmup_done = true;
+			// Don't show prompt for warmup message
 		} else {
 			// Normal user input
 			cli.show_prompt();
@@ -381,7 +382,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 		}
 
 		// Show user message in transcript (for piped mode)
-		cli.show_user_message(user_input);
+		// Skip showing warmup message prompt
+		if (!warmup_done || user_input != config->warmup_message) {
+			cli.show_user_message(user_input);
+		}
 
 		LOG_DEBUG("User input: " + user_input);
 

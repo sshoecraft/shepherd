@@ -5,6 +5,28 @@ All notable changes to Shepherd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-11-02
+
+### Added
+- Extended thinking support for compatible models (Claude Sonnet 4.5, Gemini 2.0 Flash Thinking)
+- Warmup control configuration options
+- Tool reasoning display: assistant content shown before tool calls
+- Comprehensive model definitions in models.cpp
+
+### Changed
+- CLI output formatting improvements:
+  - Multi-line assistant responses and tool results now indented
+  - Tool call indicator changed from `<` to `*`
+  - Removed extra blank line before prompts
+  - First line prefixed, subsequent lines indented for better readability
+- Refactored Anthropic backend for improved error handling
+- Enhanced Gemini backend integration
+- Improved OpenAI backend with better model support
+- Enhanced HTTP client retry logic
+
+### Removed
+- Grok backend support
+
 ## [2.0.0] - 2025-11-01
 
 ### Major Architectural Changes

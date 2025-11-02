@@ -51,6 +51,7 @@ public:
     size_t context_size;
     std::string key;
     std::string api_base;
+    std::string models_file;
     std::string system_prompt;
     std::string mcp_config;
     std::string memory_database;

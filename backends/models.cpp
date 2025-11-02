@@ -8,6 +8,14 @@
 #include <cctype>
 #include <sstream>
 #include <ctime>
+#include <fstream>
+#include <filesystem>
+
+std::map<std::string, ModelConfig> Models::model_database;
+std::map<std::string, ModelConfig> Models::pattern_database;
+std::map<std::string, ModelConfig> Models::provider_defaults;
+bool Models::initialized = false;
+std::string Models::custom_models_path;
 
 ModelConfig Models::detect_from_chat_template(const std::string& template_text, const std::string& model_path) {
     // Primary detection: Analyze chat template content (most reliable)
@@ -342,4 +350,702 @@ std::string Models::format_system_message(const ModelConfig& config, const std::
 
     LOG_DEBUG("Generic system message: " + std::to_string(system_message.length()) + " chars");
     return system_message;
+}
+
+void Models::ensure_initialized() {
+    if (!initialized) {
+        init(custom_models_path);
+    }
+}
+
+void Models::init(const std::string& custom_path) {
+    if (initialized && custom_path.empty()) {
+        return;
+    }
+
+    LOG_DEBUG("Initializing models database...");
+
+    custom_models_path = custom_path;
+    initialized = true;
+
+    std::string json_content;
+    bool loaded = false;
+
+    if (!custom_path.empty()) {
+        loaded = load_models_database(custom_path);
+        if (loaded) {
+            LOG_INFO("Loaded models database from: " + custom_path);
+            return;
+        }
+        LOG_WARN("Failed to load custom models file: " + custom_path);
+    }
+
+    std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
+    if (!home.empty()) {
+        std::string user_path = home + "/.shepherd/models.json";
+        if (std::filesystem::exists(user_path)) {
+            loaded = load_models_database(user_path);
+            if (loaded) {
+                LOG_INFO("Loaded models database from: " + user_path);
+                return;
+            }
+        }
+    }
+
+    json_content = get_embedded_models_json();
+    if (parse_models_json(json_content)) {
+        LOG_INFO("Loaded embedded models database");
+        return;
+    }
+
+    LOG_WARN("Failed to load models database, using provider defaults only");
+}
+
+bool Models::load_models_database(const std::string& path) {
+    try {
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            LOG_DEBUG("Could not open models file: " + path);
+            return false;
+        }
+
+        std::string json_content((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+        return parse_models_json(json_content);
+    } catch (const std::exception& e) {
+        LOG_ERROR("Error loading models database from " + path + ": " + e.what());
+        return false;
+    }
+}
+
+std::string Models::get_embedded_models_json() {
+    return R"({
+  "version": "1.0",
+  "providers": {
+    "openai": {
+      "context_window": 8192,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supports_temperature": true,
+      "supports_streaming": true
+    },
+    "anthropic": {
+      "context_window": 200000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens",
+      "supports_temperature": true,
+      "supports_streaming": true
+    },
+    "gemini": {
+      "context_window": 1000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supports_temperature": true,
+      "supports_streaming": true
+    }
+  },
+  "models": [
+    {
+      "name": "gpt-5",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"],
+      "supports_temperature": true,
+      "supports_streaming": true,
+      "vision_support": true,
+      "function_calling_support": true,
+      "training_cutoff_date": "2025-08"
+    },
+    {
+      "name": "gpt-5-pro",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"]
+    },
+    {
+      "name": "gpt-5-codex",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "gpt-5-mini",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"]
+    },
+    {
+      "name": "gpt-5-nano",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o3",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_cot_tokens": 100000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o3-mini",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_cot_tokens": 65536,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o4-mini",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o1",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_cot_tokens": 32768,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o1-mini",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 65536,
+      "max_cot_tokens": 65536,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "o1-pro",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_tokens_param_name": "max_completion_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "gpt-4o",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"],
+      "vision_support": true,
+      "fine_tunable": true
+    },
+    {
+      "name": "gpt-4o-mini",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"],
+      "fine_tunable": true
+    },
+    {
+      "name": "gpt-4o-realtime-preview",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/realtime"],
+      "realtime_capable": true
+    },
+    {
+      "name": "gpt-4-turbo",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"],
+      "vision_support": true
+    },
+    {
+      "name": "gpt-4.1",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"]
+    },
+    {
+      "name": "gpt-4.1-mini",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"]
+    },
+    {
+      "name": "gpt-4",
+      "provider": "openai",
+      "context_window": 8192,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"]
+    },
+    {
+      "name": "gpt-4-0613",
+      "provider": "openai",
+      "context_window": 8192,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "gpt-3.5-turbo",
+      "provider": "openai",
+      "context_window": 16384,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions", "/v1/assistants"],
+      "fine_tunable": true
+    },
+    {
+      "name": "gpt-3.5-turbo-16k",
+      "provider": "openai",
+      "context_window": 16384,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/chat/completions"]
+    },
+    {
+      "name": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "aliases": ["claude-sonnet-4-5-20250929"],
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true,
+      "training_cutoff_date": "2025-09"
+    },
+    {
+      "name": "claude-sonnet-4",
+      "provider": "anthropic",
+      "aliases": ["claude-sonnet-4-20250514"],
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-3-7-sonnet-20250219",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_tokens",
+      "special_headers": {
+        "anthropic-beta": "output-128k-2025-02-19"
+      },
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-opus-4-1",
+      "provider": "anthropic",
+      "aliases": ["claude-opus-4-1-20250805"],
+      "context_window": 200000,
+      "max_output_tokens": 32000,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-opus-4",
+      "provider": "anthropic",
+      "aliases": ["claude-opus-4-20250514"],
+      "context_window": 200000,
+      "max_output_tokens": 32000,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-3-5-sonnet-20240620",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-3-5-haiku-20241022",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"]
+    },
+    {
+      "name": "claude-3-haiku-20240307",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "claude-3-opus-20240229",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens",
+      "supported_endpoints": ["/v1/messages"],
+      "vision_support": true
+    },
+    {
+      "name": "gemini-2.0-flash-exp",
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supported_endpoints": ["/v1beta/models/{model}:generateContent"]
+    },
+    {
+      "name": "gemini-2.5-pro",
+      "provider": "gemini",
+      "context_window": 2000000,
+      "max_output_tokens": 65536,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supported_endpoints": ["/v1beta/models/{model}:generateContent"],
+      "vision_support": true
+    },
+    {
+      "name": "gemini-1.5-pro",
+      "provider": "gemini",
+      "context_window": 2000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supported_endpoints": ["/v1beta/models/{model}:generateContent"],
+      "vision_support": true
+    },
+    {
+      "name": "gemini-1.5-flash",
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supported_endpoints": ["/v1beta/models/{model}:generateContent"]
+    },
+    {
+      "name": "gemini-pro",
+      "provider": "gemini",
+      "context_window": 32000,
+      "max_output_tokens": 2048,
+      "max_tokens_param_name": "maxOutputTokens",
+      "supported_endpoints": ["/v1beta/models/{model}:generateContent"]
+    }
+  ],
+  "patterns": {
+    "gpt-5*": {
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "max_tokens_param_name": "max_completion_tokens"
+    },
+    "o3*": {
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_tokens_param_name": "max_completion_tokens"
+    },
+    "o1*": {
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "max_tokens_param_name": "max_completion_tokens"
+    },
+    "gpt-4o*": {
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens"
+    },
+    "gpt-4.1*": {
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "max_tokens_param_name": "max_tokens"
+    },
+    "gpt-4*": {
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens"
+    },
+    "gpt-3.5*": {
+      "provider": "openai",
+      "context_window": 16384,
+      "max_output_tokens": 4096,
+      "max_tokens_param_name": "max_tokens"
+    },
+    "claude-*": {
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "max_tokens"
+    },
+    "gemini-2*": {
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens"
+    },
+    "gemini-1.5*": {
+      "provider": "gemini",
+      "context_window": 1000000,
+      "max_output_tokens": 8192,
+      "max_tokens_param_name": "maxOutputTokens"
+    }
+  }
+})";
+}
+
+bool Models::parse_models_json(const std::string& json_content) {
+    try {
+        nlohmann::json j = nlohmann::json::parse(json_content);
+
+        if (j.contains("providers") && j["providers"].is_object()) {
+            for (auto& [provider_name, provider_config] : j["providers"].items()) {
+                ModelConfig default_config = ModelConfig::create_generic();
+                default_config.provider = provider_name;
+                
+                if (provider_config.contains("context_window"))
+                    default_config.context_window = provider_config["context_window"];
+                if (provider_config.contains("max_output_tokens"))
+                    default_config.max_output_tokens = provider_config["max_output_tokens"];
+                if (provider_config.contains("max_tokens_param_name"))
+                    default_config.max_tokens_param_name = provider_config["max_tokens_param_name"];
+                if (provider_config.contains("supports_temperature"))
+                    default_config.supports_temperature = provider_config["supports_temperature"];
+                if (provider_config.contains("supports_streaming"))
+                    default_config.supports_streaming = provider_config["supports_streaming"];
+
+                provider_defaults[provider_name] = default_config;
+            }
+        }
+
+        if (j.contains("models") && j["models"].is_array()) {
+            for (const auto& model_entry : j["models"]) {
+                ModelConfig config = ModelConfig::create_generic();
+                
+                if (model_entry.contains("name"))
+                    config.model_name = model_entry["name"];
+                if (model_entry.contains("provider"))
+                    config.provider = model_entry["provider"];
+                if (model_entry.contains("context_window"))
+                    config.context_window = model_entry["context_window"];
+                if (model_entry.contains("max_output_tokens"))
+                    config.max_output_tokens = model_entry["max_output_tokens"];
+                if (model_entry.contains("max_cot_tokens"))
+                    config.max_cot_tokens = model_entry["max_cot_tokens"];
+                if (model_entry.contains("max_tokens_param_name"))
+                    config.max_tokens_param_name = model_entry["max_tokens_param_name"];
+                if (model_entry.contains("supports_temperature"))
+                    config.supports_temperature = model_entry["supports_temperature"];
+                if (model_entry.contains("supports_streaming"))
+                    config.supports_streaming = model_entry["supports_streaming"];
+                if (model_entry.contains("vision_support"))
+                    config.vision_support = model_entry["vision_support"];
+                if (model_entry.contains("audio_support"))
+                    config.audio_support = model_entry["audio_support"];
+                if (model_entry.contains("function_calling_support"))
+                    config.function_calling_support = model_entry["function_calling_support"];
+                if (model_entry.contains("realtime_capable"))
+                    config.realtime_capable = model_entry["realtime_capable"];
+                if (model_entry.contains("fine_tunable"))
+                    config.fine_tunable = model_entry["fine_tunable"];
+                if (model_entry.contains("training_cutoff_date"))
+                    config.training_cutoff_date = model_entry["training_cutoff_date"];
+                if (model_entry.contains("deprecated"))
+                    config.deprecated = model_entry["deprecated"];
+                if (model_entry.contains("replacement_model"))
+                    config.replacement_model = model_entry["replacement_model"];
+                if (model_entry.contains("notes"))
+                    config.notes = model_entry["notes"];
+
+                if (model_entry.contains("supported_endpoints") && model_entry["supported_endpoints"].is_array()) {
+                    for (const auto& endpoint : model_entry["supported_endpoints"]) {
+                        config.supported_endpoints.push_back(endpoint);
+                    }
+                }
+
+                if (model_entry.contains("special_headers") && model_entry["special_headers"].is_object()) {
+                    for (auto& [key, value] : model_entry["special_headers"].items()) {
+                        config.special_headers[key] = value;
+                    }
+                }
+
+                if (model_entry.contains("aliases") && model_entry["aliases"].is_array()) {
+                    for (const auto& alias : model_entry["aliases"]) {
+                        config.aliases.push_back(alias);
+                        model_database[alias] = config;
+                    }
+                }
+
+                if (!config.model_name.empty()) {
+                    model_database[config.model_name] = config;
+                }
+            }
+        }
+
+        if (j.contains("patterns") && j["patterns"].is_object()) {
+            for (auto& [pattern, pattern_config] : j["patterns"].items()) {
+                ModelConfig config = ModelConfig::create_generic();
+                
+                if (pattern_config.contains("provider"))
+                    config.provider = pattern_config["provider"];
+                if (pattern_config.contains("context_window"))
+                    config.context_window = pattern_config["context_window"];
+                if (pattern_config.contains("max_output_tokens"))
+                    config.max_output_tokens = pattern_config["max_output_tokens"];
+                if (pattern_config.contains("max_tokens_param_name"))
+                    config.max_tokens_param_name = pattern_config["max_tokens_param_name"];
+
+                pattern_database[pattern] = config;
+            }
+        }
+
+        LOG_DEBUG("Parsed models database: " + std::to_string(model_database.size()) + 
+                  " models, " + std::to_string(pattern_database.size()) + " patterns");
+        return true;
+
+    } catch (const nlohmann::json::exception& e) {
+        LOG_ERROR("Failed to parse models JSON: " + std::string(e.what()));
+        return false;
+    } catch (const std::exception& e) {
+        LOG_ERROR("Error parsing models JSON: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool Models::matches_pattern(const std::string& model_name, const std::string& pattern) {
+    if (pattern.find('*') == std::string::npos) {
+        return model_name == pattern;
+    }
+
+    size_t star_pos = pattern.find('*');
+    std::string prefix = pattern.substr(0, star_pos);
+    std::string suffix = pattern.substr(star_pos + 1);
+
+    if (!prefix.empty() && model_name.find(prefix) != 0) {
+        return false;
+    }
+
+    if (!suffix.empty()) {
+        if (model_name.length() < suffix.length()) {
+            return false;
+        }
+        if (model_name.substr(model_name.length() - suffix.length()) != suffix) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+ModelConfig Models::get_provider_default(const std::string& provider) {
+    auto it = provider_defaults.find(provider);
+    if (it != provider_defaults.end()) {
+        return it->second;
+    }
+
+    ModelConfig config = ModelConfig::create_generic();
+    config.provider = provider;
+    config.context_window = 8192;
+    config.max_output_tokens = 4096;
+    config.max_tokens_param_name = "max_tokens";
+    return config;
+}
+
+ModelConfig Models::detect_from_api_model(const std::string& provider, const std::string& model_name) {
+    ensure_initialized();
+
+    auto exact_match = model_database.find(model_name);
+    if (exact_match != model_database.end()) {
+        LOG_DEBUG("Found exact model match: " + model_name);
+        return exact_match->second;
+    }
+
+    for (const auto& [pattern, pattern_config] : pattern_database) {
+        if (matches_pattern(model_name, pattern)) {
+            LOG_DEBUG("Matched model pattern: " + pattern + " for " + model_name);
+            ModelConfig config = pattern_config;
+            config.model_name = model_name;
+            if (config.provider.empty()) {
+                config.provider = provider;
+            }
+            return config;
+        }
+    }
+
+    LOG_WARN("Unknown model: " + model_name + ", using provider defaults for " + provider);
+    ModelConfig config = get_provider_default(provider);
+    config.model_name = model_name;
+    return config;
+}
+
+bool Models::supports_endpoint(const std::string& model_name, const std::string& endpoint_path) {
+    ensure_initialized();
+
+    auto it = model_database.find(model_name);
+    if (it == model_database.end()) {
+        return true;
+    }
+
+    if (it->second.supported_endpoints.empty()) {
+        return true;
+    }
+
+    for (const auto& supported : it->second.supported_endpoints) {
+        if (supported == endpoint_path) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::vector<std::string> Models::get_compatible_models(const std::string& endpoint_path) {
+    ensure_initialized();
+
+    std::vector<std::string> compatible;
+    for (const auto& [model_name, config] : model_database) {
+        if (config.supported_endpoints.empty()) {
+            compatible.push_back(model_name);
+            continue;
+        }
+
+        for (const auto& endpoint : config.supported_endpoints) {
+            if (endpoint == endpoint_path) {
+                compatible.push_back(model_name);
+                break;
+            }
+        }
+    }
+
+    return compatible;
 }

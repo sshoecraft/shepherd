@@ -113,6 +113,7 @@ User: "What is the private variable in config.cpp?"
     context_size = 0; // Auto-detect
     key = "none";
     api_base = "";  // Optional API base URL
+    models_file = "";  // Optional models database file path
     system_prompt = "";  // Optional custom system prompt
 
     // RAG database defaults
@@ -246,8 +247,14 @@ void Config::load() {
         if (config_json.contains("key")) {
             key = config_json["key"];
         }
+        if (config_json.contains("api_key")) {
+            key = config_json["api_key"];
+        }
         if (config_json.contains("api_base")) {
             api_base = config_json["api_base"];
+        }
+        if (config_json.contains("models_file")) {
+            models_file = config_json["models_file"];
         }
         if (config_json.contains("system")) {
             system_prompt = config_json["system"];

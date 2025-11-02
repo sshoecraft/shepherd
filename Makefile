@@ -1,7 +1,7 @@
 
 
-#BACKENDS=backends/anthropic.cpp backends/gemini.cpp backends/grok.cpp backends/tensorrt.cpp
-BACKENDS=backends/backend.cpp backends/factory.cpp backends/llamacpp.cpp backends/models.cpp backends/api.cpp backends/openai.cpp backends/ollama.cpp
+#backends/tensorrt.cpp
+BACKENDS=backends/backend.cpp backends/factory.cpp backends/llamacpp.cpp backends/models.cpp backends/api.cpp backends/openai.cpp backends/ollama.cpp backends/anthropic.cpp backends/gemini.cpp
 TOOL_SRCS=tools/command_tools.cpp tools/core_tools.cpp tools/filesystem_tools.cpp tools/http_tools.cpp tools/json_tools.cpp tools/mcp_resource_tools.cpp tools/memory_tools.cpp tools/tool.cpp tools/tool_parser.cpp tools/utf8_sanitizer.cpp tools/web_search.cpp
 MCP_SRCS=mcp/mcp_client.cpp mcp/mcp_config.cpp mcp/mcp.cpp mcp/mcp_server.cpp mcp/mcp_tool.cpp
 SERVER_SRCS=server/server.cpp

@@ -2,6 +2,7 @@
 #include "logger.h"
 #include <sstream>
 #include <cstring>
+#include <fstream>
 
 HttpClient::HttpClient() {
     curl_ = curl_easy_init();
@@ -49,6 +50,8 @@ void HttpClient::configure_curl() {
     // Set timeout
     if (timeout_seconds_ > 0) {
         curl_easy_setopt(curl_, CURLOPT_TIMEOUT, timeout_seconds_);
+        // Also set connect timeout to avoid hanging on connection
+        curl_easy_setopt(curl_, CURLOPT_CONNECTTIMEOUT, 30L);
     }
 
     // SSL options
@@ -198,6 +201,19 @@ HttpResponse HttpClient::post(const std::string& url,
 
     LOG_DEBUG("HTTP POST: " + url);
     LOG_DEBUG("POST body length: " + std::to_string(body.length()));
+
+    // Dump full request body at high debug level
+    extern int g_debug_level;
+    if (g_debug_level >= 5 && body.length() < 50000) {
+        LOG_DEBUG("POST body:\n" + body);
+        // Also write to file for easy inspection
+        std::ofstream dump_file("/tmp/shepherd_request.json");
+        if (dump_file.is_open()) {
+            dump_file << body;
+            dump_file.close();
+            LOG_DEBUG("Request saved to /tmp/shepherd_request.json");
+        }
+    }
 
     configure_curl();
 

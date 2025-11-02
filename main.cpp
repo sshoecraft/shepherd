@@ -8,6 +8,7 @@
 #include "cli.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
+#include "backends/models.h"
 #include "version.h"
 
 #include <iostream>
@@ -80,6 +81,7 @@ static void print_usage(int, char** argv) {
 	printf("	--api-key		   API key for cloud backends\n");
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
+	printf("	--models-file FILE Path to models database JSON file (default: ~/.shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
@@ -593,6 +595,7 @@ int main(int argc, char** argv) {
 	std::string api_base_override;
 	std::string template_override;
 	std::string memory_db_override;
+	std::string models_file_override;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
@@ -608,6 +611,7 @@ int main(int argc, char** argv) {
 		{"api-base", required_argument, 0, 1004},
 		{"context-size", required_argument, 0, 1000},
 		{"memory-db", required_argument, 0, 1023},
+		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
 		{"template", required_argument, 0, 1006},
 		{"server", no_argument, 0, 1015},
@@ -684,6 +688,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1023: // --memory-db
 				memory_db_override = optarg;
+				break;
+			case 1024: // --models-file
+				models_file_override = optarg;
 				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
@@ -815,6 +822,12 @@ int main(int argc, char** argv) {
 	signal(SIGUSR1, cancel_handler);  // For cancellation from FastAPI on client disconnect
 
 	size_t context_size = context_size_override >= 0 ? static_cast<size_t>(context_size_override) : config->context_size;
+
+	// Initialize models database if custom file specified (command-line takes precedence)
+	std::string models_file = models_file_override.empty() ? config->models_file : models_file_override;
+	if (!models_file.empty()) {
+		Models::init(models_file);
+	}
 
 	// Create and initialize backend (needed for both CLI and server mode)
 	try {

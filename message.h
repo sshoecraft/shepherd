@@ -30,6 +30,10 @@ struct Message {
 	std::string tool_name;
 	std::string tool_call_id;
 
+	// For assistant messages that make tool calls (OpenAI format)
+	// Or for storing structured content (Gemini parts array, etc.)
+	std::string tool_calls_json;
+
 	Message(Type t, const std::string& c, int tokens = 0) : type(t), content(c), tokens(tokens) {}
 
 	// Convert role string to Type enum

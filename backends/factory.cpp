@@ -2,12 +2,12 @@
 #include "backends/factory.h"
 #include "backends/openai.h"
 #include "backends/ollama.h"
+#include "backends/anthropic.h"
+#include "backends/gemini.h"
 
 #include "backends/llamacpp.h"
 #if 0
 #include "backends/tensorrt.h"
-#include "backends/anthropic.h"
-#include "backends/gemini.h"
 #include "backends/grok.h"
 #endif
 
@@ -43,6 +43,20 @@ std::unique_ptr<Backend> BackendFactory::create_backend(std::string &name, size_
         backend = std::make_unique<OllamaBackend>(context_size);
 #else
         throw std::runtime_error("Ollama backend not available (API backends not compiled in)");
+#endif
+    }
+    else if (name == "anthropic") {
+#ifdef ENABLE_API_BACKENDS
+        backend = std::make_unique<AnthropicBackend>(context_size);
+#else
+        throw std::runtime_error("Anthropic backend not available (API backends not compiled in)");
+#endif
+    }
+    else if (name == "gemini") {
+#ifdef ENABLE_API_BACKENDS
+        backend = std::make_unique<GeminiBackend>(context_size);
+#else
+        throw std::runtime_error("Gemini backend not available (API backends not compiled in)");
 #endif
     }
     else {

@@ -10,6 +10,7 @@
 #include "backends/api.h"  // For ApiBackend::set_chars_per_token()
 
 #include <iostream>
+#include <sstream>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/select.h>
@@ -265,7 +266,7 @@ std::string CLI::get_input_line() {
 
 void CLI::show_prompt() {
 	if (interactive_mode) {
-		std::cerr << "\n\033[32m> \033[0m" << std::flush;
+		std::cerr << "\033[32m> \033[0m" << std::flush;
 	}
 }
 
@@ -278,19 +279,37 @@ void CLI::show_user_message(const std::string& msg) {
 }
 
 void CLI::show_assistant_message(const std::string& msg) {
-	if (interactive_mode) {
-		printf("\033[33m< %s\033[0m\n", msg.c_str());
-	} else {
-		printf("< %s\n", msg.c_str());
+	// Split message by lines - first line gets <, rest are indented
+	std::istringstream stream(msg);
+	std::string line;
+	bool first_line = true;
+
+	while (std::getline(stream, line)) {
+		if (first_line) {
+			// First line gets the < prefix
+			if (interactive_mode) {
+				printf("\033[33m< %s\033[0m\n", line.c_str());
+			} else {
+				printf("< %s\n", line.c_str());
+			}
+			first_line = false;
+		} else {
+			// Subsequent lines are indented
+			if (interactive_mode) {
+				printf("\033[33m  %s\033[0m\n", line.c_str());
+			} else {
+				printf("  %s\n", line.c_str());
+			}
+		}
 	}
 	fflush(stdout);
 }
 
 void CLI::show_tool_call(const std::string& name, const std::string& params) {
 	if (interactive_mode) {
-		printf("\033[33m< %s(%s)\033[0m\n", name.c_str(), params.c_str());
+		printf("\033[33m* %s(%s)\033[0m\n", name.c_str(), params.c_str());
 	} else {
-		printf("< %s(%s)\n", name.c_str(), params.c_str());
+		printf("* %s(%s)\n", name.c_str(), params.c_str());
 	}
 	fflush(stdout);
 }
@@ -308,10 +327,28 @@ void CLI::show_tool_result(const std::string& result) {
 		truncated = truncated.substr(0, 100) + "...";
 	}
 
-	if (interactive_mode) {
-		printf("\033[36m> %s\033[0m\n", truncated.c_str());
-	} else {
-		printf("> %s\n", truncated.c_str());
+	// Split by lines - first line gets >, rest are indented
+	std::istringstream stream(truncated);
+	std::string line;
+	bool first_line = true;
+
+	while (std::getline(stream, line)) {
+		if (first_line) {
+			// First line gets the > prefix
+			if (interactive_mode) {
+				printf("\033[36m> %s\033[0m\n", line.c_str());
+			} else {
+				printf("> %s\n", line.c_str());
+			}
+			first_line = false;
+		} else {
+			// Subsequent lines are indented
+			if (interactive_mode) {
+				printf("\033[36m  %s\033[0m\n", line.c_str());
+			} else {
+				printf("  %s\n", line.c_str());
+			}
+		}
 	}
 	fflush(stdout);
 }
@@ -552,6 +589,12 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 						params_str += param.first + "=" + value_str;
 					}
+
+					// Show assistant reasoning/content before tool call if present (only on first iteration)
+					if (tool_loop_iteration == 1 && !resp.content.empty()) {
+						cli.show_assistant_message(resp.content);
+					}
+
 					cli.show_tool_call(tool_name, params_str);
 
 					// Execute tool using utility function

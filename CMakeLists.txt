@@ -65,6 +65,8 @@ if(ENABLE_API_BACKENDS)
         backends/api.cpp
         backends/openai.cpp
         backends/ollama.cpp
+        backends/anthropic.cpp
+        backends/gemini.cpp
     )
 endif()
 

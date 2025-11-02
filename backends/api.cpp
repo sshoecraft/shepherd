@@ -7,6 +7,7 @@
 // ApiBackend implementation
 ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
 	http_client = std::make_unique<HttpClient>();
+	http_client->set_timeout(timeout_seconds);
 	LOG_DEBUG("ApiBackend created");
 }
 
@@ -130,6 +131,7 @@ Response ApiBackend::add_message(Session& session,
             // Add assistant response with exact completion tokens from API
             int assistant_tokens = (resp.completion_tokens > 0) ? resp.completion_tokens : estimate_message_tokens(resp.content);
             Message assistant_msg(Message::ASSISTANT, resp.content, assistant_tokens);
+            assistant_msg.tool_calls_json = resp.tool_calls_json;  // Persist tool calls for conversation history
             session.messages.push_back(assistant_msg);
 
             // Track last assistant message for context preservation
@@ -263,17 +265,25 @@ void ApiBackend::calibrate_token_counts(Session& session) {
         LOG_DEBUG("Sending calibration probe (system + tools + dot)...");
         HttpResponse response = http_client->post(endpoint, request.dump(), headers);
 
-        if (!response.is_success()) {
-            LOG_WARN("Calibration probe failed: " + response.error_message + ", using estimates");
+        // Parse response using backend-specific parser
+        Response parsed = parse_http_response(response);
+
+        if (!parsed.success) {
+            // Check for authentication errors - these should NOT be silently caught
+            if (response.status_code == 401 || response.status_code == 403 ||
+                parsed.error.find("authentication") != std::string::npos ||
+                parsed.error.find("invalid x-api-key") != std::string::npos ||
+                parsed.error.find("unauthorized") != std::string::npos) {
+                LOG_ERROR("Authentication failed: " + parsed.error);
+                throw BackendError("Authentication failed: " + parsed.error);
+            }
+
+            LOG_WARN("Calibration probe failed: " + parsed.error + ", using estimates");
             throw std::runtime_error("Calibration probe failed");
         }
 
-        // Parse response to get prompt tokens
-        nlohmann::json resp = nlohmann::json::parse(response.body);
-        int probe_tokens = 0;
-        if (resp.contains("usage") && resp["usage"].contains("prompt_tokens")) {
-            probe_tokens = resp["usage"]["prompt_tokens"];
-        }
+        // Use prompt_tokens from parsed response (works for all backends)
+        int probe_tokens = parsed.prompt_tokens;
 
         // Set baseline: probe includes system + tools + ".", but we don't store the dot or response
         // So baseline should be system + tools only (minus the dot)
@@ -286,9 +296,12 @@ void ApiBackend::calibrate_token_counts(Session& session) {
 
         LOG_INFO("Calibration complete - baseline: " + std::to_string(session.last_prompt_tokens) + " tokens");
 
+    } catch (const BackendError& e) {
+        // Re-throw authentication and other critical errors - don't catch these
+        throw;
     } catch (const std::exception& e) {
         LOG_ERROR("Calibration failed: " + std::string(e.what()));
-        // Fall back to estimates
+        // Fall back to estimates for non-critical errors
         session.system_message_tokens = estimate_message_tokens(session.system_message);
         // Note: system_message_tokens includes tools estimate
         session.last_prompt_tokens = session.system_message_tokens;

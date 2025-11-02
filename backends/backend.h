@@ -21,6 +21,7 @@ struct Response {
     bool success = true;                             // Backward compat: false if error occurred
     std::string content;                             // Assistant's text response
     std::vector<ToolParser::ToolCall> tool_calls;   // Parsed tool calls (if any)
+    std::string tool_calls_json;                     // Raw tool_calls JSON for persistence
     int prompt_tokens = 0;                           // Tokens used in prompt
     int completion_tokens = 0;                       // Tokens generated
     std::string finish_reason;                       // "stop", "tool_calls", "length", "error"

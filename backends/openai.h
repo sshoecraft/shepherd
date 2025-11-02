@@ -2,6 +2,7 @@
 #pragma once
 
 #include "api.h"
+#include "models.h"
 #include <memory>
 #include "nlohmann/json.hpp"
 #include "http_client.h"
@@ -11,7 +12,8 @@ class OpenAIBackend : public ApiBackend {
 public:
     std::string api_endpoint = "https://api.openai.com/v1/chat/completions";
     std::string api_key;
-    std::string model_name;
+    ModelConfig model_config;
+    // model_name is inherited from Backend base class
 
     explicit OpenAIBackend(size_t context_size);
     ~OpenAIBackend() override;
@@ -36,15 +38,13 @@ public:
 	// Override initialize to add OpenAI-specific setup
 	void initialize(Session& session) override;
 
+	// Override query_model_context_size to use Models database
+	size_t query_model_context_size(const std::string& model_name) override;
+
 private:
 	/// @brief Query available model from OpenAI API server
 	/// @return Model name from server, or empty string if failed
 	std::string query_available_model();
-
-	/// @brief Query model info from OpenAI API to get context size
-	/// @param model_name Model name to query
-	/// @return Context size in tokens, or 0 if failed
-	size_t query_model_context_size(const std::string& model_name);
 
 	/// @brief Make HTTP GET request to OpenAI API
 	/// @param endpoint API endpoint (e.g., "/models")

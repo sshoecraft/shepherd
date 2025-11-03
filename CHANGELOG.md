@@ -18,6 +18,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated needs_eviction() to reserve space for completion tokens before evicting messages
 - Enhanced max_tokens calculation to use desired completion size based on context window
 
+## [2.2.6] - 2025-11-03
+
+### Changed
+- Remove arbitrary max tool iterations limit
+
+## [2.2.5] - 2025-11-03
+
+### Fixed
+- Fix KV cache eviction to calculate positions before removing ranges
+
+## [2.2.4] - 2025-11-03
+
+### Fixed
+- Fix eviction to support non-contiguous message ranges
+
+## [2.2.3] - 2025-11-03
+
+### Added
+- Add context-aware truncation scaling for user input and tool results
+
+## [2.2.2] - 2025-11-02
+
+### Fixed
+- Fix tool call parsing and restore think block filtering
+
+## [2.2.1] - 2025-11-02
+
+### Added
+- Add --gpu-layers command line option
+
+## [2.2.0] - 2025-11-02
+
+### Added
+- Add API Tools system for multi-model collaboration
+
 ## [2.1.0] - 2025-11-02
 
 ### Added

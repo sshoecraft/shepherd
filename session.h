@@ -105,3 +105,19 @@ private:
     /// @brief Get available tokens (may reserve space for response)
     int get_available_tokens() const;
 };
+
+/// @brief Calculate truncation scale factor based on context size
+/// @param context_size Total context window size in tokens
+/// @return Scale factor between 0.33 and 0.6 for truncating user input and tool results
+/// @details Larger contexts get larger percentages to allow more generous limits
+///          while still preserving space for responses:
+///          - 8k context  → 35.7% (allows ~1,250 tokens)
+///          - 16k context → 38.4% (allows ~4,416 tokens)
+///          - 32k context → 43.8% (allows ~12,045 tokens)
+///          - 64k context → 54.6% (allows ~32,487 tokens)
+inline double calculate_truncation_scale(int context_size) {
+    // Linear scaling: larger contexts get more generous limits
+    double scale = 0.33 + (context_size / 80000.0) * 0.27;
+    // Clamp between 33% and 60%
+    return std::max(0.33, std::min(0.6, scale));
+}

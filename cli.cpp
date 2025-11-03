@@ -440,11 +440,14 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 			user_input = utf8_sanitizer::strip_control_characters(user_input);
 
 			// Check if input is too large for context
-			int max_user_input_tokens = backend->context_size - session.system_message_tokens - 1024; // Reserve 1024 for response
+			// Use scaling function to determine max user input size based on context window
+			double scale = calculate_truncation_scale(backend->context_size);
+			int available = backend->context_size - session.system_message_tokens;
+			int max_user_input_tokens = available * scale;
 			int input_tokens = backend->count_message_tokens(Message::USER, user_input, "", "");
 
 			if (input_tokens > max_user_input_tokens) {
-				LOG_WARN("User input too large (" + std::to_string(input_tokens) + " tokens), truncating to fit context");
+				LOG_DEBUG("User input too large (" + std::to_string(input_tokens) + " tokens), truncating to fit context");
 
 				// Truncate user input to fit in available space
 				std::string truncation_notice = "\n\n[INPUT TRUNCATED: Too large for context window]";
@@ -631,8 +634,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 						reserved += session.last_assistant_message_tokens;
 					}
 
-					// Calculate max tool result space (session.cpp will reserve completion space)
-					int max_tool_result_tokens = backend->context_size - reserved;
+					// Calculate max tool result space using scaling function
+					// This ensures we leave enough room for the model's response
+					double scale = calculate_truncation_scale(backend->context_size);
+					int max_tool_result_tokens = (backend->context_size - reserved) * scale;
 
 					// If user set a truncate limit (> 0), use that instead
 					if (config->truncate_limit > 0 && config->truncate_limit < max_tool_result_tokens) {
@@ -699,7 +704,7 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 									dprintf(1,"NEW tool_result_tokens: %d\n", tool_result_tokens);
 							}
 
-							LOG_WARN("Truncated large tool result from " + tool_name + " (" +
+							LOG_DEBUG("Truncated large tool result from " + tool_name + " (" +
 									std::to_string(original_line_count) + " lines / " +
 									std::to_string(orig_tool_result_tokens) + " tokens -> " +
 									std::to_string(std::count(result_content.begin(), result_content.end(), '\n')) + " lines / " +
@@ -766,7 +771,7 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 								// Recalculate tokens for the newly truncated result
 								tool_result_tokens = backend->count_message_tokens(Message::TOOL, truncated_result, tool_name, tool_call_id);
 
-								LOG_WARN("Re-truncated tool result: " + std::to_string(result_content.length()) +
+								LOG_DEBUG("Re-truncated tool result: " + std::to_string(result_content.length()) +
 										" chars -> " + std::to_string(truncated_result.length()) + " chars, " +
 										std::to_string(tool_result_tokens) + " estimated tokens");
 

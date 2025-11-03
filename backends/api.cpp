@@ -158,9 +158,9 @@ Response ApiBackend::add_message(Session& session,
 
         if (tokens_to_evict > 0) {
             // Calculate which messages to evict using Session's eviction logic
-            auto [start_idx, end_idx] = session.calculate_messages_to_evict(tokens_to_evict);
+            auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
 
-            if (start_idx == -1) {
+            if (ranges.empty()) {
                 Response err_resp;
                 err_resp.success = false;
                 err_resp.code = Response::CONTEXT_FULL;
@@ -170,7 +170,7 @@ Response ApiBackend::add_message(Session& session,
             }
 
             // Evict messages using Session's eviction method
-            if (!session.evict_messages(start_idx, end_idx)) {
+            if (!session.evict_messages(ranges)) {
                 Response err_resp;
                 err_resp.success = false;
                 err_resp.code = Response::ERROR;

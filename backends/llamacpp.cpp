@@ -240,58 +240,77 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     // Use current_session for eviction calculation
     // Cast away const for eviction operation
     Session* mutable_session = const_cast<Session*>(current_session);
-    auto [start_msg, end_msg] = mutable_session->calculate_messages_to_evict(tokens_needed);
+    auto ranges = mutable_session->calculate_messages_to_evict(tokens_needed);
 
-    if (start_msg == -1 || end_msg == -1) {
+    if (ranges.empty()) {
         LOG_ERROR("Cannot calculate messages to evict - no space can be freed");
         return 0;  // Signal failure: eviction cannot proceed
     }
 
-    // Calculate token positions for these messages
-    int start_pos = 0;
-    for (int i = 0; i < start_msg; i++) {
-        start_pos += current_session->messages[i].tokens;
+    // Process each range and evict from KV cache
+    // Must process in reverse order to avoid index shifting issues
+    int total_tokens_removed = 0;
+    int total_messages_evicted = 0;
+
+    for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
+        auto [start_msg, end_msg] = *it;
+
+        // Calculate token positions for this range
+        int start_pos = 0;
+        for (int i = 0; i < start_msg; i++) {
+            start_pos += current_session->messages[i].tokens;
+        }
+
+        int end_pos = start_pos;
+        for (int i = start_msg; i <= end_msg; i++) {
+            end_pos += current_session->messages[i].tokens;
+        }
+        end_pos--; // end_pos is inclusive
+
+        int tokens_in_range = end_pos - start_pos + 1;
+
+        dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]\n",
+                start_msg, end_msg, start_pos, end_pos);
+
+        LOG_INFO("Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
+                 "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]");
+
+        // Call llama.cpp API to evict from KV cache
+        llama_memory_seq_rm(mem, 0, start_pos, end_pos + 1); // +1 because llama uses exclusive end
+
+        // CRITICAL: Shift remaining tokens down to keep positions contiguous
+        llama_memory_seq_add(mem, 0, end_pos + 1, -1, -tokens_in_range);
+        LOG_DEBUG("Shifted KV cache positions >= " + std::to_string(end_pos + 1) + " down by " + std::to_string(tokens_in_range));
+
+        total_tokens_removed += tokens_in_range;
+        total_messages_evicted += (end_msg - start_msg + 1);
     }
 
-    int end_pos = start_pos;
-    for (int i = start_msg; i <= end_msg; i++) {
-        end_pos += current_session->messages[i].tokens;
-    }
-    end_pos--; // end_pos is inclusive
-
-    dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]\n",
-            start_msg, end_msg, start_pos, end_pos);
-
-    LOG_INFO("Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
-             "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]");
-
-    // Call llama.cpp API to evict from KV cache
-    llama_memory_seq_rm(mem, 0, start_pos, end_pos + 1); // +1 because llama uses exclusive end
-
-    int tokens_removed = end_pos - start_pos + 1;
-
-    // CRITICAL: Shift remaining tokens down to keep positions contiguous
-    llama_memory_seq_add(mem, 0, end_pos + 1, -1, -tokens_removed);
-    LOG_DEBUG("Shifted KV cache positions >= " + std::to_string(end_pos + 1) + " down by " + std::to_string(tokens_removed));
-
-    // Archive to RAG and remove messages from session
-    if (!mutable_session->evict_messages(start_msg, end_msg)) {
+    // Archive to RAG and remove messages from session (all ranges at once)
+    if (!mutable_session->evict_messages(ranges)) {
         LOG_ERROR("Failed to evict messages from session");
         return UINT32_MAX;
     }
 
-    int num_messages = end_msg - start_msg + 1;
-    LOG_DEBUG("Evicted " + std::to_string(num_messages) + " messages from cache");
-    LOG_INFO("Successfully evicted " + std::to_string(num_messages) + " messages (" +
-             std::to_string(tokens_removed) + " tokens) from KV cache");
+    LOG_DEBUG("Evicted " + std::to_string(total_messages_evicted) + " messages from cache");
+    LOG_INFO("Successfully evicted " + std::to_string(total_messages_evicted) + " messages (" +
+             std::to_string(total_tokens_removed) + " tokens) from KV cache");
 
     // KV cache is the source of truth - query actual state
     dprintf(2, "KV cache after eviction: %d tokens\n", get_context_token_count());
     log_token_state("After eviction");
 
-    // Return the new head position (where freed space begins) as required by callback API
-    LOG_DEBUG("Eviction complete - returning new head position: " + std::to_string(start_pos));
-    return static_cast<uint32_t>(start_pos);
+    // Return the new head position (where first freed space begins) as required by callback API
+    // Calculate position of first range
+    int first_range_pos = 0;
+    if (!ranges.empty()) {
+        auto [start_msg, end_msg] = ranges[0];
+        for (int i = 0; i < start_msg; i++) {
+            first_range_pos += current_session->messages[i].tokens;
+        }
+    }
+    LOG_DEBUG("Eviction complete - returning new head position: " + std::to_string(first_range_pos));
+    return static_cast<uint32_t>(first_range_pos);
 #else
     LOG_ERROR("llama.cpp not enabled");
     return UINT32_MAX;

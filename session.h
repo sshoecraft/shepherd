@@ -88,14 +88,14 @@ public:
 
     /// @brief Calculate which messages to evict using two-pass strategy
     /// @param tokens_needed Number of tokens to free
-    /// @return Pair of (start_index, end_index) to evict, or (-1, -1) if cannot evict enough
-    std::pair<int, int> calculate_messages_to_evict(int tokens_needed);
+    /// @return Vector of (start_index, end_index) ranges to evict, empty if cannot evict enough
+    ///         Each range is inclusive and non-contiguous to preserve protected messages
+    std::vector<std::pair<int, int>> calculate_messages_to_evict(int tokens_needed);
 
     /// @brief Actually remove messages from session
-    /// @param start_idx Starting index to evict (inclusive)
-    /// @param end_idx Ending index to evict (inclusive)
+    /// @param ranges Vector of (start_idx, end_idx) ranges to evict (inclusive)
     /// @return true if successful
-    bool evict_messages(int start_idx, int end_idx);
+    bool evict_messages(const std::vector<std::pair<int, int>>& ranges);
 
 private:
     // Helper methods for auto-eviction

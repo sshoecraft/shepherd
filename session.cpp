@@ -3,14 +3,14 @@
 #include "backends/backend.h"
 #include "rag.h"
 
-std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
+std::vector<std::pair<int, int>> Session::calculate_messages_to_evict(int tokens_needed) {
     // Two-pass eviction strategy:
     // PASS 1: Evict complete big-turns (USER → final ASSISTANT) - can archive to RAG
     // PASS 2: Evict mini-turns (ASSISTANT tool_call + TOOL result pairs) - just delete
+    // Returns vector of non-contiguous ranges to preserve protected messages
 
+    std::vector<std::pair<int, int>> ranges;
     int tokens_freed = 0;
-    int start_index = -1;
-    int end_index = -1;
 
     // Find last USER message - this is the current turn we're responding to
     int last_user_index = -1;
@@ -79,10 +79,7 @@ std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
 
         // Evict this complete turn (from USER through final ASSISTANT, including all mini-turns)
         tokens_freed += turn_tokens;
-        if (start_index == -1) {
-            start_index = turn_start;
-        }
-        end_index = final_assistant_index;
+        ranges.push_back({turn_start, final_assistant_index});
         LOG_INFO("Pass 1: Evicting big-turn [" + std::to_string(turn_start) + ", " +
                  std::to_string(final_assistant_index) + "] freeing " + std::to_string(turn_tokens) + " tokens");
     }
@@ -91,7 +88,7 @@ std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
     if (tokens_freed >= tokens_needed) {
         LOG_INFO("Pass 1 freed " + std::to_string(tokens_freed) + " tokens (needed " +
                  std::to_string(tokens_needed) + ")");
-        return {start_index, end_index};
+        return ranges;
     }
 
     // PASS 2: Evict mini-turns from current turn (ASSISTANT tool_call + TOOL result pairs)
@@ -118,10 +115,7 @@ std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
 
                 int pair_tokens = messages[i].tokens + messages[i + 1].tokens;
                 tokens_freed += pair_tokens;
-                if (start_index == -1) {
-                    start_index = i;
-                }
-                end_index = i + 1;
+                ranges.push_back({i, i + 1});
                 LOG_INFO("Pass 2: Evicting mini-turn [" + std::to_string(i) + ", " +
                         std::to_string(i + 1) + "] freeing " + std::to_string(pair_tokens) + " tokens");
                 i += 2; // Skip both messages
@@ -139,133 +133,172 @@ std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
                  ", freed " + std::to_string(tokens_freed));
     }
 
-    if (start_index == -1 || end_index == -1) {
+    if (ranges.empty()) {
         LOG_ERROR("No messages available for eviction");
-        return {-1, -1};
+        return {};
     }
 
     LOG_INFO("Eviction complete: freed " + std::to_string(tokens_freed) +
-             " tokens from range [" + std::to_string(start_index) + ", " +
-             std::to_string(end_index) + "]");
-    return {start_index, end_index};
+             " tokens from " + std::to_string(ranges.size()) + " ranges");
+    return ranges;
 }
 
-bool Session::evict_messages(int start_idx, int end_idx) {
-    if (start_idx < 0 || end_idx < 0 || start_idx > end_idx) {
-        LOG_ERROR("Invalid message indices for eviction: [" + std::to_string(start_idx) +
-                  ", " + std::to_string(end_idx) + "]");
+bool Session::evict_messages(const std::vector<std::pair<int, int>>& ranges) {
+    if (ranges.empty()) {
+        LOG_ERROR("No ranges specified for eviction");
         return false;
     }
 
-    if (static_cast<size_t>(end_idx) >= messages.size()) {
-        LOG_ERROR("End message index " + std::to_string(end_idx) +
-                  " out of range (have " + std::to_string(messages.size()) + " messages)");
-        return false;
+    // Validate all ranges first
+    for (const auto& [start_idx, end_idx] : ranges) {
+        if (start_idx < 0 || end_idx < 0 || start_idx > end_idx) {
+            LOG_ERROR("Invalid message indices for eviction: [" + std::to_string(start_idx) +
+                      ", " + std::to_string(end_idx) + "]");
+            return false;
+        }
+
+        if (static_cast<size_t>(end_idx) >= messages.size()) {
+            LOG_ERROR("End message index " + std::to_string(end_idx) +
+                      " out of range (have " + std::to_string(messages.size()) + " messages)");
+            return false;
+        }
     }
 
-    LOG_INFO("Evicting messages [" + std::to_string(start_idx) + ", " + std::to_string(end_idx) + "]");
+    LOG_INFO("Evicting " + std::to_string(ranges.size()) + " message range(s)");
 
     // Archive complete turns to RAG before evicting
-    // Iterate through evicted range to find USER → ASSISTANT pairs
-    for (int i = start_idx; i <= end_idx; ) {
-        // Find the start of a turn (a USER message)
-        if (messages[i].type != Message::USER) {
-            i++;
-            continue;
+    // Process all ranges to find USER → ASSISTANT pairs
+    for (const auto& [start_idx, end_idx] : ranges) {
+        for (int i = start_idx; i <= end_idx; ) {
+            // Find the start of a turn (a USER message)
+            if (messages[i].type != Message::USER) {
+                i++;
+                continue;
+            }
+
+            int turn_start_idx = i;
+            int final_assistant_idx = -1;
+            bool turn_contains_tool_call = false;
+
+            // Scan forward to find the end of this turn (within this range)
+            int j = i + 1;
+            for ( ; j <= end_idx; j++) {
+                if (messages[j].type == Message::TOOL) {
+                    turn_contains_tool_call = true;
+                }
+                if (messages[j].type == Message::ASSISTANT) {
+                    final_assistant_idx = j; // Keep track of the latest assistant response
+                }
+                // The turn ends if we hit the next USER message
+                if (messages[j].type == Message::USER) {
+                    break;
+                }
+            }
+
+            // If we found a valid USER -> ASSISTANT pair within the turn...
+            if (final_assistant_idx != -1) {
+                // ...and it doesn't contain a tool call, archive it.
+                if (!turn_contains_tool_call) {
+                    const std::string& user_question = messages[turn_start_idx].content;
+                    const std::string& final_answer = messages[final_assistant_idx].content;
+                    ConversationTurn turn(user_question, final_answer);
+                    RAGManager::archive_turn(turn);
+                    LOG_DEBUG("Archived USER question at index " + std::to_string(turn_start_idx) +
+                              " with final ASSISTANT answer at index " + std::to_string(final_assistant_idx));
+                } else {
+                    LOG_DEBUG("Skipped RAG archival for turn starting at index " + std::to_string(turn_start_idx) +
+                              " because it contains a tool call.");
+                }
+            }
+
+            // Continue scanning from where this turn ended
+            i = j;
         }
-
-        int turn_start_idx = i;
-        int final_assistant_idx = -1;
-        bool turn_contains_tool_call = false;
-
-        // Scan forward to find the end of this turn
-        int j = i + 1;
-        for ( ; j <= end_idx; j++) {
-            if (messages[j].type == Message::TOOL) {
-                turn_contains_tool_call = true;
-            }
-            if (messages[j].type == Message::ASSISTANT) {
-                final_assistant_idx = j; // Keep track of the latest assistant response
-            }
-            // The turn ends if we hit the next USER message
-            if (messages[j].type == Message::USER) {
-                break;
-            }
-        }
-
-        // If we found a valid USER -> ASSISTANT pair within the turn...
-        if (final_assistant_idx != -1) {
-            // ...and it doesn't contain a tool call, archive it.
-            if (!turn_contains_tool_call) {
-                const std::string& user_question = messages[turn_start_idx].content;
-                const std::string& final_answer = messages[final_assistant_idx].content;
-                ConversationTurn turn(user_question, final_answer);
-                RAGManager::archive_turn(turn);
-                LOG_DEBUG("Archived USER question at index " + std::to_string(turn_start_idx) +
-                          " with final ASSISTANT answer at index " + std::to_string(final_assistant_idx));
-            } else {
-                LOG_DEBUG("Skipped RAG archival for turn starting at index " + std::to_string(turn_start_idx) +
-                          " because it contains a tool call.");
-            }
-        }
-
-        // Continue scanning from where this turn ended
-        i = j;
     }
 
-    // Calculate evicted tokens for logging
-    int evicted_tokens = 0;
-    for (int i = start_idx; i <= end_idx; i++) {
-        evicted_tokens += messages[i].tokens;
+    // Calculate total evicted tokens and messages
+    int total_evicted_tokens = 0;
+    int total_evicted_messages = 0;
+    for (const auto& [start_idx, end_idx] : ranges) {
+        for (int i = start_idx; i <= end_idx; i++) {
+            total_evicted_tokens += messages[i].tokens;
+        }
+        total_evicted_messages += (end_idx - start_idx + 1);
     }
 
-    // Erase evicted messages from the deque
-    messages.erase(messages.begin() + start_idx,
-                   messages.begin() + end_idx + 1);
+    // Erase messages in reverse order to avoid index shifting
+    for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
+        auto [start_idx, end_idx] = *it;
+        LOG_DEBUG("Erasing range [" + std::to_string(start_idx) + ", " + std::to_string(end_idx) + "]");
+        messages.erase(messages.begin() + start_idx, messages.begin() + end_idx + 1);
+    }
 
     // Update tracked message indices to account for eviction
-    int num_evicted = end_idx - start_idx + 1;
+    // For each tracked index, calculate how many messages before it were evicted
+    if (last_user_message_index >= 0) {
+        bool was_evicted = false;
+        int offset = 0;
 
-    // If last_user_message was evicted, reset it
-    if (last_user_message_index >= start_idx && last_user_message_index <= end_idx) {
-        LOG_DEBUG("last_user_message_index " + std::to_string(last_user_message_index) +
-                  " was evicted, resetting");
-        last_user_message_index = -1;
-        last_user_message_tokens = 0;
-    }
-    // If last_user_message is after evicted range, adjust its index
-    else if (last_user_message_index > end_idx) {
-        int old_idx = last_user_message_index;
-        last_user_message_index -= num_evicted;
-        LOG_DEBUG("Adjusted last_user_message_index from " + std::to_string(old_idx) +
-                  " to " + std::to_string(last_user_message_index));
+        for (const auto& [start_idx, end_idx] : ranges) {
+            if (last_user_message_index >= start_idx && last_user_message_index <= end_idx) {
+                // This index was evicted
+                LOG_DEBUG("last_user_message_index " + std::to_string(last_user_message_index) +
+                          " was evicted, resetting");
+                last_user_message_index = -1;
+                last_user_message_tokens = 0;
+                was_evicted = true;
+                break;
+            } else if (last_user_message_index > end_idx) {
+                // This range was before the index, so count it in offset
+                offset += (end_idx - start_idx + 1);
+            }
+        }
+
+        if (!was_evicted && offset > 0) {
+            int old_idx = last_user_message_index;
+            last_user_message_index -= offset;
+            LOG_DEBUG("Adjusted last_user_message_index from " + std::to_string(old_idx) +
+                      " to " + std::to_string(last_user_message_index));
+        }
     }
 
-    // If last_assistant_message was evicted, reset it
-    if (last_assistant_message_index >= start_idx && last_assistant_message_index <= end_idx) {
-        LOG_DEBUG("last_assistant_message_index " + std::to_string(last_assistant_message_index) +
-                  " was evicted, resetting");
-        last_assistant_message_index = -1;
-        last_assistant_message_tokens = 0;
-    }
-    // If last_assistant_message is after evicted range, adjust its index
-    else if (last_assistant_message_index > end_idx) {
-        int old_idx = last_assistant_message_index;
-        last_assistant_message_index -= num_evicted;
-        LOG_DEBUG("Adjusted last_assistant_message_index from " + std::to_string(old_idx) +
-                  " to " + std::to_string(last_assistant_message_index));
+    if (last_assistant_message_index >= 0) {
+        bool was_evicted = false;
+        int offset = 0;
+
+        for (const auto& [start_idx, end_idx] : ranges) {
+            if (last_assistant_message_index >= start_idx && last_assistant_message_index <= end_idx) {
+                // This index was evicted
+                LOG_DEBUG("last_assistant_message_index " + std::to_string(last_assistant_message_index) +
+                          " was evicted, resetting");
+                last_assistant_message_index = -1;
+                last_assistant_message_tokens = 0;
+                was_evicted = true;
+                break;
+            } else if (last_assistant_message_index > end_idx) {
+                // This range was before the index, so count it in offset
+                offset += (end_idx - start_idx + 1);
+            }
+        }
+
+        if (!was_evicted && offset > 0) {
+            int old_idx = last_assistant_message_index;
+            last_assistant_message_index -= offset;
+            LOG_DEBUG("Adjusted last_assistant_message_index from " + std::to_string(old_idx) +
+                      " to " + std::to_string(last_assistant_message_index));
+        }
     }
 
     // Update total token count from API
-    total_tokens -= evicted_tokens;
+    total_tokens -= total_evicted_tokens;
 
     // Update last_prompt_tokens baseline to reflect eviction
     // This keeps the delta calculation accurate for API backends
-    last_prompt_tokens -= evicted_tokens;
+    last_prompt_tokens -= total_evicted_tokens;
 
-    int num_messages = end_idx - start_idx + 1;
-    LOG_INFO("Successfully evicted " + std::to_string(num_messages) +
-             " messages, freed " + std::to_string(evicted_tokens) + " tokens");
+    LOG_INFO("Successfully evicted " + std::to_string(total_evicted_messages) +
+             " messages from " + std::to_string(ranges.size()) + " ranges, freed " +
+             std::to_string(total_evicted_tokens) + " tokens");
 
     return true;
 }
@@ -332,9 +365,9 @@ Response Session::add_message(Message::Type type,
                      ", max=" + std::to_string(max_tokens));
 
             // Calculate which messages to evict
-            auto [start_msg, end_msg] = calculate_messages_to_evict(tokens_over);
+            auto ranges = calculate_messages_to_evict(tokens_over);
 
-            if (start_msg == -1 || end_msg == -1) {
+            if (ranges.empty()) {
                 // Cannot evict enough space - return error
                 Response resp;
                 resp.success = false;
@@ -347,7 +380,7 @@ Response Session::add_message(Message::Type type,
             }
 
             // Perform eviction
-            if (!evict_messages(start_msg, end_msg)) {
+            if (!evict_messages(ranges)) {
                 Response resp;
                 resp.success = false;
                 resp.error = "Eviction failed unexpectedly when trying to free space for message";

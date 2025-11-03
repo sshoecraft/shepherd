@@ -15,6 +15,7 @@ GeminiBackend::GeminiBackend(size_t context_size)
 
     // Detect model configuration from Models database
     model_config = Models::detect_from_api_model("gemini", model_name);
+    max_output_tokens = model_config.max_output_tokens;
     LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
               ", max_output=" + std::to_string(model_config.max_output_tokens) +
               ", param_name=" + model_config.max_tokens_param_name);
@@ -50,6 +51,7 @@ void GeminiBackend::initialize(Session& session) {
         model_name = "gemini-2.0-flash-exp";
         LOG_INFO("No model specified, using default: " + model_name);
         model_config = Models::detect_from_api_model("gemini", model_name);
+    max_output_tokens = model_config.max_output_tokens;
     }
 
     // Set context size from model config if not already set

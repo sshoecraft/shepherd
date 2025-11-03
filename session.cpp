@@ -325,6 +325,13 @@ Response Session::add_message(Message::Type type,
 
     // Calculate max_tokens if not provided
     if (max_tokens == 0 && backend && backend->context_size > 0) {
+        // Calculate desired completion tokens based on context size and model limits
+        // This scales from ~1,374 tokens (8K context) to 4,096 (32K+ context)
+        int desired_completion = calculate_desired_completion_tokens(
+            backend->context_size,
+            backend->max_output_tokens
+        );
+
         // Reserve space for critical context that must be preserved:
         // - System message (always needed for model behavior)
         // - Last user message (the question that triggered this response)
@@ -342,13 +349,20 @@ Response Session::add_message(Message::Type type,
         int available = backend->context_size - reserved - prompt_tokens;
         max_tokens = (available > 0) ? available : 0;
 
+        // Cap max_tokens at desired completion size to avoid MAX_TOKENS_TOO_HIGH errors
+        // This ensures we leave room for the actual prompt which may be larger than estimated
+        if (max_tokens > desired_completion) {
+            max_tokens = desired_completion;
+        }
+
         LOG_DEBUG("Calculated max_tokens: " + std::to_string(max_tokens) +
                  " (context=" + std::to_string(backend->context_size) +
                  ", reserved=" + std::to_string(reserved) +
                  " [system=" + std::to_string(system_message_tokens) +
                  ", last_user=" + std::to_string(last_user_message_tokens) +
                  ", last_asst=" + std::to_string(last_assistant_message_tokens) + "]" +
-                 ", prompt=" + std::to_string(prompt_tokens) + ")");
+                 ", prompt=" + std::to_string(prompt_tokens) +
+                 ", desired_completion=" + std::to_string(desired_completion) + ")");
     }
 
     // Check if we need to evict BEFORE sending to backend (only if auto-eviction is enabled)
@@ -419,10 +433,18 @@ bool Session::needs_eviction(int additional_tokens) const {
     if (!backend || backend->context_size == 0) {
         return false;  // No limit set
     }
-    return (total_tokens + additional_tokens) >= get_available_tokens();
+
+    // Calculate desired completion token space to reserve
+    int desired_completion = calculate_desired_completion_tokens(
+        backend->context_size,
+        backend->max_output_tokens
+    );
+
+    // Check if new message + completion would exceed available space
+    return (total_tokens + additional_tokens + desired_completion) >= get_available_tokens();
 }
 
 int Session::get_available_tokens() const {
     if (!backend) return 0;
-    return backend->context_size;  // Could reserve space for response in future
+    return backend->context_size;
 }

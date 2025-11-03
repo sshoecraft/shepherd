@@ -18,6 +18,7 @@ AnthropicBackend::AnthropicBackend(size_t context_size)
 
     // Detect model configuration from Models database
     model_config = Models::detect_from_api_model("anthropic", model_name);
+    max_output_tokens = model_config.max_output_tokens;
     LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
               ", max_output=" + std::to_string(model_config.max_output_tokens) +
               ", param_name=" + model_config.max_tokens_param_name);
@@ -53,6 +54,7 @@ void AnthropicBackend::initialize(Session& session) {
         model_name = "claude-sonnet-4-5";
         LOG_INFO("No model specified, using default: " + model_name);
         model_config = Models::detect_from_api_model("anthropic", model_name);
+    max_output_tokens = model_config.max_output_tokens;
     }
 
     // Set API version

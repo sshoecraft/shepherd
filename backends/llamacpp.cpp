@@ -1592,6 +1592,7 @@ void LlamaCppBackend::initialize(Session& session) {
 
     // Detect model family
     model_config = Models::detect_from_chat_template(chat_template_text, model_path);
+    max_output_tokens = model_config.max_output_tokens;
     LOG_INFO("Model configuration: family=" + std::to_string(static_cast<int>(model_config.family)) +
              ", version=" + model_config.version +
              ", tool_result_role=" + model_config.tool_result_role +

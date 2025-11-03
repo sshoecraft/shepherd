@@ -14,6 +14,7 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
     // If model is empty, it will be auto-detected in initialize() and config will be set there
     if (!model_name.empty()) {
         model_config = Models::detect_from_api_model("openai", model_name);
+        max_output_tokens = model_config.max_output_tokens;
         LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
                   ", max_output=" + std::to_string(model_config.max_output_tokens) +
                   ", param_name=" + model_config.max_tokens_param_name);
@@ -247,6 +248,7 @@ void OpenAIBackend::initialize(Session& session) {
             // Save context_window from server query before detect_from_api_model overwrites it
             size_t server_context = model_config.context_window;
             model_config = Models::detect_from_api_model("openai", model_name);
+            max_output_tokens = model_config.max_output_tokens;
 
             // Restore server-reported context if it was found
             if (server_context > 0) {

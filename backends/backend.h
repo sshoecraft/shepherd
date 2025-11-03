@@ -84,6 +84,7 @@ public:
     std::string backend_name;
     std::string model_name;
     size_t context_size;
+    int max_output_tokens = 0;  // Maximum tokens for completion (0 = no limit)
     int last_prompt_tokens;
     int last_completion_tokens;
     int context_token_count;

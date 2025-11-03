@@ -121,3 +121,28 @@ inline double calculate_truncation_scale(int context_size) {
     // Clamp between 33% and 60%
     return std::max(0.33, std::min(0.6, scale));
 }
+
+/// @brief Calculate desired completion tokens to reserve for assistant responses
+/// @param context_size Total context window size in tokens
+/// @param max_output_tokens Model's maximum output token limit (0 = no limit)
+/// @return Number of tokens to reserve for completion, capped by model's max_output_tokens
+/// @details Uses calculate_truncation_scale() on half the context size to determine
+///          a reasonable completion size that scales with context. Result is capped
+///          at the model's max_output_tokens limit.
+///          - 8K context  → 1,374 tokens
+///          - 16K context → 2,856 tokens
+///          - 32K+ context → 4,096 tokens (capped by model max_output_tokens)
+inline int calculate_desired_completion_tokens(int context_size, int max_output_tokens) {
+    if (context_size == 0) return 0;
+
+    // Use half the context size to calculate a more conservative scale
+    double scale = calculate_truncation_scale(context_size / 2);
+    int desired = static_cast<int>((context_size / 2) * scale);
+
+    // Cap at model's max_output_tokens if specified
+    if (max_output_tokens > 0 && desired > max_output_tokens) {
+        return max_output_tokens;
+    }
+
+    return desired;
+}

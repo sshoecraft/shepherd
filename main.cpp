@@ -83,6 +83,7 @@ static void print_usage(int, char** argv) {
 	printf("	--api-key		   API key for cloud backends\n");
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
+	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
 	printf("	--models-file FILE Path to models database JSON file (default: ~/.shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.shepherd/memory.db)\n");
@@ -730,6 +731,7 @@ int main(int argc, char** argv) {
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
+	int gpu_layers_override = -999;  // -999 means not specified, -1=auto/all, 0=CPU only, >0=specific
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
@@ -741,6 +743,7 @@ int main(int argc, char** argv) {
 		{"api-key", required_argument, 0, 1003},
 		{"api-base", required_argument, 0, 1004},
 		{"context-size", required_argument, 0, 1000},
+		{"gpu-layers", required_argument, 0, 1025},
 		{"memory-db", required_argument, 0, 1023},
 		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
@@ -794,6 +797,9 @@ int main(int argc, char** argv) {
 					printf("Error: context-size cannot be negative (use 0 for model's full context)\n");
 					return 1;
 				}
+				break;
+			case 1025: // --gpu-layers
+				gpu_layers_override = std::atoi(optarg);
 				break;
 			case 1005: // --nomcp
 				no_mcp = true;
@@ -880,6 +886,15 @@ int main(int argc, char** argv) {
 	}
 	if (truncate_limit > 0) {
 		config->truncate_limit = truncate_limit;
+	}
+	if (gpu_layers_override != -999) {  // -999 means not specified
+		// Update llamacpp backend config with gpu_layers
+		json backend_config;
+		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
+			backend_config = json::parse(config->backend_configs["llamacpp"]);
+		}
+		backend_config["gpu_layers"] = gpu_layers_override;
+		config->backend_configs["llamacpp"] = backend_config.dump();
 	}
 
 	// Validate configuration (skip model path check if overridden)

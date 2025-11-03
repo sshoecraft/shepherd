@@ -1,1 +1,1 @@
-#define SHEPHERD_VERSION "2.2.0"
+#define SHEPHERD_VERSION "2.2.1"

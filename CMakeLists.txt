@@ -1,12 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(shepherd VERSION 2.2.2 LANGUAGES CXX)
+project(shepherd LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Generate version header from template
-configure_file(version.h.in version.h @ONLY)
 
 # Options
 option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
@@ -89,7 +86,6 @@ add_executable(shepherd ${SHEPHERD_SOURCES})
 # Include directories
 target_include_directories(shepherd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}  # For generated version.h
     ${SQLITE3_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}

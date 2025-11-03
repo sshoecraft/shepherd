@@ -2,16 +2,16 @@
 
 **Advanced Multi-Backend LLM System with Intelligent Memory Management**
 
-Shepherd is a production-grade C++ LLM inference system supporting both local models (llama.cpp, TensorRT-LLM) and cloud APIs (OpenAI, Anthropic, Gemini, Grok, Ollama). It features sophisticated KV cache eviction policies, retrieval-augmented generation (RAG), hierarchical memory management, and comprehensive tool/function calling capabilities.
+Shepherd is a production-grade C++ LLM inference system supporting both local models (llama.cpp, TensorRT-LLM) and cloud APIs (OpenAI, Anthropic, Gemini, Ollama). It features sophisticated KV cache eviction policies, retrieval-augmented generation (RAG), hierarchical memory management, and comprehensive tool/function calling capabilities.
 
 ---
 
 ## Key Features
 
 ### 🔄 Multi-Backend Architecture
-- **8 Backend Implementations**: Seamlessly switch between local inference and cloud APIs
+- **7 Backend Implementations**: Seamlessly switch between local inference and cloud APIs
   - **Local**: llama.cpp (CPU/GPU), TensorRT-LLM (NVIDIA optimized)
-  - **Cloud**: OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Ollama
+  - **Cloud**: OpenAI, Anthropic Claude, Google Gemini, Ollama
 - **Unified Interface**: Single API across all backends with automatic fallback
 - **Dynamic Model Selection**: Runtime backend selection based on model availability
 
@@ -105,7 +105,6 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 | **OpenAI** | GPT-4, GPT-3.5-Turbo | 128K-200K | ✓ | Function calling |
 | **Anthropic** | Claude 3/3.5 (Opus, Sonnet, Haiku) | 200K | ✓ | Separate system field |
 | **Gemini** | Gemini Pro, 1.5 Pro/Flash, 2.0 | 32K-2M | ✓ | SentencePiece tokens |
-| **Grok** | Grok-1, Grok-2 | 128K | ✓ | OpenAI-compatible |
 | **Ollama** | Any Ollama model | 8K-128K | ✓ | Local/containerized |
 
 ---
@@ -130,11 +129,11 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
         │              │              │
 ┌───────v────┐  ┌──────v─────┐  ┌────v────────┐
 │ LlamaCpp   │  │ TensorRT   │  │ API Backends│
-│ Backend    │  │ Backend    │  │ (5 types)   │
+│ Backend    │  │ Backend    │  │ (4 types)   │
 └─────┬──────┘  └──────┬─────┘  └────┬────────┘
       │                │              │
 ┌─────v────────────────v──────────────v────────┐
-│           Context Manager (Base)             │
+│                   Session                    │
 │  • Message storage and token tracking        │
 │  • Eviction calculation and archival         │
 │  • Context utilization monitoring            │

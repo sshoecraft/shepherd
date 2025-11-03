@@ -5,6 +5,16 @@ All notable changes to Shepherd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.8] - 2025-11-03
+
+### Fixed
+- Fix auto_evict flag not being set correctly for API backends
+- auto_evict now set AFTER backend initialization when context_size is finalized
+- Fix eviction calculation to include desired_completion tokens in tokens_over calculation
+- Fix max_tokens recalculation after eviction to cap at desired_completion
+- Remove redundant backend-level max_tokens capping that interfered with session calculations
+- Added debug logging to needs_eviction() for better diagnostics
+
 ## [2.2.7] - 2025-11-03
 
 ### Fixed

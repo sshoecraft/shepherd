@@ -232,15 +232,9 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
 
     // Set generation config
     json gen_config;
+    // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
     if (max_tokens > 0) {
-        // Cap at model's max_output_tokens if specified
-        int capped_tokens = max_tokens;
-        if (model_config.max_output_tokens > 0 && max_tokens > model_config.max_output_tokens) {
-            capped_tokens = model_config.max_output_tokens;
-            LOG_DEBUG("Capping max_tokens from " + std::to_string(max_tokens) +
-                     " to model's max_output_tokens: " + std::to_string(capped_tokens));
-        }
-        gen_config["maxOutputTokens"] = capped_tokens;
+        gen_config["maxOutputTokens"] = max_tokens;
     }
     if (!gen_config.empty()) {
         request["generationConfig"] = gen_config;
@@ -340,15 +334,9 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
 
     // Set generation config
     json gen_config;
+    // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
     if (max_tokens > 0) {
-        // Cap at model's max_output_tokens if specified
-        int capped_tokens = max_tokens;
-        if (model_config.max_output_tokens > 0 && max_tokens > model_config.max_output_tokens) {
-            capped_tokens = model_config.max_output_tokens;
-            LOG_DEBUG("Capping max_tokens from " + std::to_string(max_tokens) +
-                     " to model's max_output_tokens: " + std::to_string(capped_tokens));
-        }
-        gen_config["maxOutputTokens"] = capped_tokens;
+        gen_config["maxOutputTokens"] = max_tokens;
     }
     if (!gen_config.empty()) {
         request["generationConfig"] = gen_config;

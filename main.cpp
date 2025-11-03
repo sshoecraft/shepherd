@@ -1052,10 +1052,6 @@ int main(int argc, char** argv) {
 		Session session;
 		session.system_message = config->system_message;
 
-		// Enable auto-eviction for API backends when context size is specified
-		// Local backends (llamacpp) handle eviction through reactive callbacks
-		session.auto_evict = (context_size > 0 && !backend->is_local);
-
 		// Initialize tools system (skip in server mode - tools handled by client)
 		if (!g_server_mode) {
 			LOG_INFO("Initializing tools system...");
@@ -1203,6 +1199,22 @@ int main(int argc, char** argv) {
 		LOG_DEBUG("Initializing backend...");
 		backend->initialize(session);
 		session.backend = backend.get();
+
+		// Calculate desired completion tokens once (used throughout session lifetime)
+		// Must be calculated AFTER backend initialization when context_size is finalized
+		session.desired_completion_tokens = calculate_desired_completion_tokens(
+			backend->context_size,
+			backend->max_output_tokens
+		);
+
+		// Enable auto-eviction for API backends when context size is specified
+		// Local backends (llamacpp) handle eviction through reactive callbacks
+		// Must be set AFTER initialization when backend->context_size is finalized
+		session.auto_evict = (backend->context_size > 0 && !backend->is_local);
+		if (session.auto_evict) {
+			LOG_INFO("Auto-eviction enabled (context_size=" + std::to_string(backend->context_size) +
+			         ", desired_completion=" + std::to_string(session.desired_completion_tokens) + ")");
+		}
 
 		// ============================================================================
 

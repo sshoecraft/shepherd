@@ -38,6 +38,11 @@ public:
     // Set to true when user's context_size < backend's API context size
     bool auto_evict = false;
 
+    // Desired completion tokens - calculated once during initialization
+    // Scales from ~1,374 tokens (8K context) to 4,096 (32K+ context)
+    // Used for max_tokens calculation and eviction decisions
+    int desired_completion_tokens = 0;
+
     /// Tool definitions available in this session
     /// This is the single source of truth for tools in a session
     /// - CLI mode: populated from ToolRegistry at startup

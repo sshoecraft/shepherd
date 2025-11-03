@@ -207,15 +207,10 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
     request["model"] = model_name;
 
     // Cap max_tokens at model's max_output_tokens limit (Anthropic-specific constraint)
+    // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
     int actual_max_tokens = max_tokens;
     if (actual_max_tokens <= 0) {
         actual_max_tokens = 1024;  // Sensible default
-    }
-
-    if (model_config.max_output_tokens > 0 && actual_max_tokens > model_config.max_output_tokens) {
-        LOG_DEBUG("Capping max_tokens from " + std::to_string(actual_max_tokens) +
-                 " to model's max_output_tokens limit: " + std::to_string(model_config.max_output_tokens));
-        actual_max_tokens = model_config.max_output_tokens;
     }
 
     request["max_tokens"] = actual_max_tokens;
@@ -306,15 +301,10 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
     request["model"] = model_name;
 
     // Cap max_tokens at model's max_output_tokens limit (Anthropic-specific constraint)
+    // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
     int actual_max_tokens = max_tokens;
     if (actual_max_tokens <= 0) {
         actual_max_tokens = 1024;  // Sensible default
-    }
-
-    if (model_config.max_output_tokens > 0 && actual_max_tokens > model_config.max_output_tokens) {
-        LOG_DEBUG("Capping max_tokens from " + std::to_string(actual_max_tokens) +
-                 " to model's max_output_tokens limit: " + std::to_string(model_config.max_output_tokens));
-        actual_max_tokens = model_config.max_output_tokens;
     }
 
     request["max_tokens"] = actual_max_tokens;

@@ -325,13 +325,6 @@ Response Session::add_message(Message::Type type,
 
     // Calculate max_tokens if not provided
     if (max_tokens == 0 && backend && backend->context_size > 0) {
-        // Calculate desired completion tokens based on context size and model limits
-        // This scales from ~1,374 tokens (8K context) to 4,096 (32K+ context)
-        int desired_completion = calculate_desired_completion_tokens(
-            backend->context_size,
-            backend->max_output_tokens
-        );
-
         // Reserve space for critical context that must be preserved:
         // - System message (always needed for model behavior)
         // - Last user message (the question that triggered this response)
@@ -351,8 +344,8 @@ Response Session::add_message(Message::Type type,
 
         // Cap max_tokens at desired completion size to avoid MAX_TOKENS_TOO_HIGH errors
         // This ensures we leave room for the actual prompt which may be larger than estimated
-        if (max_tokens > desired_completion) {
-            max_tokens = desired_completion;
+        if (max_tokens > desired_completion_tokens) {
+            max_tokens = desired_completion_tokens;
         }
 
         LOG_DEBUG("Calculated max_tokens: " + std::to_string(max_tokens) +
@@ -362,21 +355,22 @@ Response Session::add_message(Message::Type type,
                  ", last_user=" + std::to_string(last_user_message_tokens) +
                  ", last_asst=" + std::to_string(last_assistant_message_tokens) + "]" +
                  ", prompt=" + std::to_string(prompt_tokens) +
-                 ", desired_completion=" + std::to_string(desired_completion) + ")");
+                 ", desired_completion=" + std::to_string(desired_completion_tokens) + ")");
     }
 
     // Check if we need to evict BEFORE sending to backend (only if auto-eviction is enabled)
     if (auto_evict && backend && backend->context_size > 0) {
 
         if (needs_eviction(prompt_tokens)) {
-            // Calculate how many tokens we need to free (just the message)
-            int tokens_over = total_tokens + prompt_tokens - backend->context_size;
+            // Calculate how many tokens we need to free (message + completion space)
+            int tokens_over = (total_tokens + prompt_tokens + desired_completion_tokens) - backend->context_size;
 
             LOG_DEBUG("Auto-eviction triggered: need to free " + std::to_string(tokens_over) + " tokens");
             LOG_DEBUG("  current state: total=" + std::to_string(total_tokens) +
                      ", messages=" + std::to_string(messages.size()) +
                      ", prompt=" + std::to_string(prompt_tokens) +
-                     ", max=" + std::to_string(max_tokens));
+                     ", max=" + std::to_string(max_tokens) +
+                     ", desired_completion=" + std::to_string(desired_completion_tokens));
 
             // Calculate which messages to evict
             auto ranges = calculate_messages_to_evict(tokens_over);
@@ -402,7 +396,7 @@ Response Session::add_message(Message::Type type,
                 return resp;
             }
 
-            // Eviction succeeded - recalculate max_tokens using same reserved space logic
+            // Eviction succeeded - recalculate max_tokens using same logic as initial calculation
             int reserved = system_message_tokens;
             if (last_user_message_index >= 0) {
                 reserved += last_user_message_tokens;
@@ -412,9 +406,16 @@ Response Session::add_message(Message::Type type,
             }
             int available = backend->context_size - reserved - prompt_tokens;
             max_tokens = (available > 0) ? available : 0;
+
+            // Cap max_tokens at desired completion size (same as initial calculation)
+            if (max_tokens > desired_completion_tokens) {
+                max_tokens = desired_completion_tokens;
+            }
+
             LOG_DEBUG("Recalculated max_tokens after eviction: " + std::to_string(max_tokens) +
                      " (reserved=" + std::to_string(reserved) +
-                     ", prompt=" + std::to_string(prompt_tokens) + ")");
+                     ", prompt=" + std::to_string(prompt_tokens) +
+                     ", desired_completion=" + std::to_string(desired_completion_tokens) + ")");
         }
     }
 
@@ -434,14 +435,19 @@ bool Session::needs_eviction(int additional_tokens) const {
         return false;  // No limit set
     }
 
-    // Calculate desired completion token space to reserve
-    int desired_completion = calculate_desired_completion_tokens(
-        backend->context_size,
-        backend->max_output_tokens
-    );
-
     // Check if new message + completion would exceed available space
-    return (total_tokens + additional_tokens + desired_completion) >= get_available_tokens();
+    int required = total_tokens + additional_tokens + desired_completion_tokens;
+    int available = get_available_tokens();
+    bool needs = required >= available;
+
+    LOG_DEBUG("needs_eviction check: total=" + std::to_string(total_tokens) +
+              ", additional=" + std::to_string(additional_tokens) +
+              ", desired_completion=" + std::to_string(desired_completion_tokens) +
+              ", required=" + std::to_string(required) +
+              ", available=" + std::to_string(available) +
+              ", needs_eviction=" + (needs ? "true" : "false"));
+
+    return needs;
 }
 
 int Session::get_available_tokens() const {

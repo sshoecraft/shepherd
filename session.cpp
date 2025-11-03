@@ -30,10 +30,10 @@ std::pair<int, int> Session::calculate_messages_to_evict(int tokens_needed) {
             break;
         }
 
-        // Skip non-USER messages (shouldn't happen in healthy context)
+        // Skip non-USER messages (e.g., system message at index 0)
         if (messages[i].type != Message::USER) {
-            LOG_WARN("Pass 1: Skipping non-USER message at index " + std::to_string(i) +
-                     " (type: " + messages[i].get_role() + ")");
+            LOG_DEBUG("Pass 1: Skipping non-USER message at index " + std::to_string(i) +
+                      " (type: " + messages[i].get_role() + ")");
             i++;
             continue;
         }

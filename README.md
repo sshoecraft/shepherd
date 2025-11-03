@@ -46,6 +46,13 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 - **Resource Access**: Read resources from MCP servers (files, databases, APIs)
 - **Prompt Templates**: Reusable prompt templates from MCP servers
 
+### 🤝 Multi-Model Collaboration (API Tools)
+- **Cross-Model Consultation**: Any backend can call other AI models as tools
+- **Second Opinions**: Get Claude's analysis while using GPT, or vice versa
+- **Model-Specific Strengths**: Leverage each model's expertise (Claude for code review, GPT for creative tasks, Gemini for reasoning)
+- **Simple Configuration**: Add AI backends as tools via CLI (`shepherd api add`)
+- **Automatic Discovery**: API tools registered alongside native tools at startup
+
 ### 🌐 Server Mode (HTTP REST API)
 - **OpenAI-Compatible Endpoints**: Remote access to Shepherd via REST API
   - `POST /v1/chat/completions` - Chat completions with streaming support
@@ -258,6 +265,21 @@ export SHEPHERD_BACKEND="llamacpp"  # or "tensorrt", "openai", etc.
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
         }
+    ],
+    "api_tools": [
+        {
+            "name": "ask_claude",
+            "backend": "anthropic",
+            "model": "claude-sonnet-4",
+            "api_key": "sk-ant-...",
+            "context_size": 200000
+        },
+        {
+            "name": "ask_gpt",
+            "backend": "openai",
+            "model": "gpt-4",
+            "api_key": "sk-..."
+        }
     ]
 }
 ```
@@ -337,6 +359,72 @@ print(response.json())
 # List available tools
 ./shepherd --list-tools
 ```
+
+### API Tools (Multi-Model Collaboration)
+
+API tools enable any backend to call other AI models as tools, allowing for cross-model consultation and collaboration.
+
+#### Configuration
+
+```bash
+# Add Claude as a tool
+shepherd api add ask_claude anthropic \
+    --model claude-sonnet-4 \
+    --api-key sk-ant-...
+
+# Add GPT as a tool
+shepherd api add ask_gpt openai \
+    --model gpt-4 \
+    --api-key sk-... \
+    --max-tokens 8000
+
+# Add local Ollama model
+shepherd api add local_expert ollama \
+    --model llama3 \
+    --api-base http://localhost:11434
+
+# List configured API tools
+shepherd api list
+
+# Remove a tool
+shepherd api remove ask_claude
+```
+
+#### Usage Example
+
+```bash
+# Start with Gemini as primary backend
+shepherd --backend gemini --model gemini-2.0-flash
+
+> Read logger.h and ask the sonnet tool to review it
+
+# Gemini reads the file
+* read(file_path=logger.h)
+
+# Gemini calls Claude (via sonnet tool) for code review
+* sonnet(prompt=Please review the following C++ header file for...)
+
+> # Logger Class Review
+>
+> **Critical Issues:**
+>
+> - **Singleton Static Initialization Order Fiasco**: The singleton pattern...
+> - **Format Function Inefficiency**: The format_helper creates multiple string copies...
+> - **Missing Error Handling**: No exception handling for file operations...
+>
+> **Design Improvements:**
+>
+> - **Replace Singleton with Dependency Injection**: Singletons make testing difficult...
+> - **Use RAII for File Management**: Use std::ofstream directly...
+> - **Structured Logging Support**: Support structured data in logs...
+```
+
+**Real-world benefits:**
+
+- **Code Review**: Get Claude's detailed analysis while using a local model
+- **Cross-Validation**: Compare opinions from multiple models
+- **Model-Specific Strengths**: Use Claude for code, GPT for creative writing, Gemini for reasoning
+- **Second Opinions**: Quick consultations without switching contexts
 
 ---
 

@@ -4,8 +4,9 @@
 BACKENDS=backends/backend.cpp backends/factory.cpp backends/llamacpp.cpp backends/models.cpp backends/api.cpp backends/openai.cpp backends/ollama.cpp backends/anthropic.cpp backends/gemini.cpp
 TOOL_SRCS=tools/command_tools.cpp tools/core_tools.cpp tools/filesystem_tools.cpp tools/http_tools.cpp tools/json_tools.cpp tools/mcp_resource_tools.cpp tools/memory_tools.cpp tools/tool.cpp tools/tool_parser.cpp tools/utf8_sanitizer.cpp tools/web_search.cpp
 MCP_SRCS=mcp/mcp_client.cpp mcp/mcp_config.cpp mcp/mcp.cpp mcp/mcp_server.cpp mcp/mcp_tool.cpp
+API_TOOLS_SRCS=api_tools/api_tool_config.cpp api_tools/api_tool_adapter.cpp api_tools/api_tools.cpp
 SERVER_SRCS=server/server.cpp
-SRCS=main.cpp cli.cpp session.cpp config.cpp logger.cpp http_client.cpp rag.cpp $(BACKENDS) $(TOOL_SRCS) $(MCP_SRCS) $(SERVER_SRCS)
+SRCS=main.cpp cli.cpp session.cpp config.cpp logger.cpp http_client.cpp rag.cpp $(BACKENDS) $(TOOL_SRCS) $(MCP_SRCS) $(API_TOOLS_SRCS) $(SERVER_SRCS)
 OBJS=$(SRCS:%.cpp=%$(OBJSUFFIX).o)
 DEPS=$(SRCS:%.cpp=.deps/%.d)
 DEPDIR=.deps
@@ -27,7 +28,7 @@ shepherd: $(OBJS)
 	$(CC) $(CCFLAGS) -MMD -MP -MF $(DEPDIR)/$*.d -I . -c $< -o $@
 
 $(DEPDIR):
-	@mkdir -p $(DEPDIR)/backends $(DEPDIR)/tools $(DEPDIR)/mcp $(DEPDIR)/server
+	@mkdir -p $(DEPDIR)/backends $(DEPDIR)/tools $(DEPDIR)/mcp $(DEPDIR)/api_tools $(DEPDIR)/server
 
 clean:
 	rm -f shepherd $(OBJS)

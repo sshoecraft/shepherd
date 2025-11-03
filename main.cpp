@@ -3,6 +3,7 @@
 #include "tools/tools.h"
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
 #include "mcp/mcp.h"
+#include "api_tools/api_tools.h"
 #include "rag.h"
 #include "server/server.h"
 #include "cli.h"
@@ -71,6 +72,7 @@ static void print_usage(int, char** argv) {
 	printf("	%s edit-system				Edit system prompt in $EDITOR\n", argv[0]);
 	printf("	%s list-tools				List all available tools\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
+	printf("	%s api <add|remove|list> [args...]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
@@ -97,6 +99,11 @@ static void print_usage(int, char** argv) {
 	printf("	mcp add <name> <cmd> [args] [-e ...]  Add a new MCP server\n");
 	printf("										  -e KEY=VALUE	Set environment variable\n");
 	printf("	mcp remove <name>					  Remove an MCP server\n");
+	printf("\nAPI Tool Management:\n");
+	printf("	api list							  List all configured API tools\n");
+	printf("	api add <name> <backend> --model <model> [options]  Add a new API tool\n");
+	printf("										  Options: --api-key, --api-base, --context-size, --max-tokens\n");
+	printf("	api remove <name>					  Remove an API tool\n");
 	printf("\nConfiguration:\n");
 	printf("	Edit ~/.shepherd/config.json to configure:\n");
 	printf("	- backend: llamacpp, openai, anthropic");
@@ -227,6 +234,121 @@ static int handle_mcp_command(int argc, char** argv) {
 	}
 
 	std::cerr << "Unknown mcp subcommand: " << subcommand << std::endl;
+	std::cerr << "Available: add, remove, list" << std::endl;
+	return 1;
+}
+
+static int handle_api_command(int argc, char** argv) {
+	if (argc < 3) {
+		std::cerr << "Usage: shepherd api <add|remove|list> [args...]" << std::endl;
+		return 1;
+	}
+
+	std::string subcommand = argv[2];
+	std::string config_path = std::string(getenv("HOME")) + "/.shepherd/config.json";
+
+	if (subcommand == "list") {
+		APIToolConfig::list_tools(config_path, false);
+		return 0;
+	}
+
+	if (subcommand == "add") {
+		if (argc < 5) {
+			std::cerr << "Usage: shepherd api add <name> <backend> --model <model> [options]" << std::endl;
+			std::cerr << "\nOptions:" << std::endl;
+			std::cerr << "  --model <model>         Model name (required)" << std::endl;
+			std::cerr << "  --api-key <key>         API key" << std::endl;
+			std::cerr << "  --api-base <url>        Custom API base URL" << std::endl;
+			std::cerr << "  --context-size <size>   Context window size" << std::endl;
+			std::cerr << "  --max-tokens <tokens>   Max generation tokens" << std::endl;
+			std::cerr << "\nExamples:" << std::endl;
+			std::cerr << "  shepherd api add ask_claude anthropic --model claude-sonnet-4 --api-key sk-ant-..." << std::endl;
+			std::cerr << "  shepherd api add ask_gpt openai --model gpt-4 --api-key sk-... --max-tokens 8000" << std::endl;
+			std::cerr << "  shepherd api add local_llama ollama --model llama3 --api-base http://localhost:11434" << std::endl;
+			return 1;
+		}
+
+		APIToolEntry tool;
+		tool.name = argv[3];
+		tool.backend = argv[4];
+		tool.context_size = 0;
+		tool.max_tokens = 0;
+
+		// Parse options
+		for (int i = 5; i < argc; i++) {
+			std::string arg = argv[i];
+
+			if (arg == "--model") {
+				if (i + 1 < argc) {
+					tool.model = argv[++i];
+				} else {
+					std::cerr << "Error: --model requires an argument" << std::endl;
+					return 1;
+				}
+			} else if (arg == "--api-key") {
+				if (i + 1 < argc) {
+					tool.api_key = argv[++i];
+				} else {
+					std::cerr << "Error: --api-key requires an argument" << std::endl;
+					return 1;
+				}
+			} else if (arg == "--api-base") {
+				if (i + 1 < argc) {
+					tool.api_base = argv[++i];
+				} else {
+					std::cerr << "Error: --api-base requires an argument" << std::endl;
+					return 1;
+				}
+			} else if (arg == "--context-size") {
+				if (i + 1 < argc) {
+					tool.context_size = std::stoull(argv[++i]);
+				} else {
+					std::cerr << "Error: --context-size requires an argument" << std::endl;
+					return 1;
+				}
+			} else if (arg == "--max-tokens") {
+				if (i + 1 < argc) {
+					tool.max_tokens = std::stoi(argv[++i]);
+				} else {
+					std::cerr << "Error: --max-tokens requires an argument" << std::endl;
+					return 1;
+				}
+			} else {
+				std::cerr << "Error: Unknown option: " << arg << std::endl;
+				std::cerr << "Use 'shepherd api add' without arguments to see usage and examples" << std::endl;
+				return 1;
+			}
+		}
+
+		// Validate required fields
+		if (tool.model.empty()) {
+			std::cerr << "Error: --model is required" << std::endl;
+			std::cerr << "Use 'shepherd api add' without arguments to see usage and examples" << std::endl;
+			return 1;
+		}
+
+		if (APIToolConfig::add_tool(config_path, tool)) {
+			std::cout << "Added API tool '" << tool.name << "'" << std::endl;
+			return 0;
+		}
+		return 1;
+	}
+
+	if (subcommand == "remove") {
+		if (argc < 4) {
+			std::cerr << "Usage: shepherd api remove <name>" << std::endl;
+			return 1;
+		}
+
+		std::string name = argv[3];
+		if (APIToolConfig::remove_tool(config_path, name)) {
+			std::cout << "Removed API tool '" << name << "'" << std::endl;
+			return 0;
+		}
+		return 1;
+	}
+
+	std::cerr << "Unknown api subcommand: " << subcommand << std::endl;
 	std::cerr << "Available: add, remove, list" << std::endl;
 	return 1;
 }
@@ -548,6 +670,10 @@ int main(int argc, char** argv) {
 		register_mcp_resource_tools();
 		register_core_tools();
 
+		// Initialize API tools
+		auto& api_tools = APITools::instance();
+		api_tools.initialize();
+
 		auto& registry = ToolRegistry::instance();
 		auto tool_descriptions = registry.list_tools_with_descriptions();
 
@@ -581,6 +707,11 @@ int main(int argc, char** argv) {
 	// Handle MCP subcommand
 	if (argc >= 2 && std::string(argv[1]) == "mcp") {
 		return handle_mcp_command(argc, argv);
+	}
+
+	// Handle API subcommand
+	if (argc >= 2 && std::string(argv[1]) == "api") {
+		return handle_api_command(argc, argv);
 	}
 
 	bool debug_override = false;
@@ -933,17 +1064,27 @@ int main(int argc, char** argv) {
 				}
 
 				// Initialize MCP servers (will register additional tools)
+				size_t mcp_count = 0;
 				if (!no_mcp) {
 					auto& mcp = MCP::instance();
 					mcp.initialize();
-
-					// Show total tool count after MCP
-					tools = registry.list_tools();
-					LOG_INFO("Total tools available: " + std::to_string(tools.size()) +
-							 " (native + " + std::to_string(mcp.get_tool_count()) + " MCP)");
+					mcp_count = mcp.get_tool_count();
 				} else {
 					LOG_INFO("MCP system disabled via --nomcp flag");
-					tools = registry.list_tools();
+				}
+
+				// Initialize API tools (will register additional tools)
+				auto& api_tools = APITools::instance();
+				api_tools.initialize();
+				size_t api_tool_count = api_tools.get_tool_count();
+
+				// Show total tool count after MCP and API tools
+				tools = registry.list_tools();
+				if (mcp_count > 0 || api_tool_count > 0) {
+					LOG_INFO("Total tools available: " + std::to_string(tools.size()) +
+							 " (native + " + std::to_string(mcp_count) + " MCP + " +
+							 std::to_string(api_tool_count) + " API)");
+				} else {
 					LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
 				}
 
@@ -955,7 +1096,8 @@ int main(int argc, char** argv) {
 			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
 		}
 
-		// Get registry and tool descriptions (needed for both interactive and server modes)
+		// Get registry and tool descriptions AFTER all tools are registered
+		// (needed for both interactive and server modes)
 		auto& registry = ToolRegistry::instance();
 		auto tool_descriptions = registry.list_tools_with_descriptions();
 

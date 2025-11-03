@@ -55,6 +55,11 @@ set(SHEPHERD_SOURCES
     mcp/mcp_server.cpp
     mcp/mcp_tool.cpp
 
+    # API tools sources
+    api_tools/api_tool_config.cpp
+    api_tools/api_tool_adapter.cpp
+    api_tools/api_tools.cpp
+
     # Server sources
     server/server.cpp
 )

@@ -475,11 +475,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 			// Tool execution loop - orchestrated by CLI
 			int tool_loop_iteration = 0;
-			const int max_tool_iterations = 100; // Absolute safety limit for total iterations
 			const int max_consecutive_identical_calls = 10; // Detect stuck loops (same call repeated)
 			std::vector<std::string> recent_tool_calls; // Track call signatures to detect loops
 
-			while (tool_loop_iteration < max_tool_iterations) {
+			while (true) {
 				tool_loop_iteration++;
 				LOG_DEBUG("Tool loop iteration: " + std::to_string(tool_loop_iteration));
 
@@ -847,10 +846,6 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 			// Restore terminal to normal mode after generation
 			if (cli.interactive_mode) {
 				cli.restore_terminal();
-			}
-
-			if (tool_loop_iteration >= max_tool_iterations) {
-				cli.show_error("Maximum tool iterations reached - stopping to prevent infinite loop");
 			}
 
 		} catch (const std::exception& e) {

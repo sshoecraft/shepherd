@@ -6,8 +6,8 @@
 #include <iostream>
 #include <iomanip>
 
-json MCPServerEntry::to_json() const {
-    json j = {
+nlohmann::json MCPServerEntry::to_json() const {
+    nlohmann::json j = {
         {"name", name},
         {"command", command},
         {"args", args}
@@ -20,7 +20,7 @@ json MCPServerEntry::to_json() const {
     return j;
 }
 
-MCPServerEntry MCPServerEntry::from_json(const json& j) {
+MCPServerEntry MCPServerEntry::from_json(const nlohmann::json& j) {
     MCPServerEntry entry;
     entry.name = j.value("name", "");
     entry.command = j.value("command", "");
@@ -49,14 +49,14 @@ std::vector<MCPServerEntry> MCPConfig::load(const std::string& config_path) {
     }
 
     try {
-        json config = json::parse(file);
+        nlohmann::json config = nlohmann::json::parse(file);
 
         if (config.contains("mcp_servers") && config["mcp_servers"].is_array()) {
             for (const auto& server_json : config["mcp_servers"]) {
                 servers.push_back(MCPServerEntry::from_json(server_json));
             }
         }
-    } catch (const json::exception& e) {
+    } catch (const nlohmann::json::exception& e) {
         LOG_ERROR("Failed to parse MCP config: " + std::string(e.what()));
     }
 
@@ -65,22 +65,22 @@ std::vector<MCPServerEntry> MCPConfig::load(const std::string& config_path) {
 
 bool MCPConfig::save(const std::string& config_path, const std::vector<MCPServerEntry>& servers) {
     std::ifstream infile(config_path);
-    json config;
+    nlohmann::json config;
 
     if (infile.is_open()) {
         try {
-            config = json::parse(infile);
-        } catch (const json::exception& e) {
+            config = nlohmann::json::parse(infile);
+        } catch (const nlohmann::json::exception& e) {
             LOG_ERROR("Failed to parse existing config: " + std::string(e.what()));
-            config = json::object();
+            config = nlohmann::json::object();
         }
         infile.close();
     } else {
-        config = json::object();
+        config = nlohmann::json::object();
     }
 
     // Update mcp_servers array
-    json mcp_array = json::array();
+    nlohmann::json mcp_array = nlohmann::json::array();
     for (const auto& server : servers) {
         mcp_array.push_back(server.to_json());
     }

@@ -1,13 +1,11 @@
 #pragma once
 
 #include "mcp_server.h"
-#include "../nlohmann/json.hpp"
+#include "nlohmann/json.hpp"
 #include <string>
 #include <memory>
 #include <map>
 #include <vector>
-
-using json = nlohmann::json;
 
 class MCPClientError : public std::runtime_error {
 public:
@@ -18,7 +16,7 @@ public:
 struct MCPTool {
     std::string name;
     std::string description;
-    json input_schema;
+    nlohmann::json input_schema;
 };
 
 // MCP resource schema
@@ -33,7 +31,7 @@ struct MCPResource {
 struct MCPPrompt {
     std::string name;
     std::string description;
-    json arguments;
+    nlohmann::json arguments;
 };
 
 // MCP server capabilities
@@ -52,15 +50,15 @@ public:
     // Protocol methods
     void initialize();
     std::vector<MCPTool> list_tools();
-    json call_tool(const std::string& name, const json& arguments);
+    nlohmann::json call_tool(const std::string& name, const nlohmann::json& arguments);
 
     // Resources
     std::vector<MCPResource> list_resources();
-    json read_resource(const std::string& uri);
+    nlohmann::json read_resource(const std::string& uri);
 
     // Prompts
     std::vector<MCPPrompt> list_prompts();
-    json get_prompt(const std::string& name, const json& arguments = json::object());
+    nlohmann::json get_prompt(const std::string& name, const nlohmann::json& arguments = nlohmann::json::object());
 
     // Server info
     const std::string& get_server_name() const { return server_->get_name(); }
@@ -74,9 +72,9 @@ private:
     int next_request_id_;
 
     // JSON-RPC helpers
-    json create_request(const std::string& method, const json& params = json::object());
-    json send_request(const json& request);
-    void send_notification(const std::string& method, const json& params = json::object());
-    json parse_response(const std::string& line);
-    void validate_response(const json& response, int expected_id);
+    nlohmann::json create_request(const std::string& method, const nlohmann::json& params = nlohmann::json::object());
+    nlohmann::json send_request(const nlohmann::json& request);
+    void send_notification(const std::string& method, const nlohmann::json& params = nlohmann::json::object());
+    nlohmann::json parse_response(const std::string& line);
+    void validate_response(const nlohmann::json& response, int expected_id);
 };

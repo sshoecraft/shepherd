@@ -24,17 +24,17 @@ void MCPClient::initialize() {
     }
 
     // Send initialize request
-    json init_params = {
+    nlohmann::json init_params = {
         {"protocolVersion", "2024-11-05"},
-        {"capabilities", json::object()},
+        {"capabilities", nlohmann::json::object()},
         {"clientInfo", {
             {"name", "shepherd"},
             {"version", "1.0.0"}
         }}
     };
 
-    json request = create_request("initialize", init_params);
-    json response = send_request(request);
+    nlohmann::json request = create_request("initialize", init_params);
+    nlohmann::json response = send_request(request);
 
     // Parse server info and capabilities
     if (response.contains("result")) {
@@ -42,7 +42,7 @@ void MCPClient::initialize() {
 
         if (result.contains("capabilities")) {
             auto caps = result["capabilities"];
-            capabilities_.supports_tools = caps.value("tools", json::object()).value("listChanged", false) ||
+            capabilities_.supports_tools = caps.value("tools", nlohmann::json::object()).value("listChanged", false) ||
                                            caps.contains("tools");
             capabilities_.supports_resources = caps.contains("resources");
             capabilities_.supports_prompts = caps.contains("prompts");
@@ -71,8 +71,8 @@ std::vector<MCPTool> MCPClient::list_tools() {
 
     LOG_DEBUG("Listing tools from MCP server: " + server_->get_name());
 
-    json request = create_request("tools/list");
-    json response = send_request(request);
+    nlohmann::json request = create_request("tools/list");
+    nlohmann::json response = send_request(request);
 
     std::vector<MCPTool> tools;
 
@@ -81,7 +81,7 @@ std::vector<MCPTool> MCPClient::list_tools() {
             MCPTool tool;
             tool.name = tool_json.value("name", "");
             tool.description = tool_json.value("description", "");
-            tool.input_schema = tool_json.value("inputSchema", json::object());
+            tool.input_schema = tool_json.value("inputSchema", nlohmann::json::object());
 
             if (!tool.name.empty()) {
                 tools.push_back(tool);
@@ -93,20 +93,20 @@ std::vector<MCPTool> MCPClient::list_tools() {
     return tools;
 }
 
-json MCPClient::call_tool(const std::string& name, const json& arguments) {
+nlohmann::json MCPClient::call_tool(const std::string& name, const nlohmann::json& arguments) {
     if (!initialized_) {
         throw MCPClientError("Client not initialized");
     }
 
     LOG_DEBUG("Calling MCP tool '" + name + "' on server: " + server_->get_name());
 
-    json params = {
+    nlohmann::json params = {
         {"name", name},
         {"arguments", arguments}
     };
 
-    json request = create_request("tools/call", params);
-    json response = send_request(request);
+    nlohmann::json request = create_request("tools/call", params);
+    nlohmann::json response = send_request(request);
 
     if (response.contains("result")) {
         return response["result"];
@@ -126,8 +126,8 @@ std::vector<MCPResource> MCPClient::list_resources() {
 
     LOG_DEBUG("Listing resources from MCP server: " + server_->get_name());
 
-    json request = create_request("resources/list");
-    json response = send_request(request);
+    nlohmann::json request = create_request("resources/list");
+    nlohmann::json response = send_request(request);
 
     std::vector<MCPResource> resources;
 
@@ -149,16 +149,16 @@ std::vector<MCPResource> MCPClient::list_resources() {
     return resources;
 }
 
-json MCPClient::read_resource(const std::string& uri) {
+nlohmann::json MCPClient::read_resource(const std::string& uri) {
     if (!initialized_) {
         throw MCPClientError("Client not initialized");
     }
 
     LOG_DEBUG("Reading resource '" + uri + "' from server: " + server_->get_name());
 
-    json params = {{"uri", uri}};
-    json request = create_request("resources/read", params);
-    json response = send_request(request);
+    nlohmann::json params = {{"uri", uri}};
+    nlohmann::json request = create_request("resources/read", params);
+    nlohmann::json response = send_request(request);
 
     if (response.contains("result")) {
         return response["result"];
@@ -178,8 +178,8 @@ std::vector<MCPPrompt> MCPClient::list_prompts() {
 
     LOG_DEBUG("Listing prompts from MCP server: " + server_->get_name());
 
-    json request = create_request("prompts/list");
-    json response = send_request(request);
+    nlohmann::json request = create_request("prompts/list");
+    nlohmann::json response = send_request(request);
 
     std::vector<MCPPrompt> prompts;
 
@@ -188,7 +188,7 @@ std::vector<MCPPrompt> MCPClient::list_prompts() {
             MCPPrompt prompt;
             prompt.name = prompt_json.value("name", "");
             prompt.description = prompt_json.value("description", "");
-            prompt.arguments = prompt_json.value("arguments", json::array());
+            prompt.arguments = prompt_json.value("arguments", nlohmann::json::array());
 
             if (!prompt.name.empty()) {
                 prompts.push_back(prompt);
@@ -200,20 +200,20 @@ std::vector<MCPPrompt> MCPClient::list_prompts() {
     return prompts;
 }
 
-json MCPClient::get_prompt(const std::string& name, const json& arguments) {
+nlohmann::json MCPClient::get_prompt(const std::string& name, const nlohmann::json& arguments) {
     if (!initialized_) {
         throw MCPClientError("Client not initialized");
     }
 
     LOG_DEBUG("Getting prompt '" + name + "' from server: " + server_->get_name());
 
-    json params = {
+    nlohmann::json params = {
         {"name", name},
         {"arguments", arguments}
     };
 
-    json request = create_request("prompts/get", params);
-    json response = send_request(request);
+    nlohmann::json request = create_request("prompts/get", params);
+    nlohmann::json response = send_request(request);
 
     if (response.contains("result")) {
         return response["result"];
@@ -222,8 +222,8 @@ json MCPClient::get_prompt(const std::string& name, const json& arguments) {
     throw MCPClientError("Prompt get failed: no result in response");
 }
 
-json MCPClient::create_request(const std::string& method, const json& params) {
-    json request = {
+nlohmann::json MCPClient::create_request(const std::string& method, const nlohmann::json& params) {
+    nlohmann::json request = {
         {"jsonrpc", "2.0"},
         {"id", next_request_id_++},
         {"method", method}
@@ -236,7 +236,7 @@ json MCPClient::create_request(const std::string& method, const json& params) {
     return request;
 }
 
-json MCPClient::send_request(const json& request) {
+nlohmann::json MCPClient::send_request(const nlohmann::json& request) {
     int request_id = request["id"];
     std::string request_str = request.dump();
 
@@ -253,14 +253,14 @@ json MCPClient::send_request(const json& request) {
     }
     LOG_DEBUG("MCP response: " + debug_response);
 
-    json response = parse_response(response_line);
+    nlohmann::json response = parse_response(response_line);
     validate_response(response, request_id);
 
     return response;
 }
 
-void MCPClient::send_notification(const std::string& method, const json& params) {
-    json notification = {
+void MCPClient::send_notification(const std::string& method, const nlohmann::json& params) {
+    nlohmann::json notification = {
         {"jsonrpc", "2.0"},
         {"method", method}
     };
@@ -275,16 +275,16 @@ void MCPClient::send_notification(const std::string& method, const json& params)
     server_->write_line(notification_str);
 }
 
-json MCPClient::parse_response(const std::string& line) {
+nlohmann::json MCPClient::parse_response(const std::string& line) {
     try {
-        return json::parse(line);
-    } catch (const json::exception& e) {
+        return nlohmann::json::parse(line);
+    } catch (const nlohmann::json::exception& e) {
         throw MCPClientError("Failed to parse JSON response: " + std::string(e.what()) +
                            "\nResponse: " + line);
     }
 }
 
-void MCPClient::validate_response(const json& response, int expected_id) {
+void MCPClient::validate_response(const nlohmann::json& response, int expected_id) {
     if (!response.contains("jsonrpc") || response["jsonrpc"] != "2.0") {
         throw MCPClientError("Invalid JSON-RPC response");
     }

@@ -20,8 +20,8 @@ private:
     MCPTool mcp_tool_;
 
     // Convert MCP JSON schema to Shepherd parameter string
-    std::string schema_to_parameters(const json& schema) const;
+    std::string schema_to_parameters(const nlohmann::json& schema) const;
 
     // Convert Shepherd args to MCP JSON arguments
-    json args_to_json(const std::map<std::string, std::any>& args) const;
+    nlohmann::json args_to_json(const std::map<std::string, std::any>& args) const;
 };

@@ -4,7 +4,6 @@
 #include "tools/tool.h"
 #include "tools/tool_parser.h"
 #include "nlohmann/json.hpp"
-#include "minja.hpp"
 #include "models.h"
 #include <sstream>
 #include <fstream>
@@ -1028,8 +1027,10 @@ std::string LlamaCppBackend::format_system_message_with_tools(const std::string&
 
             // Set parameters - pass the JSON object directly (not as string)
             // The template expects a proper object structure, not a JSON string
+            // Convert nlohmann::json to ordered_json for minja compatibility
             if (!tool.parameters.empty()) {
-                tool_obj.set("parameters", minja::Value(tool.parameters));
+                nlohmann::ordered_json params_ordered = tool.parameters;
+                tool_obj.set("parameters", minja::Value(params_ordered));
             }
 
             tools_array.push_back(tool_obj);

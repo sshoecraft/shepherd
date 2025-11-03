@@ -810,6 +810,22 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 								display_content.pop_back();
 							}
 						}
+
+						// Remove <think>...</think> blocks unless in debug mode
+						if (g_debug_level == 0) {
+							size_t think_start = 0;
+							while ((think_start = display_content.find("<think>", think_start)) != std::string::npos) {
+								size_t think_end = display_content.find("</think>", think_start);
+								if (think_end != std::string::npos) {
+									// Remove the entire <think>...</think> block
+									display_content.erase(think_start, (think_end + 8) - think_start);
+								} else {
+									// No closing tag found, break to avoid infinite loop
+									break;
+								}
+							}
+						}
+
 						if (!display_content.empty()) {
 							cli.show_assistant_message(display_content);
 						}

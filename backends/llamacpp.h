@@ -3,7 +3,7 @@
 #include "shepherd.h"
 #include "backend.h"
 #include "models.h"
-#include "minja.hpp"
+#include "llama.cpp/vendor/minja/minja.hpp"
 #include <regex>
 
 #ifdef ENABLE_LLAMACPP

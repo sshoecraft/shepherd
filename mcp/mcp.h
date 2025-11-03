@@ -12,8 +12,6 @@
 #include <memory>
 #include <string>
 
-using json = nlohmann::json;
-
 /// @brief Manages multiple MCP servers and their tools
 /// Loads MCP servers from config and registers their tools with Shepherd's ToolRegistry
 class MCP {
@@ -63,7 +61,7 @@ public:
     /// @param server_name Name of the server
     /// @param uri Resource URI
     /// @return Resource content as JSON
-    json read_resource(const std::string& server_name, const std::string& uri) const;
+    nlohmann::json read_resource(const std::string& server_name, const std::string& uri) const;
 
 private:
     MCP() = default;

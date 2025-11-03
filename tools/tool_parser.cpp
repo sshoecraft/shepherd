@@ -42,46 +42,11 @@ std::string extract_json(const std::string& response) {
 
 bool has_tool_call(const std::string& response,
                   const std::vector<std::string>& tool_call_markers) {
-    // Tool call detection: response must have JSON on its own line
-    // This prevents false positives when model explains tool usage
-    bool has_json_on_own_line = false;
-    std::istringstream stream(response);
-    std::string line;
+    // Tool call detection: scan entire response for valid tool call JSON
+    // Changed from requiring "JSON on its own line" to support models that
+    // output explanatory text before tool calls (e.g., GLM-4.5)
 
-    while (std::getline(stream, line)) {
-        // Trim leading whitespace from this line
-        size_t start = line.find_first_not_of(" \t\r");
-        if (start != std::string::npos) {
-            std::string trimmed_line = line.substr(start);
-
-            // Check if this line starts with {
-            if (!trimmed_line.empty() && trimmed_line[0] == '{') {
-                has_json_on_own_line = true;
-                LOG_DEBUG("Found JSON on its own line");
-                break;
-            }
-
-            // Check for tool markers
-            if (!tool_call_markers.empty()) {
-                for (const auto& marker : tool_call_markers) {
-                    if (trimmed_line.find(marker) == 0) {
-                        has_json_on_own_line = true;
-                        LOG_DEBUG("Found tool call marker on its own line: " + marker);
-                        break;
-                    }
-                }
-                if (has_json_on_own_line) break;
-            }
-        }
-    }
-
-    // Must have JSON on own line AND be able to extract and parse valid JSON
-    // with "name" and "parameters" fields
-    if (!has_json_on_own_line) {
-        return false;
-    }
-
-    // Try to extract and parse the JSON to verify it's a valid tool call
+    // Try to extract and parse JSON from anywhere in the response
     std::string json_str = extract_json(response);
     if (json_str.empty()) {
         return false;

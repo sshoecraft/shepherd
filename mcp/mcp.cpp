@@ -5,8 +5,6 @@
 #include "logger.h"
 #include "nlohmann/json.hpp"
 
-using json = nlohmann::json;
-
 MCP& MCP::instance() {
     static MCP manager;
     return manager;
@@ -23,7 +21,7 @@ bool MCP::initialize() {
 
     try {
         // Parse MCP server configurations
-        json servers = json::parse(mcp_json);
+        nlohmann::json servers = nlohmann::json::parse(mcp_json);
         std::vector<ServerConfig> server_configs;
 
         for (const auto& server : servers) {
@@ -48,7 +46,7 @@ bool MCP::initialize() {
 
         return initialize(server_configs);
 
-    } catch (const json::exception& e) {
+    } catch (const nlohmann::json::exception& e) {
         LOG_ERROR("Failed to parse MCP configuration: " + std::string(e.what()));
         return false;
     }
@@ -196,7 +194,7 @@ std::vector<MCPResource> MCP::list_resources(const std::string& server_name) con
     }
 }
 
-json MCP::read_resource(const std::string& server_name, const std::string& uri) const {
+nlohmann::json MCP::read_resource(const std::string& server_name, const std::string& uri) const {
     auto it = servers_by_name_.find(server_name);
     if (it == servers_by_name_.end()) {
         throw std::runtime_error("MCP server not found: " + server_name);

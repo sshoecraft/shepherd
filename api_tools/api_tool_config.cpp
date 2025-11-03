@@ -1,10 +1,13 @@
 #include "api_tool_config.h"
-#include "../logger.h"
-#include "../backends/backend.h"
-#include "../backends/factory.h"
+#include "logger.h"
+#include "backends/backend.h"
+#include "backends/factory.h"
+#include "nlohmann/json.hpp"
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+
+using json = nlohmann::json;
 
 json APIToolEntry::to_json() const {
     json j = {

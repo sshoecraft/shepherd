@@ -73,12 +73,12 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
 
     try {
         // Convert Shepherd args to MCP JSON
-        json mcp_args = args_to_json(args);
+        nlohmann::json mcp_args = args_to_json(args);
 
         LOG_DEBUG("Executing MCP tool: " + mcp_tool_.name);
 
         // Call MCP tool
-        json mcp_result = client_->call_tool(mcp_tool_.name, mcp_args);
+        nlohmann::json mcp_result = client_->call_tool(mcp_tool_.name, mcp_args);
 
         // Extract content from MCP result
         if (mcp_result.contains("content") && mcp_result["content"].is_array() &&
@@ -132,7 +132,7 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
     return result;
 }
 
-std::string MCPToolAdapter::schema_to_parameters(const json& schema) const {
+std::string MCPToolAdapter::schema_to_parameters(const nlohmann::json& schema) const {
     if (!schema.contains("properties")) {
         return "";
     }
@@ -165,8 +165,8 @@ std::string MCPToolAdapter::schema_to_parameters(const json& schema) const {
     return oss.str();
 }
 
-json MCPToolAdapter::args_to_json(const std::map<std::string, std::any>& args) const {
-    json result = json::object();
+nlohmann::json MCPToolAdapter::args_to_json(const std::map<std::string, std::any>& args) const {
+    nlohmann::json result = nlohmann::json::object();
 
     for (const auto& [key, value] : args) {
         if (value.type() == typeid(std::string)) {

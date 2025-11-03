@@ -19,11 +19,13 @@
 #include <chrono>
 #include <filesystem>
 
+#if 0
 // Make json a core type
 #ifndef __JSON_DEFINED
 #include "nlohmann/json.hpp"
 using json = nlohmann::json;
 #define __JSON_DEFINED
+#endif
 #endif
 
 // Core Shepherd headers

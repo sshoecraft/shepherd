@@ -247,14 +247,19 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         return 0;  // Signal failure: eviction cannot proceed
     }
 
-    // Process each range and evict from KV cache
-    // Must process in reverse order to avoid index shifting issues
+    // Step 1: Calculate all KV positions for all ranges BEFORE doing any evictions
+    // This is critical because evicting/shifting changes the KV cache state
+    struct RangeInfo {
+        int start_msg, end_msg;
+        int start_pos, end_pos;
+        int tokens;
+    };
+    std::vector<RangeInfo> range_infos;
+
     int total_tokens_removed = 0;
     int total_messages_evicted = 0;
 
-    for (auto it = ranges.rbegin(); it != ranges.rend(); ++it) {
-        auto [start_msg, end_msg] = *it;
-
+    for (const auto& [start_msg, end_msg] : ranges) {
         // Calculate token positions for this range
         int start_pos = 0;
         for (int i = 0; i < start_msg; i++) {
@@ -269,24 +274,32 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 
         int tokens_in_range = end_pos - start_pos + 1;
 
+        range_infos.push_back({start_msg, end_msg, start_pos, end_pos, tokens_in_range});
+        total_tokens_removed += tokens_in_range;
+        total_messages_evicted += (end_msg - start_msg + 1);
+
         dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]\n",
                 start_msg, end_msg, start_pos, end_pos);
 
         LOG_INFO("Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
                  "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]");
-
-        // Call llama.cpp API to evict from KV cache
-        llama_memory_seq_rm(mem, 0, start_pos, end_pos + 1); // +1 because llama uses exclusive end
-
-        // CRITICAL: Shift remaining tokens down to keep positions contiguous
-        llama_memory_seq_add(mem, 0, end_pos + 1, -1, -tokens_in_range);
-        LOG_DEBUG("Shifted KV cache positions >= " + std::to_string(end_pos + 1) + " down by " + std::to_string(tokens_in_range));
-
-        total_tokens_removed += tokens_in_range;
-        total_messages_evicted += (end_msg - start_msg + 1);
     }
 
-    // Archive to RAG and remove messages from session (all ranges at once)
+    // Step 2: Evict all ranges from KV cache in reverse order
+    // Process in reverse so earlier positions don't shift before we evict later ones
+    for (auto it = range_infos.rbegin(); it != range_infos.rend(); ++it) {
+        llama_memory_seq_rm(mem, 0, it->start_pos, it->end_pos + 1); // +1 because llama uses exclusive end
+        LOG_DEBUG("Removed KV range [" + std::to_string(it->start_pos) + ", " + std::to_string(it->end_pos) + "]");
+    }
+
+    // Step 3: Shift remaining tokens down to keep positions contiguous
+    // Process ranges in reverse order, shifting after each eviction
+    for (auto it = range_infos.rbegin(); it != range_infos.rend(); ++it) {
+        llama_memory_seq_add(mem, 0, it->end_pos + 1, -1, -it->tokens);
+        LOG_DEBUG("Shifted KV cache positions >= " + std::to_string(it->end_pos + 1) + " down by " + std::to_string(it->tokens));
+    }
+
+    // Step 4: Archive to RAG and remove messages from session (all ranges at once)
     if (!mutable_session->evict_messages(ranges)) {
         LOG_ERROR("Failed to evict messages from session");
         return UINT32_MAX;
@@ -299,6 +312,22 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     // KV cache is the source of truth - query actual state
     dprintf(2, "KV cache after eviction: %d tokens\n", get_context_token_count());
     log_token_state("After eviction");
+
+#ifdef TEST_EVICTION_VALIDATION
+    // Step 5: Optional validation - verify messages remaining in session match KV cache
+    LOG_INFO("Validating eviction: checking message/KV alignment");
+    int expected_kv_tokens = 0;
+    for (const auto& msg : current_session->messages) {
+        expected_kv_tokens += msg.tokens;
+    }
+    int actual_kv_tokens = get_context_token_count();
+    if (expected_kv_tokens != actual_kv_tokens) {
+        LOG_ERROR("Eviction validation FAILED: expected " + std::to_string(expected_kv_tokens) +
+                  " tokens in KV cache but found " + std::to_string(actual_kv_tokens));
+    } else {
+        LOG_INFO("Eviction validation PASSED: " + std::to_string(actual_kv_tokens) + " tokens match");
+    }
+#endif
 
     // Return the new head position (where first freed space begins) as required by callback API
     // Calculate position of first range

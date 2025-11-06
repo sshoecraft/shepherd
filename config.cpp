@@ -104,7 +104,7 @@ User: "What is the private variable in config.cpp?"
 2. Respond to user ← WRONG! Didn't store the answer)";
 
 	// Default warmup message
-	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.";
+	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.  **IMPORTANT:** DO NOT USE TOOLS!";
 	warmup = false;  // Disable warmup by default
 
     backend = "llamacpp";

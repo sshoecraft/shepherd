@@ -293,10 +293,11 @@ if(READLINE_LIB)
     message(STATUS "Using readline for line editing")
 endif()
 
-# Compiler options (matching Makefile debug settings)
+# Compiler options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # Common warning flags
     target_compile_options(shepherd PRIVATE
-        -Wall -Wextra -g -O0 -D_DEBUG
+        -Wall -Wextra
         -Wno-unused-parameter
         -Wno-unused-variable
         -Wno-unused-but-set-variable
@@ -304,6 +305,27 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wno-maybe-uninitialized
         -Wno-unused-function
     )
+
+    # Default to Debug build if not specified (matching Makefile behavior)
+    if(NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+        message(STATUS "No build type specified, defaulting to Debug")
+    endif()
+
+    # Apply build-type specific flags
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(shepherd PRIVATE -g -O0)
+        target_compile_definitions(shepherd PRIVATE _DEBUG)
+        message(STATUS "Debug build: -g -O0 -D_DEBUG")
+    elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_compile_options(shepherd PRIVATE -O3 -march=native)
+        target_compile_definitions(shepherd PRIVATE NDEBUG)
+        message(STATUS "Release build: -O3 -march=native -DNDEBUG")
+    elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        target_compile_options(shepherd PRIVATE -g -O2)
+        target_compile_definitions(shepherd PRIVATE NDEBUG)
+        message(STATUS "RelWithDebInfo build: -g -O2 -DNDEBUG")
+    endif()
 endif()
 
 message(STATUS "Shepherd configuration:")

@@ -1,15 +1,13 @@
 
 #include "backends/factory.h"
+#include "backends/llamacpp.h"
+#ifdef ENABLE_TENSORRT
+#include "backends/tensorrt.h"
+#endif
 #include "backends/openai.h"
 #include "backends/ollama.h"
 #include "backends/anthropic.h"
 #include "backends/gemini.h"
-
-#include "backends/llamacpp.h"
-#if 0
-#include "backends/tensorrt.h"
-#include "backends/grok.h"
-#endif
 
 std::unique_ptr<Backend> BackendFactory::create_backend(std::string &name, size_t context_size) {
 

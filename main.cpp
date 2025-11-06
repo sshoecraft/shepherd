@@ -84,15 +84,20 @@ static void print_usage(int, char** argv) {
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
 	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
+	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
+	printf("	--pp N			   Pipeline parallelism size (llamacpp only, default: 1)\n");
 	printf("	--models-file FILE Path to models database JSON file (default: ~/.shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
+	printf("	--notools		   Disable all tools (no tool registration or use)\n");
+	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
 	printf("	--server		   Start HTTP API server mode (OpenAI-compatible)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --server)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --server)\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
+	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
 	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
 	printf("\nMCP Management:\n");
@@ -717,6 +722,8 @@ int main(int argc, char** argv) {
 
 	bool debug_override = false;
 	bool no_mcp = false;
+	bool no_tools = false;
+	bool warmup_enable = false;
 	int truncate_limit = 0;
 	std::string log_file;
 	std::string config_file_path;
@@ -728,10 +735,13 @@ int main(int argc, char** argv) {
 	std::string template_override;
 	std::string memory_db_override;
 	std::string models_file_override;
+	std::string system_prompt_override;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
 	int gpu_layers_override = -999;  // -999 means not specified, -1=auto/all, 0=CPU only, >0=specific
+	int tp_override = -1;  // -1 means not specified
+	int pp_override = -1;  // -1 means not specified
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
@@ -747,11 +757,16 @@ int main(int argc, char** argv) {
 		{"memory-db", required_argument, 0, 1023},
 		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
+		{"notools", no_argument, 0, 1027},
+		{"system-prompt", required_argument, 0, 1028},
 		{"template", required_argument, 0, 1006},
 		{"server", no_argument, 0, 1015},
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
 		{"truncate", required_argument, 0, 1019},
+		{"warmup", no_argument, 0, 1026},
+		{"tp", required_argument, 0, 1029},
+		{"pp", required_argument, 0, 1030},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -804,6 +819,12 @@ int main(int argc, char** argv) {
 			case 1005: // --nomcp
 				no_mcp = true;
 				break;
+			case 1027: // --notools
+				no_tools = true;
+				break;
+			case 1028: // --system-prompt
+				system_prompt_override = optarg;
+				break;
 			case 1006: // --template
 				template_override = optarg;
 				break;
@@ -828,6 +849,23 @@ int main(int argc, char** argv) {
 				break;
 			case 1024: // --models-file
 				models_file_override = optarg;
+				break;
+			case 1026: // --warmup
+				warmup_enable = true;
+				break;
+			case 1029: // --tp
+				tp_override = std::atoi(optarg);
+				if (tp_override < 1) {
+					printf("Error: tp must be at least 1\n");
+					return 1;
+				}
+				break;
+			case 1030: // --pp
+				pp_override = std::atoi(optarg);
+				if (pp_override < 1) {
+					printf("Error: pp must be at least 1\n");
+					return 1;
+				}
 				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
@@ -887,6 +925,9 @@ int main(int argc, char** argv) {
 	if (truncate_limit > 0) {
 		config->truncate_limit = truncate_limit;
 	}
+	if (warmup_enable) {
+		config->warmup = true;
+	}
 	if (gpu_layers_override != -999) {  // -999 means not specified
 		// Update llamacpp backend config with gpu_layers
 		json backend_config;
@@ -894,6 +935,24 @@ int main(int argc, char** argv) {
 			backend_config = json::parse(config->backend_configs["llamacpp"]);
 		}
 		backend_config["gpu_layers"] = gpu_layers_override;
+		config->backend_configs["llamacpp"] = backend_config.dump();
+	}
+	if (tp_override != -1) {  // -1 means not specified
+		// Update llamacpp backend config with tensor_parallel
+		json backend_config;
+		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
+			backend_config = json::parse(config->backend_configs["llamacpp"]);
+		}
+		backend_config["tensor_parallel"] = tp_override;
+		config->backend_configs["llamacpp"] = backend_config.dump();
+	}
+	if (pp_override != -1) {  // -1 means not specified
+		// Update llamacpp backend config with pipeline_parallel
+		json backend_config;
+		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
+			backend_config = json::parse(config->backend_configs["llamacpp"]);
+		}
+		backend_config["pipeline_parallel"] = pp_override;
 		config->backend_configs["llamacpp"] = backend_config.dump();
 	}
 
@@ -1050,20 +1109,21 @@ int main(int argc, char** argv) {
 
 		// Create the session that will be used throughout (not in server mode)
 		Session session;
-		session.system_message = config->system_message;
+		session.system_message = system_prompt_override.empty() ? config->system_message : system_prompt_override;
 
 		// Initialize tools system (skip in server mode - tools handled by client)
 		if (!g_server_mode) {
-			LOG_INFO("Initializing tools system...");
-			try {
-				// Register all native tools including memory search
-				register_filesystem_tools();
-				register_command_tools();
-				register_json_tools();
-				register_http_tools();
-				register_memory_tools();
-				register_mcp_resource_tools();
-				register_core_tools();	// IMPORTANT: Register core tools (Bash, Glob, Grep, Edit, WebSearch, etc.)
+			if (!no_tools) {
+				LOG_INFO("Initializing tools system...");
+				try {
+					// Register all native tools including memory search
+					register_filesystem_tools();
+					register_command_tools();
+					register_json_tools();
+					register_http_tools();
+					register_memory_tools();
+					register_mcp_resource_tools();
+					register_core_tools();	// IMPORTANT: Register core tools (Bash, Glob, Grep, Edit, WebSearch, etc.)
 
 				auto& registry = ToolRegistry::instance();
 				auto tools = registry.list_tools();
@@ -1099,9 +1159,12 @@ int main(int argc, char** argv) {
 					LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
 				}
 
-			} catch (const std::exception& e) {
-				LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
-				return 1;
+				} catch (const std::exception& e) {
+					LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
+					return 1;
+				}
+			} else {
+				LOG_INFO("Tools disabled via --notools flag");
 			}
 		} else {
 			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
@@ -1110,7 +1173,12 @@ int main(int argc, char** argv) {
 		// Get registry and tool descriptions AFTER all tools are registered
 		// (needed for both interactive and server modes)
 		auto& registry = ToolRegistry::instance();
-		auto tool_descriptions = registry.list_tools_with_descriptions();
+		std::map<std::string, std::string> tool_descriptions;
+
+		// Only get tool descriptions if tools are enabled
+		if (!no_tools) {
+			tool_descriptions = registry.list_tools_with_descriptions();
+		}
 
 		LOG_INFO("Shepherd initialization complete");
 
@@ -1124,26 +1192,7 @@ int main(int argc, char** argv) {
 			return run_server(backend, server_host, server_port);
 		}
 
-		// For MPI multi-GPU setups, only rank 0 handles user interaction
-		// Non-zero ranks keep their backend alive for MPI communication
-		LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
-		if (!is_mpi_leader) {
-			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0...");
-			// Keep process alive - backend will be controlled via MPI by rank 0
-			while (true) {
-				std::this_thread::sleep_for(std::chrono::seconds(3600));
-			}
-		}
-
-		// From here on, only rank 0 continues...
-		LOG_DEBUG("Rank 0 continuing to user input loop...");
-
-		// Force interactive mode for rank 0 (mpirun can make isatty return false)
-		if (is_mpi_leader) {
-			is_interactive = true;
-		}
-
-		// Populate tools from registry
+		// Populate tools from registry (all ranks need this for Session creation)
 		// This converts from ToolRegistry format to Session::Tool format
 		for (const auto& [tool_name, tool_desc] : tool_descriptions) {
 			Session::Tool st;
@@ -1217,6 +1266,22 @@ int main(int argc, char** argv) {
 		}
 
 		// ============================================================================
+		// MPI Multi-GPU: Non-leader ranks wait here after initialization
+		// ============================================================================
+		LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
+		if (!is_mpi_leader) {
+			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0...");
+			// Keep process alive - backend will be controlled via MPI by rank 0
+			while (true) {
+				std::this_thread::sleep_for(std::chrono::seconds(3600));
+			}
+		}
+
+		// From here on, only rank 0 continues...
+		LOG_DEBUG("Rank 0 continuing to user input loop...");
+
+		// Force interactive mode for rank 0 (mpirun can make isatty return false)
+		is_interactive = true;
 
 	// ============================================================================
 	// Server Mode - HTTP API via FastAPI

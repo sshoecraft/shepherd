@@ -46,4 +46,7 @@ public:
 private:
     // Helper to clean bracketed paste sequences
     std::string strip_bracketed_paste_sequences(const std::string& input);
+
+    // Terminal device handle for prompt output (bypasses mpirun buffering)
+    FILE* tty_handle;
 };

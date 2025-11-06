@@ -279,7 +279,6 @@ protected:
     std::string model_name_;
     std::string api_key_;
     size_t context_size_ = 0;  // Requested max context (0 = use model default, or override for testing)
-    bool initialized_ = false;
 
     /// @brief Token counts from last API call (for API backends)
     /// Local backends should leave these at 0

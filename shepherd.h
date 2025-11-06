@@ -37,6 +37,9 @@ using json = nlohmann::json;
 // Config - avail to all as a global
 extern std::unique_ptr<Config> config;
 
+// Global command-line arguments
+void get_global_args(int& argc, char**& argv);
+
 // ============================================================================
 // Global System Flags
 // ============================================================================

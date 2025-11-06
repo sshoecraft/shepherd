@@ -39,19 +39,49 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
 
 // CLI Implementation
 CLI::CLI() : interactive_mode(false), eof_received(false),
-			 generation_cancelled(false), term_raw_mode(false) {
+			 generation_cancelled(false), term_raw_mode(false), tty_handle(nullptr) {
 }
 
 CLI::~CLI() {
 	restore_terminal();
+	if (tty_handle) {
+		fclose(tty_handle);
+	}
 }
 
 void CLI::initialize() {
+	// Set stderr to unbuffered mode for immediate prompt display
+	// We print prompts to stderr because mpirun handles it better
+	setvbuf(stderr, NULL, _IONBF, 0);
+
 	// Check if input is from a terminal or piped
 	interactive_mode = isatty(STDIN_FILENO);
 
+	// For MPI rank 0: Force interactive mode even if stdin is not a TTY
+	// (mpirun makes stdin appear as non-TTY even in interactive sessions)
+	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
+	if (mpi_rank_env) {
+		int mpi_rank = std::stoi(mpi_rank_env);
+		if (mpi_rank == 0) {
+			// Rank 0 handles user interaction
+			interactive_mode = true;
+			LOG_DEBUG("CLI initialized in interactive mode (MPI rank 0)");
+			// Open /dev/tty once for prompts (bypasses mpirun buffering)
+			tty_handle = fopen("/dev/tty", "w");
+			if (!tty_handle) {
+				LOG_DEBUG("Warning: Could not open /dev/tty, falling back to stderr for prompts");
+			}
+			return;
+		}
+	}
+
 	if (interactive_mode) {
 		LOG_DEBUG("CLI initialized in interactive mode");
+		// Open /dev/tty once for prompts (bypasses mpirun buffering)
+		tty_handle = fopen("/dev/tty", "w");
+		if (!tty_handle) {
+			LOG_DEBUG("Warning: Could not open /dev/tty, falling back to stderr for prompts");
+		}
 	} else {
 		LOG_DEBUG("CLI initialized in piped mode");
 	}
@@ -266,7 +296,14 @@ std::string CLI::get_input_line() {
 
 void CLI::show_prompt() {
 	if (interactive_mode) {
-		std::cerr << "\033[32m> \033[0m" << std::flush;
+		// Write to /dev/tty if available (bypasses mpirun buffering)
+		if (tty_handle) {
+			fprintf(tty_handle, "\033[32m> \033[0m");
+			fflush(tty_handle);
+		} else {
+			// Fallback to stderr if /dev/tty unavailable
+			std::cerr << "\033[32m> \033[0m" << std::flush;
+		}
 	}
 }
 
@@ -593,8 +630,60 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 					}
 
 					// Show assistant reasoning/content before tool call if present (only on first iteration)
+					// But skip if content is ONLY the tool call XML (no reasoning to show)
 					if (tool_loop_iteration == 1 && !resp.content.empty()) {
-						cli.show_assistant_message(resp.content);
+						// Check if there's actual content beyond just the tool call
+						// Search entire message content (may span multiple lines)
+						bool has_content_beyond_tool_call = false;
+						size_t tool_call_start = resp.content.find("<tool_call>");
+						size_t tool_call_end = resp.content.find("</tool_call>");
+
+						if (tool_call_start != std::string::npos && tool_call_end != std::string::npos) {
+							// Check if there's non-whitespace content before OR after the tool call
+							std::string before = resp.content.substr(0, tool_call_start);
+							std::string after = resp.content.substr(tool_call_end + 12); // 12 = length of "</tool_call>"
+
+							has_content_beyond_tool_call =
+								(before.find_first_not_of(" \t\n\r") != std::string::npos) ||
+								(after.find_first_not_of(" \t\n\r") != std::string::npos);
+						} else {
+							// No complete tool call found in content - show everything
+							has_content_beyond_tool_call = true;
+						}
+
+						if (has_content_beyond_tool_call) {
+							// Strip the tool call XML from display, only show reasoning
+							// Get content before and after the tool call (may span multiple lines)
+							std::string display_content = resp.content.substr(0, tool_call_start);
+							if (tool_call_end != std::string::npos && tool_call_end + 12 < resp.content.length()) {
+								display_content += resp.content.substr(tool_call_end + 12);
+							}
+
+							// Also remove <think>...</think> blocks unless in debug mode
+							if (g_debug_level == 0) {
+								size_t think_start = 0;
+								while ((think_start = display_content.find("<think>", think_start)) != std::string::npos) {
+									size_t think_end = display_content.find("</think>", think_start);
+									if (think_end != std::string::npos) {
+										display_content.erase(think_start, (think_end + 8) - think_start);
+									} else {
+										break;
+									}
+								}
+							}
+
+							// Trim whitespace
+							while (!display_content.empty() && std::isspace(display_content.back())) {
+								display_content.pop_back();
+							}
+							while (!display_content.empty() && std::isspace(display_content.front())) {
+								display_content.erase(0, 1);
+							}
+
+							if (!display_content.empty()) {
+								cli.show_assistant_message(display_content);
+							}
+						}
 					}
 
 					cli.show_tool_call(tool_name, params_str);
@@ -828,6 +917,14 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 									break;
 								}
 							}
+						}
+
+						// Trim leading and trailing whitespace
+						while (!display_content.empty() && std::isspace(display_content.back())) {
+							display_content.pop_back();
+						}
+						while (!display_content.empty() && std::isspace(display_content.front())) {
+							display_content.erase(0, 1);
 						}
 
 						if (!display_content.empty()) {

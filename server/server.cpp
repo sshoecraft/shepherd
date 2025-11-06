@@ -146,9 +146,11 @@ int run_server(std::unique_ptr<Backend>& backend,
                 // Parse incoming request into session context, then only send NEW items to backend
 
                 // Parse tools from request (if provided)
+                // Always clear tools first - client controls what tools are available
+                session.tools.clear();
+
                 if (request.contains("tools") && request["tools"].is_array()) {
                     // Convert OpenAI tools format to Session::Tool format
-                    session.tools.clear();  // Replace tools with new set
                     for (const auto& tool : request["tools"]) {
                         Session::Tool st;
 

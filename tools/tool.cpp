@@ -154,8 +154,10 @@ ToolResult execute_tool(const std::string& tool_name,
             }
         }
 
-        // Fallback: tool returned something else
-        return ToolResult(false, "", "Tool returned unexpected result format");
+        // If we get here, tool returned something without content/output/error keys
+        // Assume success with no output (common for write, delete, etc.)
+        // MCP tools often return {"success": true, "path": "..."} or similar
+        return ToolResult(true, "");
 
     } catch (const std::exception& e) {
         return ToolResult(false, "", std::string("Tool execution failed: ") + e.what());

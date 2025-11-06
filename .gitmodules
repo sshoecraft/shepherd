@@ -4,4 +4,5 @@
 	ignore = dirty
 [submodule "tokenizers"]
 	path = tokenizers
-	url = https://github.com/huggingface/tokenizers.git
+	url = https://github.com/mlc-ai/tokenizers-cpp.git
+	ignore = dirty

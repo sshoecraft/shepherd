@@ -773,8 +773,8 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
     llama_sampler_free(sampler);
 
-    // Add newline after streaming is complete
-    if (n_generated > 0) {
+    // Add newline after streaming is complete (only if we actually streamed)
+    if (n_generated > 0 && !suppress_streaming) {
         std::cout << std::endl;
     }
 

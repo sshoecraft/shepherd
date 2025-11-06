@@ -269,13 +269,22 @@ void ApiBackend::calibrate_token_counts(Session& session) {
         Response parsed = parse_http_response(response);
 
         if (!parsed.success) {
-            // Check for authentication errors - these should NOT be silently caught
+            // Check for critical errors that should fail immediately
+            // 1. Authentication errors (401, 403, etc.)
             if (response.status_code == 401 || response.status_code == 403 ||
                 parsed.error.find("authentication") != std::string::npos ||
                 parsed.error.find("invalid x-api-key") != std::string::npos ||
                 parsed.error.find("unauthorized") != std::string::npos) {
                 LOG_ERROR("Authentication failed: " + parsed.error);
                 throw BackendError("Authentication failed: " + parsed.error);
+            }
+
+            // 2. Connection errors (status_code 0 means connection failure)
+            if (response.status_code == 0 ||
+                parsed.error.find("Could not connect") != std::string::npos ||
+                parsed.error.find("connect to server") != std::string::npos) {
+                LOG_ERROR("Connection failed: " + parsed.error);
+                throw BackendError("Connection failed: " + parsed.error);
             }
 
             LOG_WARN("Calibration probe failed: " + parsed.error + ", using estimates");

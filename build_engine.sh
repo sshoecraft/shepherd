@@ -144,6 +144,7 @@ WORKERS=$((TP_SIZE * PP_SIZE))
     --max_batch_size $MAX_BATCH_SIZE \
     --max_input_len $MAX_INPUT_LEN \
     --max_seq_len $MAX_SEQ_LEN \
+    --max_num_tokens 2048 \
     --workers $WORKERS
 
 # Step 3: Copy tokenizer files to engine directory

@@ -20,5 +20,5 @@
 
 namespace tensorrt_llm::executor
 {
-static auto constexpr kTensorRtLlmVersion = "1.1.0rc6";
+static auto constexpr kTensorRtLlmVersion = "1.2.0rc3";
 }

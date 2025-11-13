@@ -25,6 +25,8 @@ from datetime import datetime
 import signal
 import functools
 import random
+import tempfile
+import shutil
 
 print = functools.partial(print, flush=True)
 
@@ -42,7 +44,27 @@ except ImportError:
 # ============================================================================
 
 SHEPHERD_BINARY = "/home/steve/bin/shepherd"
-DEFAULT_CONFIG = os.path.expanduser("~/.shepherd/config.json")
+#CODEX_BINARY = "/usr/local/bin/open-codex"
+SHEPHERD_SAFETY_WRAPPER = "/home/steve/src/shepherd/swebench_safety_wrapper.sh"
+#DEFAULT_CONFIG = os.path.expanduser("~/.shepherd/config.json")
+DEFAULT_CONFIG = ""
+
+# SWE-bench configuration
+SWEBENCH_TIMEOUT_SECONDS = 600  # 10 minutes per task
+SWEBENCH_REPOS = {
+    "astropy/astropy": "https://github.com/astropy/astropy.git",
+    "django/django": "https://github.com/django/django.git",
+    "matplotlib/matplotlib": "https://github.com/matplotlib/matplotlib.git",
+    "pallets/flask": "https://github.com/pallets/flask.git",
+    "psf/requests": "https://github.com/psf/requests.git",
+    "pydata/xarray": "https://github.com/pydata/xarray.git",
+    "pylint-dev/pylint": "https://github.com/pylint-dev/pylint.git",
+    "pytest-dev/pytest": "https://github.com/pytest-dev/pytest.git",
+    "scikit-learn/scikit-learn": "https://github.com/scikit-learn/scikit-learn.git",
+    "sphinx-doc/sphinx": "https://github.com/sphinx-doc/sphinx.git",
+    "sympy/sympy": "https://github.com/sympy/sympy.git",
+    "mwaskom/seaborn": "https://github.com/mwaskom/seaborn.git",
+}
 
 # MMLU dataset info
 MMLU_SUBJECTS = [
@@ -62,75 +84,7 @@ MMLU_SUBJECTS = [
     "security_studies", "sociology", "us_foreign_policy", "virology", "world_religions"
 ]
 
-# ============================================================================
-# Embedded Benchmark Questions
-# ============================================================================
-
-# MMLU sample questions (multiple choice, A-D format)
-MMLU_QUESTIONS = [
-    {
-        "subject": "computer_science",
-        "question": "What is the time complexity of binary search?",
-        "choices": ["O(n)", "O(log n)", "O(n log n)", "O(n^2)"],
-        "answer": "B"
-    },
-    {
-        "subject": "mathematics",
-        "question": "What is the derivative of x^2?",
-        "choices": ["x", "2x", "x^2", "2"],
-        "answer": "B"
-    },
-    {
-        "subject": "history",
-        "question": "In which year did World War II end?",
-        "choices": ["1943", "1944", "1945", "1946"],
-        "answer": "C"
-    },
-    {
-        "subject": "physics",
-        "question": "What is the speed of light in vacuum?",
-        "choices": ["299,792,458 m/s", "300,000,000 m/s", "299,000,000 m/s", "298,792,458 m/s"],
-        "answer": "A"
-    },
-    {
-        "subject": "chemistry",
-        "question": "What is the chemical symbol for gold?",
-        "choices": ["Go", "Gd", "Au", "Ag"],
-        "answer": "C"
-    },
-    {
-        "subject": "biology",
-        "question": "How many chromosomes do humans have?",
-        "choices": ["23", "44", "46", "48"],
-        "answer": "C"
-    },
-    {
-        "subject": "computer_science",
-        "question": "Which data structure uses FIFO (First In, First Out)?",
-        "choices": ["Stack", "Queue", "Tree", "Graph"],
-        "answer": "B"
-    },
-    {
-        "subject": "mathematics",
-        "question": "What is the value of pi to 2 decimal places?",
-        "choices": ["3.12", "3.14", "3.16", "3.18"],
-        "answer": "B"
-    },
-    {
-        "subject": "geography",
-        "question": "What is the capital of France?",
-        "choices": ["London", "Berlin", "Paris", "Madrid"],
-        "answer": "C"
-    },
-    {
-        "subject": "physics",
-        "question": "What is Newton's first law of motion?",
-        "choices": ["F=ma", "An object in motion stays in motion unless acted upon", "Action-reaction", "Energy is conserved"],
-        "answer": "B"
-    }
-]
-
-# HellaSwag sample questions (sentence completion)
+# HellaSwag sample questions - TODO: Remove these and download from HF properly
 HELLASWAG_QUESTIONS = [
     {
         "context": "A person is cooking in the kitchen. They",
@@ -190,7 +144,7 @@ HELLASWAG_QUESTIONS = [
 
 def load_mmlu_questions(subjects=None, count=None, split='test'):
     """
-    Load MMLU questions from Hugging Face or fall back to embedded samples.
+    Load MMLU questions from Hugging Face.
 
     Args:
         subjects: List of subject names to include, or None for all
@@ -198,50 +152,105 @@ def load_mmlu_questions(subjects=None, count=None, split='test'):
         split: Which split to use ('test', 'dev', 'validation')
     """
     if not DATASETS_AVAILABLE:
-        print("Using embedded MMLU samples (install 'datasets' for full dataset)")
-        questions = MMLU_QUESTIONS
-        if count:
-            questions = questions[:count]
-        return questions
+        raise RuntimeError("datasets library not installed. Run: pip install datasets")
 
-    try:
-        print("Loading MMLU dataset from Hugging Face...")
-        all_questions = []
+    print("Loading MMLU dataset from Hugging Face...")
 
-        # Load dataset
-        dataset = load_dataset("cais/mmlu", "all", split=split)
+    # Load dataset (returns DatasetDict with splits)
+    dataset_dict = load_dataset("cais/mmlu", "all")
 
-        # Filter by subjects if specified
-        if subjects:
-            subjects_set = set(subjects)
-            dataset = dataset.filter(lambda x: x['subject'] in subjects_set)
+    # Get the requested split
+    if split not in dataset_dict:
+        raise ValueError(f"Split '{split}' not found. Available: {list(dataset_dict.keys())}")
 
-        # Convert to our format
-        for item in dataset:
-            question = {
-                "subject": item['subject'],
-                "question": item['question'],
-                "choices": item['choices'],
-                "answer": chr(65 + item['answer'])  # Convert 0-3 to A-D
-            }
-            all_questions.append(question)
+    dataset = dataset_dict[split]
 
-        print(f"Loaded {len(all_questions)} questions from MMLU")
+    # Convert to our format
+    all_questions = []
+    for item in dataset:
+        question = {
+            "subject": item['subject'],
+            "question": item['question'],
+            "choices": item['choices'],
+            "answer": chr(65 + item['answer'])  # Convert 0-3 to A-D
+        }
+        all_questions.append(question)
 
-        # Sample if count specified
-        if count and count < len(all_questions):
-            all_questions = random.sample(all_questions, count)
-            print(f"Randomly sampled {count} questions")
+    print(f"Loaded {len(all_questions)} questions from MMLU")
 
-        return all_questions
+    # Filter by subjects if specified
+    if subjects:
+        subjects_set = set(subjects)
+        all_questions = [q for q in all_questions if q['subject'] in subjects_set]
+        print(f"Filtered to {len(all_questions)} questions for subjects: {', '.join(subjects)}")
 
-    except Exception as e:
-        print(f"Error loading MMLU from Hugging Face: {e}")
-        print("Falling back to embedded samples")
-        questions = MMLU_QUESTIONS
-        if count:
-            questions = questions[:count]
-        return questions
+    # Sample if count specified
+    if count and count < len(all_questions):
+        all_questions = random.sample(all_questions, count)
+        print(f"Randomly sampled {count} questions")
+
+    return all_questions
+
+# ============================================================================
+# SWE-bench Dataset Loading
+# ============================================================================
+
+def load_swebench_tasks(count=None, difficulty=None, repos=None, split='test'):
+    """
+    Load SWE-bench Verified tasks from Hugging Face.
+
+    Args:
+        count: Number of tasks to sample, or None for all
+        difficulty: Filter by difficulty ('easy', 'medium', 'hard', 'very hard')
+        repos: List of repo names to include (e.g., ['django/django', 'flask/flask'])
+        split: Which split to use ('test' is the only one available)
+    """
+    if not DATASETS_AVAILABLE:
+        raise RuntimeError("datasets library not installed. Run: pip install datasets")
+
+    print("Loading SWE-bench Verified dataset from Hugging Face...")
+
+    # Load dataset
+    dataset = load_dataset("princeton-nlp/SWE-bench_Verified", split=split)
+
+    # Convert to our format
+    all_tasks = []
+    for item in dataset:
+        task = {
+            "instance_id": item['instance_id'],
+            "repo": item['repo'],
+            "base_commit": item['base_commit'],
+            "problem_statement": item['problem_statement'],
+            "hints_text": item.get('hints_text', ''),
+            "patch": item['patch'],
+            "test_patch": item['test_patch'],
+            "FAIL_TO_PASS": item['FAIL_TO_PASS'],
+            "PASS_TO_PASS": item['PASS_TO_PASS'],
+            "difficulty": item.get('difficulty', 'unknown'),
+            "version": item.get('version', ''),
+            "environment_setup_commit": item.get('environment_setup_commit', '')
+        }
+        all_tasks.append(task)
+
+    print(f"Loaded {len(all_tasks)} tasks from SWE-bench Verified")
+
+    # Filter by difficulty if specified
+    if difficulty:
+        all_tasks = [t for t in all_tasks if t['difficulty'] == difficulty]
+        print(f"Filtered to {len(all_tasks)} tasks with difficulty: {difficulty}")
+
+    # Filter by repos if specified
+    if repos:
+        repos_set = set(repos)
+        all_tasks = [t for t in all_tasks if t['repo'] in repos_set]
+        print(f"Filtered to {len(all_tasks)} tasks for repos: {', '.join(repos)}")
+
+    # Sample if count specified
+    if count and count < len(all_tasks):
+        all_tasks = random.sample(all_tasks, count)
+        print(f"Randomly sampled {count} tasks")
+
+    return all_tasks
 
 # ============================================================================
 # Data Classes
@@ -340,7 +349,7 @@ class ShepherdProcess:
             print(f"  ERROR: Failed to start shepherd: {e}")
             return False
 
-    def send_question(self, question_text: str, timeout: float = 30.0) -> Tuple[str, float]:
+    def send_question(self, question_text: str) -> Tuple[str, float]:
         """Send a question and get response with timing"""
         if not self.process or self.process.poll() is not None:
             return "", 0
@@ -354,7 +363,9 @@ class ShepherdProcess:
 
             # Send question
             if self.verbose:
-                print(f"    [DEBUG] Sending question: {single_line_question[:100]}...")
+                print(f"    ===== SENDING TO SHEPHERD =====")
+                print(f"    {single_line_question}")
+                print(f"    ===============================")
 
             self.process.stdin.write(single_line_question + "\n")
             self.process.stdin.flush()
@@ -363,28 +374,22 @@ class ShepherdProcess:
             response_lines = []
             stderr_lines = []
             last_output_time = time.time()
-            lines_received = 0
             answer_lines = []  # Lines starting with '<'
 
             time.sleep(0.2)
 
-            while time.time() - start_time < timeout:
+            while True:
                 # Check stdout
                 try:
                     while True:
                         line = self.stdout_queue.get_nowait()
                         response_lines.append(line)
                         last_output_time = time.time()
-                        lines_received += 1
 
                         # Track answer lines (starting with '<' but not thinking blocks)
                         stripped = line.strip()
                         if stripped.startswith('<') and not stripped.startswith('<think') and not stripped.startswith('</think'):
                             answer_lines.append(line)
-                            if self.verbose:
-                                print(f"    [DEBUG] *** ANSWER LINE: {line}")
-                        elif self.verbose and lines_received <= 10:
-                            print(f"    [DEBUG] Got stdout line: {line[:80]}")
                 except queue.Empty:
                     pass
 
@@ -393,8 +398,6 @@ class ShepherdProcess:
                     while True:
                         line = self.stderr_queue.get_nowait()
                         stderr_lines.append(line)
-                        if self.verbose and "error" in line.lower():
-                            print(f"    [DEBUG] Got stderr: {line[:80]}")
                 except queue.Empty:
                     pass
 
@@ -407,21 +410,14 @@ class ShepherdProcess:
 
                 time.sleep(0.1)
 
-            if self.verbose:
-                print(f"    [DEBUG] Total lines received: {lines_received}")
-                print(f"    [DEBUG] Answer lines (starting with '<'): {len(answer_lines)}")
-                print(f"    [DEBUG] Stderr lines: {len(stderr_lines)}")
-                if answer_lines:
-                    print(f"    [DEBUG] Answer lines captured:")
-                    for line in answer_lines:
-                        print(f"      >>> {line}")
-                if lines_received > 10:
-                    print(f"    [DEBUG] Last 10 stdout lines:")
-                    for line in response_lines[-10:]:
-                        print(f"      {line[:80]}")
-
             response_time = (time.time() - start_time) * 1000
             response = '\n'.join(response_lines)
+
+            if self.verbose:
+                print(f"    ===== RESPONSE FROM SHEPHERD =====")
+                print(f"    {response}")
+                print(f"    ===================================")
+
             return response, response_time
 
         except Exception as e:
@@ -495,7 +491,7 @@ class BenchmarkTestRunner:
 
         # Third priority: Look for standalone letter at start of line
         for letter in ['A', 'B', 'C', 'D']:
-            if f"\\n{letter}\\n" in f"\\n{response_upper}\\n":
+            if f"\n{letter}\n" in f"\n{response_upper}\n":
                 return letter
             if response_upper.strip().startswith(letter + " ") or response_upper.strip() == letter:
                 return letter
@@ -695,6 +691,291 @@ class BenchmarkTestRunner:
             details=results["details"]
         )
 
+    def run_swebench_benchmark(self, count: int = None, difficulty: str = None, repos: List[str] = None) -> BenchmarkResult:
+        """Run SWE-bench Verified benchmark tasks"""
+        tasks = load_swebench_tasks(count=count, difficulty=difficulty, repos=repos)
+
+        print(f"\n{'='*70}")
+        print(f"Running SWE-bench Verified Benchmark ({len(tasks)} tasks)")
+        print(f"{'='*70}\n")
+
+        results = {
+            "passed": 0,
+            "failed": 0,
+            "errors": 0,
+            "details": [],
+            "task_times": []
+        }
+
+        start_time = time.time()
+
+        for i, task in enumerate(tasks, 1):
+            print(f"\n[{i}/{len(tasks)}] {task['instance_id']}")
+            print(f"  Repo: {task['repo']}")
+            print(f"  Difficulty: {task['difficulty']}")
+            if self.verbose:
+                print(f"\n  FULL PROBLEM STATEMENT:")
+                print(f"  {'-'*70}")
+                print(f"  {task['problem_statement']}")
+                print(f"  {'-'*70}\n")
+            else:
+                print(f"  Problem: {task['problem_statement'][:100]}...")
+
+            task_start = time.time()
+
+            # Run task in isolated environment
+            passed, error_msg = self._run_isolated_task(task)
+            task_time = (time.time() - task_start) * 1000
+            results["task_times"].append(task_time)
+
+            detail = {
+                "task_num": i,
+                "instance_id": task['instance_id'],
+                "repo": task['repo'],
+                "difficulty": task['difficulty'],
+                "passed": passed,
+                "error": error_msg,
+                "time_ms": task_time
+            }
+
+            if error_msg:
+                results["errors"] += 1
+                detail["status"] = "ERROR"
+                print(f"  ✗ ERROR: {error_msg}")
+            elif passed:
+                results["passed"] += 1
+                detail["status"] = "PASSED"
+                print(f"  ✓ PASSED")
+            else:
+                results["failed"] += 1
+                detail["status"] = "FAILED"
+                print(f"  ✗ FAILED: Tests did not pass")
+
+            if self.verbose:
+                print(f"    Task time: {task_time/1000:.1f}s")
+
+            results["details"].append(detail)
+
+        duration_ms = (time.time() - start_time) * 1000
+        total = len(tasks)
+        success_rate = (results["passed"] / total * 100) if total > 0 else 0
+        avg_time = sum(results["task_times"]) / len(results["task_times"]) if results["task_times"] else 0
+
+        return BenchmarkResult(
+            config_file=self.config_file,
+            benchmark_type="SWE-bench",
+            total_questions=total,
+            correct=results["passed"],
+            incorrect=results["failed"],
+            errors=results["errors"],
+            accuracy_percent=success_rate,
+            avg_response_time_ms=avg_time,
+            duration_ms=duration_ms,
+            details=results["details"]
+        )
+
+    def _run_isolated_task(self, task: Dict) -> Tuple[bool, Optional[str]]:
+        """
+        Run a single SWE-bench task in an isolated temporary directory.
+
+        Returns:
+            (passed, error_msg): True if tests passed, error message if failed
+        """
+        work_dir = None
+
+        try:
+            # Create isolated temporary directory
+            work_dir = tempfile.mkdtemp(prefix=f"swebench_{task['instance_id']}_")
+            if self.verbose:
+                print(f"    Work dir: {work_dir}")
+
+            # Get repository URL
+            repo_name = task['repo']
+            if repo_name not in SWEBENCH_REPOS:
+                return False, f"Unknown repository: {repo_name}"
+
+            repo_url = SWEBENCH_REPOS[repo_name]
+            repo_dir = os.path.join(work_dir, repo_name.split('/')[-1])
+
+            # Clone repository
+            if self.verbose:
+                print(f"    Cloning {repo_url}...")
+
+            clone_result = subprocess.run(
+                ["git", "clone", repo_url, repo_dir],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            if clone_result.returncode != 0:
+                return False, f"Clone failed: {clone_result.stderr[:200]}"
+
+            # Checkout base commit
+            if self.verbose:
+                print(f"    Checking out commit {task['base_commit'][:8]}...")
+
+            checkout_result = subprocess.run(
+                ["git", "checkout", task['base_commit']],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if checkout_result.returncode != 0:
+                return False, f"Checkout failed: {checkout_result.stderr[:200]}"
+
+            # Apply test patch to set up test environment
+            if task['test_patch']:
+                if self.verbose:
+                    print(f"    Applying test patch...")
+
+                test_patch_file = os.path.join(work_dir, "test.patch")
+                with open(test_patch_file, 'w') as f:
+                    f.write(task['test_patch'])
+
+                patch_result = subprocess.run(
+                    ["git", "apply", test_patch_file],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+
+                if patch_result.returncode != 0:
+                    if self.verbose:
+                        print(f"    Warning: Test patch failed: {patch_result.stderr[:100]}")
+
+            # Start Shepherd in the repo directory with safety wrapper
+            if self.verbose:
+                print(f"    Starting Shepherd with safety restrictions...")
+
+            shepherd_base_cmd = [
+                SHEPHERD_BINARY,
+                "--system-prompt",
+                f"You are an expert software engineer. Fix the following issue in the {repo_name} codebase:\n\n{task['problem_statement']}\n\nUse the available tools to read files, make changes, and test your solution. Stay focused on fixing this specific issue."
+            ]
+
+            if self.config_file and os.path.exists(self.config_file):
+                shepherd_base_cmd.extend(["--config", self.config_file])
+
+            # Wrap with safety script
+            shepherd_cmd = [SHEPHERD_SAFETY_WRAPPER, repo_dir] + shepherd_base_cmd
+
+            # Set up restricted environment
+            env = os.environ.copy()
+            env['HOME'] = work_dir  # Prevent access to real home directory
+            env['SHEPHERD_WORKSPACE'] = repo_dir  # Hint at working directory
+            # Remove potentially dangerous env vars
+            for key in ['SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']:
+                env.pop(key, None)
+
+            # Run Shepherd with timeout and restricted environment
+            try:
+                if self.verbose:
+                    # Real-time output mode - don't capture, let it print directly
+                    shepherd_proc = subprocess.Popen(
+                        shepherd_cmd,
+                        stdin=subprocess.PIPE,
+                        text=True,
+                        cwd=repo_dir,  # CRITICAL: Start in repo dir, not home
+                        env=env,  # Use restricted environment
+                        preexec_fn=os.setsid
+                    )
+
+                    # Send problem and wait
+                    shepherd_proc.stdin.write(f"{task['problem_statement']}\n\nPlease fix this issue.\nexit\n")
+                    shepherd_proc.stdin.flush()
+                    shepherd_proc.wait(timeout=SWEBENCH_TIMEOUT_SECONDS)
+                    stdout = ""
+                    stderr = ""
+                else:
+                    # Capture mode
+                    shepherd_proc = subprocess.Popen(
+                        shepherd_cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=repo_dir,  # CRITICAL: Start in repo dir, not home
+                        env=env,  # Use restricted environment
+                        preexec_fn=os.setsid
+                    )
+
+                    # Send "exit" after timeout or when done
+                    stdout, stderr = shepherd_proc.communicate(
+                        input=f"{task['problem_statement']}\n\nPlease fix this issue.\nexit\n",
+                        timeout=SWEBENCH_TIMEOUT_SECONDS
+                    )
+
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(shepherd_proc.pid), signal.SIGKILL)
+                except:
+                    pass
+                return False, "Timeout: Task took longer than 10 minutes"
+
+            # Run tests to validate solution
+            if self.verbose:
+                print(f"    Running tests...")
+
+            # Parse FAIL_TO_PASS tests
+            tests_to_check = self._parse_test_list(task['FAIL_TO_PASS'])
+
+            if not tests_to_check:
+                return False, "No tests specified to validate"
+
+            # Find python3 executable (use system python, not virtualenv)
+            python_exe = shutil.which('python3') or shutil.which('python') or '/usr/bin/python3'
+
+            # Run pytest on the specified tests
+            test_cmd = [python_exe, "-m", "pytest", "-xvs"] + tests_to_check
+
+            test_result = subprocess.run(
+                test_cmd,
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=os.environ.copy()  # Use full environment for test execution
+            )
+
+            # Check if tests passed
+            passed = test_result.returncode == 0
+
+            if self.verbose and not passed:
+                print(f"    Test output: {test_result.stdout[-500:]}")
+
+            return passed, None
+
+        except Exception as e:
+            return False, f"Exception: {str(e)[:200]}"
+
+        finally:
+            # Cleanup: Remove temporary directory
+            if work_dir and os.path.exists(work_dir):
+                try:
+                    shutil.rmtree(work_dir)
+                    if self.verbose:
+                        print(f"    Cleaned up {work_dir}")
+                except Exception as e:
+                    print(f"    Warning: Failed to cleanup {work_dir}: {e}")
+
+    def _parse_test_list(self, test_string: str) -> List[str]:
+        """Parse test specification string into list of test paths"""
+        if not test_string:
+            return []
+
+        # Test strings are JSON arrays like: '["test_file.py::test_name"]'
+        try:
+            import json
+            tests = json.loads(test_string)
+            return tests if isinstance(tests, list) else [str(tests)]
+        except:
+            # Fallback: split by newlines/commas
+            return [t.strip() for t in test_string.replace(',', '\n').split('\n') if t.strip()]
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -724,23 +1005,29 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Test shepherd accuracy on AI benchmarks (MMLU, HellaSwag)"
+        description="Test shepherd accuracy on AI benchmarks (MMLU, HellaSwag, SWE-bench)"
     )
     parser.add_argument("--config", "-c",
                        help="Shepherd config file (default: ~/.shepherd/config.json)")
     parser.add_argument("--benchmark", "-b",
-                       choices=["mmlu", "hellaswag", "both"],
-                       default="both",
+                       choices=["mmlu", "hellaswag", "swebench", "all"],
+                       default="all",
                        help="Which benchmark to run")
     parser.add_argument("--count", "-n",
                        type=int,
-                       help="Number of questions to test (default: all)")
+                       help="Number of questions/tasks to test (default: all)")
     parser.add_argument("--subjects",
                        nargs="+",
                        help="MMLU subjects to test (e.g., --subjects computer_science machine_learning)")
     parser.add_argument("--list-subjects",
                        action="store_true",
                        help="List all available MMLU subjects and exit")
+    parser.add_argument("--difficulty",
+                       choices=["easy", "medium", "hard", "very hard"],
+                       help="SWE-bench difficulty filter")
+    parser.add_argument("--repos",
+                       nargs="+",
+                       help="SWE-bench repositories to test (e.g., --repos django/django flask/flask)")
     parser.add_argument("--output", "-o",
                        help="Output JSON file for results")
     parser.add_argument("--verbose", "-v",
@@ -782,14 +1069,24 @@ def main():
     try:
         results = []
 
-        if args.benchmark in ["mmlu", "both"]:
+        if args.benchmark in ["mmlu", "all"]:
             result = runner.run_mmlu_benchmark(count=args.count, subjects=args.subjects)
             if result:
                 print_summary(result)
                 results.append(result)
 
-        if args.benchmark in ["hellaswag", "both"]:
+        if args.benchmark in ["hellaswag", "all"]:
             result = runner.run_hellaswag_benchmark(count=args.count)
+            if result:
+                print_summary(result)
+                results.append(result)
+
+        if args.benchmark in ["swebench", "all"]:
+            result = runner.run_swebench_benchmark(
+                count=args.count,
+                difficulty=args.difficulty,
+                repos=args.repos
+            )
             if result:
                 print_summary(result)
                 results.append(result)

@@ -1,0 +1,370 @@
+#include "api_server.h"
+#include "../logger.h"
+#include "../session.h"
+#include "../backends/backend.h"
+#include "../tools/tool_parser.h"
+#include "../http_client.h"
+#include <chrono>
+#include <sstream>
+#include <iomanip>
+
+using json = nlohmann::json;
+
+// Generate random ID for chat completion
+static std::string generate_id() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_int_distribution<> dis(0, 15);
+    static const char* hex = "0123456789abcdef";
+
+    std::string id = "chatcmpl-";
+    for (int i = 0; i < 8; i++) {
+        id += hex[dis(gen)];
+    }
+    return id;
+}
+
+// Extract tool call from response (same as server.cpp)
+static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
+    if (resp.content.empty()) {
+        return std::nullopt;
+    }
+    return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
+}
+
+// Create OpenAI-compatible error response
+static json create_error_response(int status_code, const std::string& message) {
+    std::string error_type;
+    switch (status_code) {
+        case 400:
+            error_type = "invalid_request_error";
+            break;
+        case 401:
+            error_type = "authentication_error";
+            break;
+        case 429:
+            error_type = "rate_limit_error";
+            break;
+        case 500:
+            error_type = "server_error";
+            break;
+        default:
+            error_type = "api_error";
+    }
+
+    return json{
+        {"error", {
+            {"message", message},
+            {"type", error_type},
+            {"code", std::to_string(status_code)}
+        }}
+    };
+}
+
+// Check if error message is a context limit error (400 vs 500)
+static bool is_context_limit_error(const std::string& error_msg) {
+    std::string lower_msg = error_msg;
+    std::transform(lower_msg.begin(), lower_msg.end(), lower_msg.begin(), ::tolower);
+    return (lower_msg.find("context limit") != std::string::npos ||
+            lower_msg.find("context window") != std::string::npos ||
+            lower_msg.find("maximum context") != std::string::npos ||
+            lower_msg.find("context length") != std::string::npos ||
+            lower_msg.find("exceeded") != std::string::npos);
+}
+
+int run_native_api_server(Backend* backend, const std::string& host, int port) {
+    httplib::Server svr;
+
+    LOG_INFO("Starting native C++ API server on " + host + ":" + std::to_string(port));
+
+    // POST /v1/chat/completions - OpenAI-compatible chat completions
+    svr.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            // Parse request body as JSON
+            json request;
+            try {
+                request = json::parse(req.body);
+            } catch (const std::exception& e) {
+                res.status = 400;
+                res.set_content(create_error_response(400, "Invalid JSON").dump(), "application/json");
+                return;
+            }
+
+            // Check for streaming (not supported yet)
+            if (request.value("stream", false)) {
+                res.status = 400;
+                res.set_content(create_error_response(400, "Streaming not yet supported").dump(), "application/json");
+                return;
+            }
+
+            // Create session for this request
+            Session session;
+
+            // Parse tools from request (if provided)
+            session.tools.clear();
+            if (request.contains("tools") && request["tools"].is_array()) {
+                for (const auto& tool : request["tools"]) {
+                    Session::Tool st;
+
+                    // OpenAI format: tool["function"]["name"]
+                    if (tool.contains("function") && tool["function"].is_object()) {
+                        st.name = tool["function"].value("name", "");
+                        st.description = tool["function"].value("description", "");
+                        if (tool["function"].contains("parameters")) {
+                            st.parameters = tool["function"]["parameters"];
+                        } else {
+                            st.parameters = json::object();
+                        }
+                    } else {
+                        // Fallback: direct format
+                        st.name = tool.value("name", "");
+                        st.description = tool.value("description", "");
+                        if (tool.contains("parameters")) {
+                            st.parameters = tool["parameters"];
+                        } else {
+                            st.parameters = json::object();
+                        }
+                    }
+                    session.tools.push_back(st);
+                }
+                LOG_DEBUG("Parsed " + std::to_string(session.tools.size()) + " tools from request");
+            }
+
+            // Parse messages from request into session
+            // OpenAI protocol sends FULL conversation history each time, so REPLACE not append
+            session.messages.clear();
+            for (const auto& msg : request["messages"]) {
+                std::string role = msg["role"];
+                std::string content = msg.value("content", "");
+
+                // Convert role to Message::Type
+                Message::Type type;
+                if (role == "system") {
+                    // System messages handled separately
+                    session.system_message = content;
+                    continue;
+                } else if (role == "user") {
+                    type = Message::USER;
+                } else if (role == "assistant") {
+                    type = Message::ASSISTANT;
+                } else if (role == "tool") {
+                    type = Message::TOOL;
+                } else {
+                    type = Message::USER; // fallback
+                }
+
+                // Create Message with estimated tokens
+                Message m(type, content, content.length() / 4);
+                if (msg.contains("tool_call_id")) {
+                    m.tool_call_id = msg["tool_call_id"];
+                }
+                if (msg.contains("name")) {
+                    m.tool_name = msg["name"];
+                }
+                if (msg.contains("tool_calls")) {
+                    m.tool_calls_json = msg["tool_calls"].dump();
+                }
+                session.messages.push_back(m);
+
+                // Track last user/assistant messages for context preservation
+                if (type == Message::USER) {
+                    session.last_user_message_index = session.messages.size() - 1;
+                    session.last_user_message_tokens = m.tokens;
+                } else if (type == Message::ASSISTANT) {
+                    session.last_assistant_message_index = session.messages.size() - 1;
+                    session.last_assistant_message_tokens = m.tokens;
+                }
+            }
+
+            // Parse parameters
+            int max_tokens = 0;
+            if (request.contains("max_tokens")) {
+                max_tokens = request["max_tokens"];
+            }
+
+            // TODO: Use temperature and top_p from request
+            // float temperature = request.value("temperature", 0.7f);
+            // float top_p = request.value("top_p", 0.9f);
+
+            // Generate response from Session
+            LOG_DEBUG("Calling generate_from_session with " + std::to_string(session.messages.size()) +
+                     " messages and " + std::to_string(session.tools.size()) + " tools");
+
+            Response resp = backend->generate_from_session(session, max_tokens);
+
+            // Check for errors
+            if (!resp.success) {
+                // Check if this is a context limit error (400 vs 500)
+                if (is_context_limit_error(resp.error)) {
+                    res.status = 400;
+                    json error_resp = {
+                        {"error", {
+                            {"message", resp.error},
+                            {"type", "invalid_request_error"},
+                            {"code", "context_length_exceeded"}
+                        }}
+                    };
+                    res.set_content(error_resp.dump(), "application/json");
+                } else {
+                    res.status = 500;
+                    res.set_content(create_error_response(500, resp.error).dump(), "application/json");
+                }
+                return;
+            }
+
+            // Check for tool calls
+            auto tool_call_opt = extract_tool_call(resp, backend);
+
+            // Build OpenAI-compatible response
+            json choice = {
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", ""}
+                }},
+                {"finish_reason", "stop"}
+            };
+
+            if (tool_call_opt.has_value()) {
+                auto tool_call = tool_call_opt.value();
+                choice["message"]["content"] = "";
+                choice["finish_reason"] = "tool_calls";
+
+                json tc;
+                tc["id"] = tool_call.tool_call_id.empty() ?
+                          "call_" + std::to_string(std::time(nullptr)) :
+                          tool_call.tool_call_id;
+                tc["type"] = "function";
+
+                // Build function object with name and arguments
+                json function_obj;
+                function_obj["name"] = tool_call.name;
+
+                // Convert parameters to JSON object
+                json parameters = json::object();
+                for (const auto& [key, value] : tool_call.parameters) {
+                    if (value.type() == typeid(std::string)) {
+                        parameters[key] = std::any_cast<std::string>(value);
+                    } else if (value.type() == typeid(int)) {
+                        parameters[key] = std::any_cast<int>(value);
+                    } else if (value.type() == typeid(double)) {
+                        parameters[key] = std::any_cast<double>(value);
+                    } else if (value.type() == typeid(bool)) {
+                        parameters[key] = std::any_cast<bool>(value);
+                    }
+                }
+
+                // OpenAI expects arguments as a JSON string, not an object
+                function_obj["arguments"] = parameters.dump();
+
+                tc["function"] = function_obj;
+                choice["message"]["tool_calls"] = json::array({tc});
+            } else {
+                // No tool call - regular response
+                choice["message"]["content"] = resp.content;
+                choice["finish_reason"] = resp.finish_reason.empty() ? "stop" : resp.finish_reason;
+            }
+
+            // Get usage statistics
+            int prompt_tokens = resp.prompt_tokens;
+            int completion_tokens = resp.completion_tokens;
+
+            // Fall back to backend tracking if Response doesn't have counts
+            if (prompt_tokens == 0 && completion_tokens == 0) {
+                prompt_tokens = backend->last_prompt_tokens;
+                completion_tokens = backend->last_completion_tokens;
+            }
+
+            // Final fallback for local backends
+            if (prompt_tokens == 0 && completion_tokens == 0) {
+                prompt_tokens = backend->context_token_count;
+                completion_tokens = 0;
+            }
+
+            json response_body = {
+                {"id", generate_id()},
+                {"object", "chat.completion"},
+                {"created", std::time(nullptr)},
+                {"model", request.value("model", "shepherd")},
+                {"choices", json::array({choice})},
+                {"usage", {
+                    {"prompt_tokens", prompt_tokens},
+                    {"completion_tokens", completion_tokens},
+                    {"total_tokens", prompt_tokens + completion_tokens}
+                }}
+            };
+
+            res.set_content(response_body.dump(), "application/json");
+
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("Exception in /v1/chat/completions: ") + e.what());
+            res.status = 500;
+            res.set_content(create_error_response(500, e.what()).dump(), "application/json");
+        }
+    });
+
+    // GET /v1/models - List available models
+    svr.Get("/v1/models", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json model_info = {
+                {"id", backend->model_name},
+                {"object", "model"},
+                {"created", std::time(nullptr)},
+                {"owned_by", "shepherd"},
+                {"max_model_len", backend->context_size}
+            };
+
+            json response = {
+                {"object", "list"},
+                {"data", json::array({model_info})}
+            };
+
+            res.set_content(response.dump(), "application/json");
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("Exception in /v1/models: ") + e.what());
+            res.status = 500;
+            res.set_content(create_error_response(500, e.what()).dump(), "application/json");
+        }
+    });
+
+    // GET /v1/models/{model_name} - Get specific model info
+    svr.Get("/v1/models/:model_name", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json response = {
+                {"id", backend->model_name},
+                {"object", "model"},
+                {"created", std::time(nullptr)},
+                {"owned_by", "shepherd"},
+                {"context_window", backend->context_size},
+                {"backend", backend->backend_name},
+                {"model_name", backend->model_name}
+            };
+
+            res.set_content(response.dump(), "application/json");
+        } catch (const std::exception& e) {
+            LOG_ERROR(std::string("Exception in /v1/models/:model_name: ") + e.what());
+            res.status = 500;
+            res.set_content(create_error_response(500, e.what()).dump(), "application/json");
+        }
+    });
+
+    // GET /health - Health check
+    svr.Get("/health", [&](const httplib::Request& req, httplib::Response& res) {
+        json response = {
+            {"status", "ok"},
+            {"backend_connected", backend != nullptr}
+        };
+        res.set_content(response.dump(), "application/json");
+    });
+
+    // Start server
+    LOG_INFO("API server ready");
+    bool success = svr.listen(host.c_str(), port);
+
+    if (!success) {
+        LOG_ERROR("Failed to start API server");
+        return 1;
+    }
+
+    return 0;
+}

@@ -5,6 +5,8 @@
 #include "backends/backend.h"
 #include "nlohmann/json.hpp"
 #include "http_client.h"
+#include <vector>
+#include <string>
 
 class ApiBackend : public Backend {
 public:
@@ -13,8 +15,20 @@ public:
     int max_retries = 3;
     long connect_timeout_seconds = 30;
 
+    // Sampling parameters (common across API backends)
+    float temperature = 0.7f;
+    float top_p = 1.0f;
+    int top_k = 0;  // 0 = disabled (backend default)
+    float frequency_penalty = 0.5f;  // OpenAI, TensorRT-LLM
+    float presence_penalty = 0.0f;   // OpenAI
+    float repeat_penalty = 1.2f;     // Ollama, TensorRT-LLM (as repetition_penalty)
+    std::vector<std::string> stop_sequences;  // Stop generation at these sequences
+
     explicit ApiBackend(size_t max_context_tokens);
     virtual ~ApiBackend() = default;
+
+    // Parse backend configuration (sampling parameters)
+    void parse_backend_config(const std::string& json) override;
 
     // Initialize backend (query context size if needed, calibrate tokens)
     void initialize(Session& session) override;
@@ -27,6 +41,16 @@ public:
                         const std::string& tool_id = "",
                         int prompt_tokens = 0,
                         int max_tokens = 0) override;
+
+    // Streaming version - base implementation (backends override for real streaming)
+    Response add_message_stream(Session& session,
+                              Message::Type type,
+                              const std::string& content,
+                              StreamCallback callback,
+                              const std::string& tool_name = "",
+                              const std::string& tool_id = "",
+                              int prompt_tokens = 0,
+                              int max_tokens = 0) override;
 
     // Stateless generation from Session (for server with prefix caching)
     Response generate_from_session(const Session& session, int max_tokens = 0) override;
@@ -43,6 +67,9 @@ public:
     void set_chars_per_token(float ratio) { chars_per_token = ratio; }
 
 protected:
+    /// @brief Flag to track if we've tested streaming capability
+    bool streaming_tested = false;
+
     /// @brief Calibrate token counts by sending probe messages
     /// Sends system+"." and system+tools+"." to get exact token counts
     /// Backend-agnostic, uses build_request() to format requests

@@ -6,6 +6,7 @@
 #include "tools/tool_parser.h"
 #include <vector>
 #include <string>
+#include <functional>
 
 // Unified response structure returned by all backends
 struct Response {
@@ -26,6 +27,7 @@ struct Response {
     int completion_tokens = 0;                       // Tokens generated
     std::string finish_reason;                       // "stop", "tool_calls", "length", "error"
     std::string error;                               // Error message (empty if success)
+    bool was_streamed = false;                       // True if response was streamed (already output to user)
 
     // For CONTEXT_FULL or MAX_TOKENS_TOO_HIGH errors
     int overflow_tokens = 0;                         // How many tokens over the limit
@@ -58,11 +60,43 @@ public:
                                 int prompt_tokens = 0,
                                 int max_tokens = 0) = 0;
 
+    // Streaming callback for incremental response delivery
+    // delta: The text chunk just received
+    // accumulated: The complete response so far (for convenience)
+    // partial_response: Response object with current state (tokens, tool_calls, etc.)
+    // Returns true to continue streaming, false to abort
+    using StreamCallback = std::function<bool(const std::string& delta,
+                                              const std::string& accumulated,
+                                              const Response& partial_response)>;
+
+    // Streaming version of add_message
+    // Default implementation calls non-streaming version (for backwards compatibility)
+    // Backends override to provide true streaming
+    virtual Response add_message_stream(Session& session,
+                                       Message::Type type,
+                                       const std::string& content,
+                                       StreamCallback callback,
+                                       const std::string& tool_name = "",
+                                       const std::string& tool_id = "",
+                                       int prompt_tokens = 0,
+                                       int max_tokens = 0) {
+        // Default: call non-streaming version
+        Response resp = add_message(session, type, content, tool_name, tool_id, prompt_tokens, max_tokens);
+        if (resp.success && callback) {
+            // Simulate streaming with one final callback
+            callback(resp.content, resp.content, resp);
+        }
+        return resp;
+    }
+
     // Stateless generation from Session (for server with prefix caching)
     virtual Response generate_from_session(const Session& session, int max_tokens = 0) = 0;
 
-    // Tool support
+    // Tool and thinking tag markers (model-specific, extracted from chat template)
     virtual std::vector<std::string> get_tool_call_markers() const { return {}; }
+    virtual std::vector<std::string> get_tool_call_end_markers() const { return {}; }
+    virtual std::vector<std::string> get_thinking_start_markers() const { return {}; }
+    virtual std::vector<std::string> get_thinking_end_markers() const { return {}; }
 
     /// @brief Count tokens for a message (without adding to context)
     /// Formats exactly as add_message() would, but only returns token count
@@ -89,6 +123,7 @@ public:
     int last_completion_tokens;
     int context_token_count;
     bool is_local = false;  // true for GPU/local backends (llamacpp, tensorrt), false for API backends
+    bool streaming_enabled = false;  // true if backend supports and has enabled streaming
 
 protected:
     virtual void parse_backend_config(const std::string& json) {

@@ -330,6 +330,17 @@ nlohmann::json OllamaBackend::build_request_from_session(const Session& session,
     // Add options with num_ctx to ensure Ollama uses detected context size
     json options;
     options["num_ctx"] = context_size;
+
+    // Add sampling parameters (Ollama supports: temperature, top_p, top_k, repeat_penalty)
+    options["temperature"] = temperature;
+    options["top_p"] = top_p;
+    if (top_k > 0) {
+        options["top_k"] = top_k;
+    }
+    if (repeat_penalty != 1.0f) {
+        options["repeat_penalty"] = repeat_penalty;
+    }
+
     request["options"] = options;
 
     return request;
@@ -453,6 +464,17 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
     // Add options with num_ctx to ensure Ollama uses detected context size
     json options;
     options["num_ctx"] = context_size;
+
+    // Add sampling parameters (Ollama supports: temperature, top_p, top_k, repeat_penalty)
+    options["temperature"] = temperature;
+    options["top_p"] = top_p;
+    if (top_k > 0) {
+        options["top_k"] = top_k;
+    }
+    if (repeat_penalty != 1.0f) {
+        options["repeat_penalty"] = repeat_penalty;
+    }
+
     request["options"] = options;
 
     return request;

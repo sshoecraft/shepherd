@@ -3,12 +3,51 @@
 #include "api.h"
 #include "session.h"
 #include "message.h"
+#include "terminal_io.h"
+#include "sse_parser.h"
 
 // ApiBackend implementation
 ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
 	http_client = std::make_unique<HttpClient>();
 	http_client->set_timeout(timeout_seconds);
 	LOG_DEBUG("ApiBackend created");
+}
+
+void ApiBackend::parse_backend_config(const std::string& json) {
+    if (json.empty() || json == "{}") {
+        LOG_DEBUG("ApiBackend::parse_backend_config: empty config, using defaults");
+        return;  // No config, use defaults
+    }
+
+    try {
+        auto j = nlohmann::json::parse(json);
+
+        if (j.contains("temperature")) temperature = j["temperature"].get<float>();
+        if (j.contains("top_p")) top_p = j["top_p"].get<float>();
+        if (j.contains("top_k")) top_k = j["top_k"].get<int>();
+        if (j.contains("frequency_penalty")) frequency_penalty = j["frequency_penalty"].get<float>();
+        if (j.contains("presence_penalty")) presence_penalty = j["presence_penalty"].get<float>();
+        if (j.contains("repeat_penalty")) repeat_penalty = j["repeat_penalty"].get<float>();
+        if (j.contains("stop")) {
+            stop_sequences.clear();  // Clear defaults when user explicitly sets stop
+            if (j["stop"].is_array() && !j["stop"].empty()) {
+                stop_sequences = j["stop"].get<std::vector<std::string>>();
+            } else if (j["stop"].is_string()) {
+                stop_sequences.push_back(j["stop"].get<std::string>());
+            }
+            // If stop is empty array [], stop_sequences remains empty (no stopping)
+        }
+
+        LOG_DEBUG("Loaded API backend config: temperature=" + std::to_string(temperature) +
+                  ", top_p=" + std::to_string(top_p) +
+                  ", top_k=" + std::to_string(top_k) +
+                  ", frequency_penalty=" + std::to_string(frequency_penalty) +
+                  ", presence_penalty=" + std::to_string(presence_penalty) +
+                  ", repeat_penalty=" + std::to_string(repeat_penalty) +
+                  ", stop_sequences=" + std::to_string(stop_sequences.size()));
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to parse API backend config: " + std::string(e.what()));
+    }
 }
 
 void ApiBackend::initialize(Session& session) {
@@ -27,23 +66,62 @@ void ApiBackend::initialize(Session& session) {
         }
     }
 
-    // Calibrate token counts
-    LOG_INFO("Calibrating token counts...");
-    calibrate_token_counts(session);
+    // Calibrate token counts (if enabled in config)
+    if (config->calibration) {
+        LOG_INFO("Calibrating token counts...");
+        calibrate_token_counts(session);
+    } else {
+        LOG_INFO("Calibration disabled, using default estimates");
+        // Use default chars_per_token (already set to 2.5f in ApiBackend constructor)
+        session.system_message_tokens = estimate_message_tokens(session.system_message);
+        session.last_prompt_tokens = session.system_message_tokens;
+    }
 
     LOG_INFO("API backend initialization complete");
 }
 
-Response ApiBackend::add_message(Session& session,
-                                Message::Type type,
-                                const std::string& content,
-                                const std::string& tool_name,
-                                const std::string& tool_id,
-                                int prompt_tokens,
-                                int max_tokens) {
+Response ApiBackend::add_message(Session& session, Message::Type type, const std::string& content, const std::string& tool_name, const std::string& tool_id, int prompt_tokens, int max_tokens) {
     LOG_DEBUG("ApiBackend::add_message: prompt_tokens=" + std::to_string(prompt_tokens) +
              ", max_tokens=" + std::to_string(max_tokens));
 
+    // On first message, check config and try streaming if enabled
+    if (!streaming_tested) {
+        streaming_tested = true;
+        if (!config->streaming) {
+            streaming_enabled = false;
+            LOG_INFO("Streaming disabled via configuration");
+        } else {
+            streaming_enabled = true; // Will disable if it fails
+            LOG_INFO("Attempting streaming for first message...");
+        }
+    }
+
+    // If streaming is enabled, try it
+    if (streaming_enabled) {
+        tio.begin_response();  // Reset TerminalIO state before streaming
+
+        Response resp = add_message_stream(session, type, content,
+            [](const std::string& delta, const std::string& accumulated, const Response& partial) -> bool {
+                tio.write(delta.c_str(), delta.length());
+                return true;
+            },
+            tool_name, tool_id, prompt_tokens, max_tokens);
+
+        tio.end_response();  // Consume any incomplete tags
+
+        // If streaming succeeded, mark it and return
+        if (resp.success) {
+            resp.was_streamed = true;
+            return resp;
+        }
+
+        // Streaming failed - disable it and fall through to non-streaming
+        LOG_WARN("Streaming failed, disabling for future messages: " + resp.error);
+        streaming_enabled = false;
+        // Fall through to non-streaming code below
+    }
+
+    // Otherwise use non-streaming
     const int MAX_RETRIES = 3;
     int retry = 0;
 
@@ -58,7 +136,9 @@ Response ApiBackend::add_message(Session& session,
         std::string endpoint = get_api_endpoint();
 
         // Try to send
+//		std::cout << "request: " << request << std::endl;
         HttpResponse http_response = http_client->post(endpoint, request.dump(), headers);
+//		std::cout << "response: " << http_response.body << std::endl;
 
         // Parse response using backend-specific parser
         Response resp = parse_http_response(http_response);
@@ -243,6 +323,26 @@ int ApiBackend::count_message_tokens(Message::Type type,
              " (chars_per_token=" + std::to_string(chars_per_token) + ")");
 
     return estimated_tokens;
+}
+
+Response ApiBackend::add_message_stream(Session& session,
+                                       Message::Type type,
+                                       const std::string& content,
+                                       StreamCallback callback,
+                                       const std::string& tool_name,
+                                       const std::string& tool_id,
+                                       int prompt_tokens,
+                                       int max_tokens) {
+    // Base implementation: just call non-streaming version
+    // Derived classes override this for true streaming
+    Response resp = add_message(session, type, content, tool_name, tool_id, prompt_tokens, max_tokens);
+
+    // Invoke callback once with full response to simulate streaming
+    if (resp.success && callback) {
+        callback(resp.content, resp.content, resp);
+    }
+
+    return resp;
 }
 
 void ApiBackend::calibrate_token_counts(Session& session) {

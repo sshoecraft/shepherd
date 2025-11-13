@@ -8,6 +8,7 @@
 enum class ModelFamily {
     LLAMA_3_X,      // Llama 3.0, 3.1, 3.2, 3.3 - Uses ipython role, <|eom_id|>, <|python_tag|>
     QWEN_2_X,       // Qwen 2.x series - Uses <|im_start|>, tool role
+    QWEN_3_X,       // Qwen 3.x series (includes MindLink) - Uses <|im_start|>, tool role, enhanced capabilities
     GLM_4,          // GLM-4, 4.5, 4.6 - Uses <|observation|>, <think> tags
     MISTRAL,        // Mistral models - Uses [INST], tool role
     GEMMA,          // Google Gemma - Uses <start_of_turn>, tool role
@@ -37,6 +38,12 @@ struct ModelConfig {
 
     // Tool call format
     std::string tool_call_format;     // "json", "python_tag", "xml"
+
+    // Output markers for ModelOutput processing
+    std::vector<std::string> tool_call_start_markers;    // e.g., {"<tool_call>"}
+    std::vector<std::string> tool_call_end_markers;      // e.g., {"</tool_call>"}
+    std::vector<std::string> thinking_start_markers;     // e.g., {"<think>", "<thinking>"}
+    std::vector<std::string> thinking_end_markers;       // e.g., {"</think>", "</thinking>"}
 
     // Message format tags (populated by Models from chat template)
     std::string assistant_start_tag;  // e.g., "<|im_start|>assistant\n" or "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -80,6 +87,10 @@ struct ModelConfig {
             .supports_thinking_mode = false,
             .uses_observation_role = false,
             .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
             .assistant_start_tag = "assistant: ",
             .assistant_end_tag = "\n",
             .provider = "",
@@ -117,6 +128,10 @@ struct ModelConfig {
             .supports_thinking_mode = false,
             .uses_observation_role = false,
             .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
             .assistant_start_tag = "<|start_header_id|>assistant<|end_header_id|>\n\n",
             .assistant_end_tag = "<|eot_id|>",
             .provider = "local",
@@ -155,6 +170,10 @@ struct ModelConfig {
             .supports_thinking_mode = has_thinking,
             .uses_observation_role = true,
             .tool_call_format = "xml",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
             .assistant_start_tag = "<|assistant|>\n",
             .assistant_end_tag = "",
             .provider = "local",
@@ -192,6 +211,10 @@ struct ModelConfig {
             .supports_thinking_mode = false,
             .uses_observation_role = false,
             .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
             .assistant_start_tag = "<|im_start|>assistant\n",
             .assistant_end_tag = "<|im_end|>\n",
             .provider = "local",
@@ -215,6 +238,55 @@ struct ModelConfig {
             .replacement_model = "",
             .notes = ""
         };
+    }
+
+    /// @brief Create config for Qwen 3.x family (includes MindLink)
+    static ModelConfig create_qwen_3x(const std::string& version = "3", bool is_thinking = false) {
+        ModelConfig config{
+            .family = ModelFamily::QWEN_3_X,
+            .version = version,
+            .tool_result_role = "tool",
+            .uses_eom_token = false,
+            .uses_python_tag = false,
+            .uses_builtin_tools_array = false,
+            .supports_thinking_mode = is_thinking,
+            .uses_observation_role = false,
+            .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
+            .assistant_start_tag = "<|im_start|>assistant\n",
+            .assistant_end_tag = "<|im_end|>\n",
+            .provider = "local",
+            .model_name = "",
+            .context_window = 0,
+            .max_output_tokens = 0,
+            .max_cot_tokens = 0,
+            .max_tokens_param_name = "max_tokens",
+            .supported_endpoints = {},
+            .special_headers = {},
+            .aliases = {},
+            .supports_temperature = true,
+            .supports_streaming = true,
+            .vision_support = false,
+            .audio_support = false,
+            .function_calling_support = true,
+            .realtime_capable = false,
+            .fine_tunable = false,
+            .training_cutoff_date = "",
+            .deprecated = false,
+            .replacement_model = "",
+            .notes = ""
+        };
+
+        // Add thinking markers for thinking models
+        if (is_thinking) {
+            config.thinking_start_markers = {"<think>"};
+            config.thinking_end_markers = {"</think>"};
+        }
+
+        return config;
     }
 };
 
@@ -250,6 +322,18 @@ public:
     /// @param model_name Model identifier from API provider
     /// @return ModelConfig with full API metadata (context window, capabilities, etc.)
     static ModelConfig detect_from_api_model(const std::string& provider, const std::string& model_name);
+
+    /// @brief Load generation_config.json from model directory
+    /// Reads sampling parameters (temperature, top_p, top_k) from generation_config.json
+    /// @param model_dir_path Path to model directory
+    /// @param temperature Output parameter for temperature (unchanged if not found)
+    /// @param top_p Output parameter for top_p (unchanged if not found)
+    /// @param top_k Output parameter for top_k (unchanged if not found)
+    /// @return true if file was read successfully, false otherwise
+    static bool load_generation_config(const std::string& model_dir_path,
+                                       float& temperature,
+                                       float& top_p,
+                                       int& top_k);
 
     /// @brief Check if model supports a specific API endpoint
     /// @param model_name Model identifier

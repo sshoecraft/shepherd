@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "openai.h"
 #include "nlohmann/json.hpp"
+#include "sse_parser.h"
 
 using json = nlohmann::json;
 
@@ -9,6 +10,8 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
+
+    // Don't assume streaming - will test during initialize()
 
     // Detect model configuration from Models database (if model is specified)
     // If model is empty, it will be auto-detected in initialize() and config will be set there
@@ -279,7 +282,7 @@ std::string OpenAIBackend::query_available_model() {
         return "";
     }
 
-    // Make GET request to /models endpoint
+    // Try standard /v1/models endpoint first (implemented by 90%+ of servers)
     LOG_INFO("Querying server for available models");
     std::string response = make_get_request("/models");
 
@@ -288,6 +291,7 @@ std::string OpenAIBackend::query_available_model() {
         return "";
     }
 
+    std::string model_id;
     try {
         auto j = json::parse(response);
 
@@ -295,26 +299,59 @@ std::string OpenAIBackend::query_available_model() {
             // Get the first model from the list
             auto first_model = j["data"][0];
             if (first_model.contains("id") && first_model["id"].is_string()) {
-                std::string model_id = first_model["id"].get<std::string>();
+                model_id = first_model["id"].get<std::string>();
                 LOG_INFO("Found model from server: " + model_id);
 
                 // Extract max_model_len if available (vLLM/Shepherd server format)
                 if (first_model.contains("max_model_len") && first_model["max_model_len"].is_number()) {
                     int max_context = first_model["max_model_len"].get<int>();
                     model_config.context_window = max_context;
-                    LOG_INFO("Server reported context size: " + std::to_string(max_context));
+                    LOG_INFO("Server reported context size from /models: " + std::to_string(max_context));
                 }
-
-                return model_id;
             }
         }
 
-        LOG_WARN("No models found in /v1/models response");
-        return "";
+        if (model_id.empty()) {
+            LOG_WARN("No models found in /v1/models response");
+            return "";
+        }
     } catch (const json::exception& e) {
         LOG_WARN("Failed to parse /v1/models response: " + std::string(e.what()));
         return "";
     }
+
+    // If we didn't get context size from /v1/models, try llama.cpp /props endpoint as fallback
+    if (model_config.context_window == 0) {
+        // /props is at root level, not under /v1, so extract base URL
+        std::string base_url = api_endpoint;
+        size_t v1_pos = base_url.find("/v1/");
+        if (v1_pos != std::string::npos) {
+            base_url = base_url.substr(0, v1_pos);
+        }
+        std::string props_url = base_url + "/props";
+
+        std::map<std::string, std::string> headers;
+        // Don't send auth header for llama.cpp /props endpoint
+        HttpResponse props_resp = http_client->get(props_url, headers);
+
+        if (props_resp.is_success() && !props_resp.body.empty()) {
+            try {
+                auto props = json::parse(props_resp.body);
+                if (props.contains("default_generation_settings")) {
+                    auto settings = props["default_generation_settings"];
+                    if (settings.contains("n_ctx") && settings["n_ctx"].is_number()) {
+                        int n_ctx = settings["n_ctx"].get<int>();
+                        model_config.context_window = n_ctx;
+                        LOG_INFO("Server reported context size from /props: " + std::to_string(n_ctx));
+                    }
+                }
+            } catch (const json::exception& e) {
+                LOG_DEBUG("Failed to parse /props endpoint: " + std::string(e.what()));
+            }
+        }
+    }
+
+    return model_id;
 }
 
 
@@ -521,7 +558,7 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     }
 
     // Can't parse - return error
-    LOG_ERROR("Failed to parse token count from error message: " + error_message);
+    LOG_DEBUG("Failed to parse token count from error message: " + error_message);
     return -1;
 }
 
@@ -593,6 +630,23 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     // Note: max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
     if (max_tokens > 0) {
         request[model_config.max_tokens_param_name] = max_tokens;
+    }
+
+    // Add sampling parameters
+    request["temperature"] = temperature;
+    request["frequency_penalty"] = frequency_penalty;
+    request["presence_penalty"] = presence_penalty;
+    request["repetition_penalty"] = repeat_penalty;
+
+    // Add stop sequences if configured
+    LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
+    if (!stop_sequences.empty()) {
+        json stop_array = json::array();
+        for (const auto& seq : stop_sequences) {
+            stop_array.push_back(seq);
+        }
+        request["stop"] = stop_array;
+        LOG_DEBUG("Added stop sequences to request: " + stop_array.dump());
     }
 
     // Add special headers if any
@@ -697,6 +751,23 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
         request[model_config.max_tokens_param_name] = max_tokens;
     }
 
+    // Add sampling parameters
+    request["temperature"] = temperature;
+    request["frequency_penalty"] = frequency_penalty;
+    request["presence_penalty"] = presence_penalty;
+    request["repetition_penalty"] = repeat_penalty;
+
+    // Add stop sequences if configured
+    LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
+    if (!stop_sequences.empty()) {
+        json stop_array = json::array();
+        for (const auto& seq : stop_sequences) {
+            stop_array.push_back(seq);
+        }
+        request["stop"] = stop_array;
+        LOG_DEBUG("Added stop sequences to request: " + stop_array.dump());
+    }
+
     return request;
 }
 
@@ -732,6 +803,289 @@ std::string OpenAIBackend::get_api_endpoint() {
 #else
     return "";
 #endif
+}
+
+Response OpenAIBackend::add_message_stream(Session& session,
+                                          Message::Type type,
+                                          const std::string& content,
+                                          StreamCallback callback,
+                                          const std::string& tool_name,
+                                          const std::string& tool_id,
+                                          int prompt_tokens,
+                                          int max_tokens) {
+    LOG_DEBUG("OpenAIBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
+             ", max_tokens=" + std::to_string(max_tokens));
+
+    const int MAX_RETRIES = 3;
+    int retry = 0;
+
+    while (retry < MAX_RETRIES) {
+        // Build request with entire session + new message + max_tokens
+        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+
+        // Add streaming flag
+        request["stream"] = true;
+
+        LOG_DEBUG("Sending streaming request to API with max_tokens=" + std::to_string(max_tokens));
+
+        // Get headers and endpoint from backend
+        auto headers = get_api_headers();
+        std::string endpoint = get_api_endpoint();
+
+        // Streaming state
+        Response accumulated_resp;
+        accumulated_resp.success = true;
+        accumulated_resp.code = Response::SUCCESS;
+        std::string accumulated_content;
+        SSEParser sse_parser;
+        bool stream_complete = false;
+        bool has_error = false;
+
+        // Streaming callback to process SSE chunks
+        auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+            // Process SSE events from chunk
+            sse_parser.process_chunk(chunk,
+                [&](const std::string& event, const std::string& data, const std::string& id) -> bool {
+                    // Handle [DONE] sentinel
+                    if (data == "[DONE]") {
+                        stream_complete = true;
+                        return false; // Stop SSE processing
+                    }
+
+                    // Parse JSON data
+                    try {
+                        json delta_json = json::parse(data);
+
+                        // Extract delta content
+                        if (delta_json.contains("choices") && !delta_json["choices"].empty()) {
+                            const auto& choice = delta_json["choices"][0];
+
+                            // Get finish_reason if present
+                            if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
+                                accumulated_resp.finish_reason = choice["finish_reason"].get<std::string>();
+                            }
+
+                            // Get delta content
+                            if (choice.contains("delta")) {
+                                const auto& delta = choice["delta"];
+
+                                // Handle content delta
+                                if (delta.contains("content") && !delta["content"].is_null()) {
+                                    std::string delta_text = delta["content"].get<std::string>();
+                                    accumulated_content += delta_text;
+                                    accumulated_resp.content = accumulated_content;
+
+                                    // Only stream content if we haven't seen tool calls or <tool_call> tag
+                                    // The model outputs <tool_call> XML in content before tool_calls delta arrives
+                                    if (accumulated_resp.tool_calls.empty() &&
+                                        accumulated_content.find("<tool_call>") == std::string::npos) {
+                                        // Invoke user callback with delta
+                                        if (callback) {
+                                            if (!callback(delta_text, accumulated_content, accumulated_resp)) {
+                                                // User requested stop
+                                                return false;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Handle tool_calls delta (incremental)
+                                if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                                    for (const auto& tc_delta : delta["tool_calls"]) {
+                                        int index = tc_delta.value("index", 0);
+
+                                        // Ensure we have enough space in tool_calls vector
+                                        while (accumulated_resp.tool_calls.size() <= static_cast<size_t>(index)) {
+                                            accumulated_resp.tool_calls.push_back(ToolParser::ToolCall());
+                                        }
+
+                                        auto& tool_call = accumulated_resp.tool_calls[index];
+
+                                        // Accumulate ID
+                                        if (tc_delta.contains("id")) {
+                                            tool_call.tool_call_id = tc_delta["id"].get<std::string>();
+                                        }
+
+                                        // Accumulate function data
+                                        if (tc_delta.contains("function")) {
+                                            const auto& func = tc_delta["function"];
+                                            if (func.contains("name")) {
+                                                tool_call.name = func["name"].get<std::string>();
+                                            }
+                                            if (func.contains("arguments")) {
+                                                // Arguments come as string chunks - accumulate them
+                                                tool_call.raw_json += func["arguments"].get<std::string>();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Extract usage data (usually in final chunk)
+                        if (delta_json.contains("usage")) {
+                            const auto& usage = delta_json["usage"];
+                            accumulated_resp.prompt_tokens = usage.value("prompt_tokens", 0);
+                            accumulated_resp.completion_tokens = usage.value("completion_tokens", 0);
+                        }
+
+                    } catch (const std::exception& e) {
+                        LOG_WARN("Failed to parse SSE data: " + std::string(e.what()));
+                    }
+
+                    return true; // Continue processing
+                });
+
+            // Always return true to curl so it doesn't report errors
+            // We handle stream completion via stream_complete flag
+            return true;
+        };
+
+        // Make streaming HTTP call
+        HttpResponse http_response = http_client->post_stream(endpoint, request.dump(), headers,
+                                                             stream_handler, nullptr);
+
+        // Check for HTTP errors
+        if (!http_response.is_success()) {
+            // Parse error and handle context overflow as in non-streaming version
+            accumulated_resp.success = false;
+            accumulated_resp.code = Response::ERROR;
+            accumulated_resp.finish_reason = "error";
+            accumulated_resp.error = http_response.error_message;
+
+            // Check if context length error
+            int tokens_to_evict = extract_tokens_to_evict(http_response);
+
+            if (tokens_to_evict > 0) {
+                // Calculate which messages to evict
+                auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
+
+                if (ranges.empty()) {
+                    accumulated_resp.code = Response::CONTEXT_FULL;
+                    accumulated_resp.error = "Context full, cannot evict enough messages";
+                    return accumulated_resp;
+                }
+
+                // Evict messages
+                if (!session.evict_messages(ranges)) {
+                    accumulated_resp.error = "Failed to evict messages";
+                    return accumulated_resp;
+                }
+
+                retry++;
+                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + ")");
+                continue; // Retry
+            }
+
+            return accumulated_resp; // Return error
+        }
+
+        // Success - update session with messages
+        if (stream_complete && accumulated_resp.success) {
+            // Calculate token counts
+            int new_message_tokens;
+            if (accumulated_resp.prompt_tokens > 0 && session.last_prompt_tokens > 0) {
+                new_message_tokens = accumulated_resp.prompt_tokens - session.last_prompt_tokens;
+                if (new_message_tokens < 0) new_message_tokens = 1;
+            } else {
+                new_message_tokens = estimate_message_tokens(content);
+            }
+
+            // Update EMA ratio
+            if (new_message_tokens > 0 && content.length() > 0) {
+                float actual_ratio = (float)content.length() / new_message_tokens;
+                float deviation_ratio = actual_ratio / chars_per_token;
+
+                if (deviation_ratio >= 0.5f && deviation_ratio <= 2.0f) {
+                    const float alpha = 0.2f;
+                    chars_per_token = (1.0f - alpha) * chars_per_token + alpha * actual_ratio;
+                    if (chars_per_token < 2.0f) chars_per_token = 2.0f;
+                    if (chars_per_token > 5.0f) chars_per_token = 5.0f;
+                }
+            }
+
+            // Add messages to session
+            Message user_msg(type, content, new_message_tokens);
+            user_msg.tool_name = tool_name;
+            user_msg.tool_call_id = tool_id;
+            session.messages.push_back(user_msg);
+
+            if (type == Message::USER) {
+                session.last_user_message_index = session.messages.size() - 1;
+                session.last_user_message_tokens = new_message_tokens;
+            }
+
+            // Update baseline
+            if (accumulated_resp.prompt_tokens > 0) {
+                session.last_prompt_tokens = accumulated_resp.prompt_tokens;
+            }
+
+            // Parse tool call arguments if we have tool calls
+            for (auto& tc : accumulated_resp.tool_calls) {
+                if (!tc.raw_json.empty() && tc.parameters.empty()) {
+                    try {
+                        json args = json::parse(tc.raw_json);
+                        for (auto it = args.begin(); it != args.end(); ++it) {
+                            if (it.value().is_string()) {
+                                tc.parameters[it.key()] = it.value().get<std::string>();
+                            } else if (it.value().is_number_integer()) {
+                                tc.parameters[it.key()] = it.value().get<int>();
+                            } else if (it.value().is_number_float()) {
+                                tc.parameters[it.key()] = it.value().get<double>();
+                            } else if (it.value().is_boolean()) {
+                                tc.parameters[it.key()] = it.value().get<bool>();
+                            } else {
+                                tc.parameters[it.key()] = it.value().dump();
+                            }
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_WARN("Failed to parse tool call arguments: " + std::string(e.what()));
+                    }
+                }
+            }
+
+            // Build tool_calls_json for persistence
+            if (!accumulated_resp.tool_calls.empty()) {
+                json tool_calls_array = json::array();
+                for (const auto& tc : accumulated_resp.tool_calls) {
+                    json tc_json;
+                    tc_json["id"] = tc.tool_call_id;
+                    tc_json["type"] = "function";
+                    tc_json["function"]["name"] = tc.name;
+                    tc_json["function"]["arguments"] = tc.raw_json;
+                    tool_calls_array.push_back(tc_json);
+                }
+                accumulated_resp.tool_calls_json = tool_calls_array.dump();
+            }
+
+            // Add assistant response
+            int assistant_tokens = (accumulated_resp.completion_tokens > 0) ?
+                                 accumulated_resp.completion_tokens :
+                                 estimate_message_tokens(accumulated_resp.content);
+            Message assistant_msg(Message::ASSISTANT, accumulated_resp.content, assistant_tokens);
+            assistant_msg.tool_calls_json = accumulated_resp.tool_calls_json;
+            session.messages.push_back(assistant_msg);
+
+            session.last_assistant_message_index = session.messages.size() - 1;
+            session.last_assistant_message_tokens = assistant_tokens;
+
+            if (accumulated_resp.prompt_tokens > 0 && assistant_tokens > 0) {
+                session.last_prompt_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            }
+
+            session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+        }
+
+        return accumulated_resp;
+    }
+
+    Response err_resp;
+    err_resp.success = false;
+    err_resp.code = Response::ERROR;
+    err_resp.finish_reason = "error";
+    err_resp.error = "Max retries exceeded trying to fit context";
+    return err_resp;
 }
 
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {

@@ -30,6 +30,9 @@ public:
     Response generate_from_session(const Session& session, int max_tokens = 0) override;
 
     std::vector<std::string> get_tool_call_markers() const override;
+    std::vector<std::string> get_tool_call_end_markers() const override;
+    std::vector<std::string> get_thinking_start_markers() const override;
+    std::vector<std::string> get_thinking_end_markers() const override;
 
     // Helper methods
     bool is_ready() const;
@@ -43,6 +46,11 @@ public:
     float top_p = 0.95f;
     int top_k = 40;
     int min_keep = 1;
+
+    // Track which sampling parameters were explicitly set in config
+    bool temperature_from_config = false;
+    bool top_p_from_config = false;
+    bool top_k_from_config = false;
 
     // Repetition penalty parameters
     float penalty_repeat = 1.1f;
@@ -72,13 +80,6 @@ private:
 
     /// @brief Parse JSON arguments from tool call
     std::map<std::string, std::any> parse_json_to_args(const std::string& json);
-
-    /// @brief Format system message with tools directly from Session::Tool vector
-    /// @param system_content The base system message content
-    /// @param tools Vector of tools from the session
-    /// @return Formatted system message with tools included
-    std::string format_system_message_with_tools(const std::string& system_content,
-                                                  const std::vector<Session::Tool>& tools);
 
     /// @brief Render a single message through the chat template
     /// @param msg Message to render
@@ -151,6 +152,9 @@ private:
     // Formatted token counts (including all template overhead)
     int system_formatted_tokens = 0;
     int current_user_formatted_tokens = 0;
+
+    // Track if last generation hit length limit (for auto-continuation)
+    bool last_generation_hit_length_limit = false;
 
 #endif
 };

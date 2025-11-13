@@ -45,6 +45,7 @@ public:
     std::string system_message;
     std::string warmup_message;
     bool warmup;
+    bool calibration;
     std::string backend;
     std::string model;
     std::string model_path;
@@ -62,6 +63,7 @@ public:
     std::string web_search_instance_url;
     std::map<std::string, std::string> backend_configs;
     int truncate_limit;
+    bool streaming;
 
 private:
     // Internal helpers

@@ -1,0 +1,475 @@
+#include "terminal_io.h"
+#include "logger.h"
+#include "vendor/replxx/include/replxx.h"
+#include <iostream>
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+#include <sys/select.h>
+
+// Global instance
+TerminalIO tio;
+
+TerminalIO::TerminalIO()
+    : interactive_mode(false)
+    , colors_enabled(false)
+    , show_thinking(false)
+    , replxx(nullptr)
+    , term_raw_mode(false)
+    , filter_state(NORMAL)
+    , in_tool_call(false)
+    , in_thinking(false)
+    , suppress_output(false)
+    , last_char_was_newline(true) {  // Start as if on new line
+}
+
+TerminalIO::~TerminalIO() {
+    if (replxx) {
+        replxx_end(replxx);
+        replxx = nullptr;
+    }
+    if (term_raw_mode) {
+        restore_terminal();
+    }
+}
+
+bool TerminalIO::init(int color_override) {
+    // Detect if stdin is a TTY - check env var first (preserved across MPI re-exec)
+    const char* interactive_env = getenv("SHEPHERD_INTERACTIVE");
+
+    if (interactive_env) {
+        interactive_mode = (std::string(interactive_env) == "1");
+        LOG_DEBUG("TerminalIO using SHEPHERD_INTERACTIVE=" + std::string(interactive_env) +
+                  " -> interactive_mode=" + std::to_string(interactive_mode));
+    } else {
+        interactive_mode = isatty(STDIN_FILENO);
+        LOG_DEBUG("TerminalIO no env var, using isatty=" + std::to_string(interactive_mode));
+    }
+
+    // Determine color support
+    if (color_override == 1) {
+        // Force colors on
+        colors_enabled = true;
+    } else if (color_override == 0) {
+        // Force colors off
+        colors_enabled = false;
+    } else {
+        // Auto-detect: check environment variables
+        colors_enabled = interactive_mode; // Default to interactive mode
+
+        // Check NO_COLOR
+        if (getenv("NO_COLOR") != nullptr) {
+            colors_enabled = false;
+        }
+
+        // Check CLICOLOR
+        const char* clicolor = getenv("CLICOLOR");
+        if (clicolor && strcmp(clicolor, "0") == 0) {
+            colors_enabled = false;
+        }
+
+        // Check TERM
+        const char* term = getenv("TERM");
+        if (term) {
+            if (strcmp(term, "dumb") == 0 ||
+                strcmp(term, "cons25") == 0 ||
+                strcmp(term, "emacs") == 0) {
+                colors_enabled = false;
+            }
+        }
+    }
+
+    // Initialize replxx for interactive mode
+    if (interactive_mode) {
+        replxx = replxx_init();
+        if (!replxx) {
+            std::cerr << "ERROR: Failed to initialize terminal (replxx)\n";
+            return false;
+        }
+
+        // Configure replxx
+        replxx_set_max_history_size(replxx, 1000);
+        replxx_set_max_hint_rows(replxx, 3);
+
+        // Disable colors in replxx if needed
+        if (!colors_enabled) {
+            replxx_set_no_color(replxx, 1);
+        }
+    }
+
+    return true;
+}
+
+std::string TerminalIO::read(const char* prompt) {
+    std::string line;
+
+    if (input_queue.empty()) {
+        line = get_input_line(prompt);
+        if (line.empty()) {
+            return ""; // EOF
+        }
+
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        input_queue.push_back(line);
+    }
+
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    line = input_queue.front();
+    input_queue.pop_front();
+
+    return line;
+}
+
+void TerminalIO::write_raw(const char* text, size_t len, Color color) {
+    if (interactive_mode) {
+        if (colors_enabled && color != Color::DEFAULT) {
+            // Apply color
+            const char* ansi_color = get_ansi_color(color);
+            replxx_write(replxx, ansi_color, strlen(ansi_color));
+            replxx_write(replxx, text, len);
+            replxx_write(replxx, "\033[0m", 4); // Reset
+        } else {
+            replxx_write(replxx, text, len);
+        }
+    } else {
+        std::cout.write(text, len);
+        std::cout.flush();
+    }
+}
+
+void TerminalIO::write(const char* text, size_t len, Color color) {
+    // Process each character through the filtering state machine
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+
+        switch (filter_state) {
+            case NORMAL:
+                if (c == '<' && last_char_was_newline) {
+                    // Only detect tags at start of line (after newline)
+                    tag_buffer = "<";
+                    filter_state = DETECTING_TAG;
+                } else {
+                    if (!suppress_output) {
+                        write_raw(&c, 1, color);
+                    }
+                    // Track newlines for tag detection
+                    last_char_was_newline = (c == '\n');
+                }
+                break;
+
+            case DETECTING_TAG: {
+                tag_buffer += c;
+
+                // Check for closing tag start
+                if (tag_buffer.length() == 2 && tag_buffer == "</") {
+                    filter_state = CHECKING_CLOSE;
+                    break;
+                }
+
+                // Check if we've matched a tool call start marker
+                std::string matched_marker;
+                if (matches_any(tag_buffer, markers.tool_call_start, &matched_marker)) {
+                    in_tool_call = true;
+                    current_tag = matched_marker;
+                    filter_state = IN_TOOL_CALL;
+                    suppress_output = true;  // Always suppress tool calls
+                    buffered_tool_call = tag_buffer;  // Include opening tag
+                    tag_buffer.clear();
+                    break;
+                }
+
+                // Check if we've matched a thinking start marker
+                if (matches_any(tag_buffer, markers.thinking_start, &matched_marker)) {
+                    in_thinking = true;
+                    current_tag = matched_marker;
+                    filter_state = IN_THINKING;
+                    // Set suppress_output based on show_thinking flag
+                    if (!show_thinking) {
+                        suppress_output = true;
+                    } else {
+                        // show_thinking=true: output the opening tag
+                        write_raw(tag_buffer.c_str(), tag_buffer.length(), color);
+                    }
+                    tag_buffer.clear();
+                    break;
+                }
+
+                // Check if tag could still match something (partial match)
+                bool could_match = could_match_any(tag_buffer, markers.tool_call_start) ||
+                                   could_match_any(tag_buffer, markers.thinking_start);
+
+                if (!could_match) {
+                    // Not a special tag, output buffered content
+                    write_raw(tag_buffer.c_str(), tag_buffer.length(), color);
+                    tag_buffer.clear();
+                    filter_state = NORMAL;
+                }
+                break;
+            }
+
+            case IN_TOOL_CALL:
+                buffered_tool_call += c;
+                if (c == '<') {
+                    tag_buffer = "<";
+                    filter_state = CHECKING_CLOSE;
+                }
+                break;
+
+            case IN_THINKING:
+                if (!suppress_output) {
+                    write_raw(&c, 1, color);
+                } else {
+                    buffered_thinking += c;
+                }
+                if (c == '<') {
+                    tag_buffer = "<";
+                    filter_state = CHECKING_CLOSE;
+                }
+                break;
+
+            case CHECKING_CLOSE: {
+                bool could_close;  // Declare at top of block before any gotos
+                tag_buffer += c;
+
+                // Check if closing tag matches expected end marker
+                if (in_tool_call) {
+                    for (const auto& end_marker : markers.tool_call_end) {
+                        if (tag_buffer == end_marker) {
+                            buffered_tool_call += tag_buffer;
+                            in_tool_call = false;
+                            suppress_output = false;  // Clear suppress when exiting tool call
+                            filter_state = NORMAL;
+                            tag_buffer.clear();
+                            goto next_char;
+                        }
+                    }
+                }
+
+                if (in_thinking) {
+                    for (const auto& end_marker : markers.thinking_end) {
+                        if (tag_buffer == end_marker) {
+                            if (!suppress_output) {
+                                // show_thinking=true: output the closing tag
+                                write_raw(tag_buffer.c_str(), tag_buffer.length(), color);
+                            }
+                            in_thinking = false;
+                            suppress_output = false;  // Always clear suppress when exiting thinking
+                            filter_state = NORMAL;
+                            tag_buffer.clear();
+                            goto next_char;
+                        }
+                    }
+                }
+
+                // Check for partial match
+                could_close = false;
+                if (in_tool_call) {
+                    could_close = could_match_any(tag_buffer, markers.tool_call_end);
+                } else if (in_thinking) {
+                    could_close = could_match_any(tag_buffer, markers.thinking_end);
+                }
+
+                if (!could_close) {
+                    // False alarm, not a closing tag
+                    if (in_tool_call) {
+                        buffered_tool_call += tag_buffer;
+                        filter_state = IN_TOOL_CALL;
+                    } else if (in_thinking) {
+                        if (!suppress_output) {
+                            write_raw(tag_buffer.c_str(), tag_buffer.length(), color);
+                        } else {
+                            buffered_thinking += tag_buffer;
+                        }
+                        filter_state = IN_THINKING;
+                    }
+                    tag_buffer.clear();
+                }
+                next_char:
+                break;
+            }
+        }
+    }
+}
+
+void TerminalIO::add_input(const std::string& input) {
+    // Skip blank lines
+    if (input.empty() || is_blank(input)) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    input_queue.push_back(input);
+}
+
+std::string TerminalIO::get_input_line(const char* prompt) {
+    while (true) {
+        std::string line;
+
+        if (interactive_mode) {
+            // Format prompt with color
+            std::string colored_prompt;
+            if (colors_enabled) {
+                colored_prompt = std::string("\033[32m") + prompt + " \033[0m";
+            } else {
+                colored_prompt = std::string(prompt) + " ";
+            }
+
+            const char* input = replxx_input(replxx, colored_prompt.c_str());
+            if (input == nullptr) {
+                // EOF or error
+                return "";
+            }
+
+            line = input;
+
+            // Add to history if non-empty
+            if (!line.empty() && !is_blank(line)) {
+                replxx_history_add(replxx, input);
+            }
+        } else {
+            // Piped mode - no prompt
+            if (!std::getline(std::cin, line)) {
+                // EOF
+                return "";
+            }
+        }
+
+        // Skip blank lines
+        if (is_blank(line)) {
+            continue;
+        }
+
+        return line;
+    }
+}
+
+bool TerminalIO::is_blank(const std::string& str) const {
+    for (char c : str) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+const char* TerminalIO::get_ansi_color(Color color) const {
+    switch (color) {
+        case Color::RED:     return "\033[31m";
+        case Color::YELLOW:  return "\033[33m";
+        case Color::GREEN:   return "\033[32m";
+        case Color::CYAN:    return "\033[36m";
+        case Color::GRAY:    return "\033[90m";
+        case Color::DEFAULT:
+        default:             return "\033[0m";
+    }
+}
+
+// Output filtering helpers
+bool TerminalIO::matches_any(const std::string& buffer, const std::vector<std::string>& markers, std::string* matched) const {
+    for (const auto& marker : markers) {
+        if (buffer == marker) {
+            if (matched) *matched = marker;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TerminalIO::could_match_any(const std::string& buffer, const std::vector<std::string>& markers) const {
+    for (const auto& marker : markers) {
+        if (marker.length() >= buffer.length() &&
+            marker.substr(0, buffer.length()) == buffer) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void TerminalIO::begin_response() {
+    // Reset all filtering state for a new response
+    buffered_tool_call.clear();
+    buffered_thinking.clear();
+    filter_state = NORMAL;
+    in_tool_call = false;
+    in_thinking = false;
+    suppress_output = false;
+    tag_buffer.clear();
+    current_tag.clear();
+    last_char_was_newline = true;  // Start responses as if on new line
+}
+
+void TerminalIO::end_response() {
+    // Flush any incomplete tags that weren't closed properly
+    // If we're still in a tool call or thinking block, consume it silently
+    if (in_tool_call) {
+        // Tool call wasn't closed - it's spurious, consume it
+        buffered_tool_call.clear();
+    }
+
+    if (in_thinking && !show_thinking) {
+        // Thinking wasn't closed - consume it
+        buffered_thinking.clear();
+    }
+
+    // If we have buffered tag data that never matched, output it
+    if (!tag_buffer.empty() && !suppress_output) {
+        write_raw(tag_buffer.c_str(), tag_buffer.length(), Color::DEFAULT);
+    }
+
+    // Reset state for next response
+    filter_state = NORMAL;
+    in_tool_call = false;
+    in_thinking = false;
+    suppress_output = false;
+    tag_buffer.clear();
+    current_tag.clear();
+}
+
+void TerminalIO::reset() {
+    // Deprecated - use begin_response() instead
+    begin_response();
+}
+
+// Terminal control methods (unused for now)
+void TerminalIO::set_raw_mode() {
+    if (term_raw_mode) return;
+
+    struct termios raw;
+    tcgetattr(STDIN_FILENO, &original_term);
+    raw = original_term;
+
+    // Disable canonical mode and echo
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;   // Non-blocking read
+    raw.c_cc[VTIME] = 0;
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+    term_raw_mode = true;
+}
+
+void TerminalIO::restore_terminal() {
+    if (!term_raw_mode) return;
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_term);
+    term_raw_mode = false;
+}
+
+bool TerminalIO::check_escape_pressed() {
+    if (!term_raw_mode) return false;
+
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    struct timeval tv = {0, 0};  // No wait
+
+    if (select(STDIN_FILENO + 1, &readfds, nullptr, nullptr, &tv) > 0) {
+        char c;
+        if (::read(STDIN_FILENO, &c, 1) == 1) {
+            if (c == 27) {  // ESC key
+                return true;
+            }
+        }
+    }
+
+    return false;
+}

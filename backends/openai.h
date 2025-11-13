@@ -18,6 +18,16 @@ public:
     explicit OpenAIBackend(size_t context_size);
     ~OpenAIBackend() override;
 
+	// Streaming support
+	Response add_message_stream(Session& session,
+	                          Message::Type type,
+	                          const std::string& content,
+	                          StreamCallback callback,
+	                          const std::string& tool_name = "",
+	                          const std::string& tool_id = "",
+	                          int prompt_tokens = 0,
+	                          int max_tokens = 0) override;
+
 	// Implement pure virtual methods from ApiBackend
 	Response parse_http_response(const HttpResponse& http_response) override;
 
@@ -50,4 +60,8 @@ private:
 	/// @param endpoint API endpoint (e.g., "/models")
 	/// @return API response body
 	std::string make_get_request(const std::string& endpoint);
+
+	/// @brief Test if the server supports SSE streaming
+	/// Sets streaming_enabled based on test result
+	void test_streaming_support();
 };

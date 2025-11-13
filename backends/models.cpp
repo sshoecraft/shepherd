@@ -81,17 +81,41 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
         return ModelConfig::create_glm_4(version);
     }
 
-    // Qwen 2.x: Has <|im_start|> and <|im_end|>
+    // Qwen 2.x/3.x: Has <|im_start|> and <|im_end|>
     if (template_text.find("<|im_start|>") != std::string::npos &&
         template_text.find("<|im_end|>") != std::string::npos) {
-        LOG_INFO("Detected Qwen 2.x model family from chat template");
 
-        std::string version = extract_version_from_path(model_path, "2.");
-        if (version.empty()) {
-            version = "2.5";
+        // Check if it's Qwen3 or a derivative like MindLink
+        std::string model_lower = model_path;
+        std::transform(model_lower.begin(), model_lower.end(), model_lower.begin(), ::tolower);
+
+        if (model_lower.find("qwen3") != std::string::npos ||
+            model_lower.find("qwen-3") != std::string::npos ||
+            model_lower.find("mindlink") != std::string::npos) {
+            LOG_INFO("Detected Qwen 3.x model family (or MindLink derivative) from chat template");
+
+            std::string version = extract_version_from_path(model_path, "3.");
+            if (version.empty()) {
+                version = "3";
+            }
+
+            // Check if this is a thinking model (model_lower already defined above)
+            bool is_thinking = (model_lower.find("thinking") != std::string::npos);
+            if (is_thinking) {
+                LOG_INFO("Detected Thinking model variant");
+            }
+
+            return ModelConfig::create_qwen_3x(version, is_thinking);
+        } else {
+            LOG_INFO("Detected Qwen 2.x model family from chat template");
+
+            std::string version = extract_version_from_path(model_path, "2.");
+            if (version.empty()) {
+                version = "2.5";
+            }
+
+            return ModelConfig::create_qwen_2x(version);
         }
-
-        return ModelConfig::create_qwen_2x(version);
     }
 
     // No match - return generic
@@ -132,8 +156,25 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
         return ModelConfig::create_glm_4(version);
     }
 
+    // Qwen 3.x detection (includes MindLink)
+    if (model_lower.find("qwen3") != std::string::npos ||
+        model_lower.find("qwen-3") != std::string::npos ||
+        model_lower.find("mindlink") != std::string::npos) {
+        LOG_INFO("Detected Qwen 3.x (or MindLink) from model path");
+        std::string version = extract_version_from_path(model_lower, "3.");
+        if (version.empty()) {
+            version = "3";
+        }
+        bool is_thinking = (model_lower.find("thinking") != std::string::npos);
+        if (is_thinking) {
+            LOG_INFO("Detected Thinking model variant from path");
+        }
+        return ModelConfig::create_qwen_3x(version, is_thinking);
+    }
+
     // Qwen 2.x detection
-    if (model_lower.find("qwen2") != std::string::npos) {
+    if (model_lower.find("qwen2") != std::string::npos ||
+        model_lower.find("qwen-2") != std::string::npos) {
         LOG_INFO("Detected Qwen 2.x from model path");
         std::string version = extract_version_from_path(model_lower, "2.");
         if (version.empty()) {
@@ -172,13 +213,19 @@ std::string Models::format_system_message(const ModelConfig& config, const std::
     auto tool_descriptions = registry.list_tools_with_descriptions();
 
     // Qwen 2.x/3.x: Use minja template to render system message with tools
-    if (config.family == ModelFamily::QWEN_2_X) {
-        if (!template_node) {
-            LOG_ERROR("Qwen requires template_node to format system message with tools");
+    if (config.family == ModelFamily::QWEN_2_X || config.family == ModelFamily::QWEN_3_X) {
+        // If no tools, just return the system prompt
+        if (tool_descriptions.empty()) {
             return custom_system_prompt.empty() ?
                 "You are Qwen, a helpful AI assistant that can interact with a computer to solve tasks." :
                 custom_system_prompt;
         }
+
+        // If tools exist but no template_node, fall back to generic formatting
+        if (!template_node) {
+            LOG_WARN("Qwen model has tools but no chat template - using generic formatting");
+            // Fall through to generic formatting below
+        } else {
 
         // Build tools array for minja
         auto tools = minja::Value::array();
@@ -279,7 +326,8 @@ std::string Models::format_system_message(const ModelConfig& config, const std::
 
         LOG_DEBUG("Qwen system message with tools: " + std::to_string(rendered.length()) + " chars (rendered by template)");
         return rendered;
-    }
+        }  // end else (template_node available)
+    }  // end if (Qwen family)
 
     // Llama 3.x: JSON schemas format (BFCL-style)
     if (config.family == ModelFamily::LLAMA_3_X) {
@@ -1002,7 +1050,7 @@ ModelConfig Models::detect_from_api_model(const std::string& provider, const std
         }
     }
 
-    LOG_WARN("Unknown model: " + model_name + ", using provider defaults for " + provider);
+    LOG_DEBUG("Unknown model: " + model_name + ", using provider defaults for " + provider);
     ModelConfig config = get_provider_default(provider);
     config.model_name = model_name;
     return config;
@@ -1048,4 +1096,57 @@ std::vector<std::string> Models::get_compatible_models(const std::string& endpoi
     }
 
     return compatible;
+}
+
+bool Models::load_generation_config(const std::string& model_dir_path,
+                                     float& temperature,
+                                     float& top_p,
+                                     int& top_k) {
+    std::filesystem::path gen_config_path = std::filesystem::path(model_dir_path) / "generation_config.json";
+
+    if (!std::filesystem::exists(gen_config_path)) {
+        LOG_DEBUG("No generation_config.json found at: " + gen_config_path.string());
+        return false;
+    }
+
+    try {
+        std::ifstream file(gen_config_path);
+        if (!file.is_open()) {
+            LOG_WARN("Could not open generation_config.json: " + gen_config_path.string());
+            return false;
+        }
+
+        nlohmann::json config;
+        file >> config;
+
+        bool found_any = false;
+
+        if (config.contains("temperature")) {
+            temperature = config["temperature"].get<float>();
+            LOG_DEBUG("Loaded temperature from generation_config.json: " + std::to_string(temperature));
+            found_any = true;
+        }
+
+        if (config.contains("top_p")) {
+            top_p = config["top_p"].get<float>();
+            LOG_DEBUG("Loaded top_p from generation_config.json: " + std::to_string(top_p));
+            found_any = true;
+        }
+
+        if (config.contains("top_k")) {
+            top_k = config["top_k"].get<int>();
+            LOG_DEBUG("Loaded top_k from generation_config.json: " + std::to_string(top_k));
+            found_any = true;
+        }
+
+        if (found_any) {
+            LOG_INFO("Loaded sampling parameters from: " + gen_config_path.string());
+        }
+
+        return found_any;
+
+    } catch (const std::exception& e) {
+        LOG_WARN("Failed to parse generation_config.json: " + std::string(e.what()));
+        return false;
+    }
 }

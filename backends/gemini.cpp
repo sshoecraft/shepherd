@@ -321,6 +321,15 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
         request["tools"] = tools;
     }
 
+    // Add sampling parameters (Gemini uses generationConfig object)
+    json generation_config;
+    generation_config["temperature"] = temperature;
+    generation_config["topP"] = top_p;
+    if (top_k > 0) {
+        generation_config["topK"] = top_k;
+    }
+    request["generationConfig"] = generation_config;
+
     return request;
 }
 
@@ -445,6 +454,15 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
         }
         request["tools"] = tools;
     }
+
+    // Add sampling parameters (Gemini uses generationConfig object)
+    json generation_config;
+    generation_config["temperature"] = temperature;
+    generation_config["topP"] = top_p;
+    if (top_k > 0) {
+        generation_config["topK"] = top_k;
+    }
+    request["generationConfig"] = generation_config;
 
     return request;
 }

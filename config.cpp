@@ -106,6 +106,7 @@ User: "What is the private variable in config.cpp?"
 	// Default warmup message
 	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.  **IMPORTANT:** DO NOT USE TOOLS!";
 	warmup = false;  // Disable warmup by default
+	calibration = false;  // Disable calibration by default (slow for thinking models)
 
     backend = "llamacpp";
     model = "";
@@ -128,6 +129,9 @@ User: "What is the private variable in config.cpp?"
 
 	// Tool truncation limit, in tokens (0 = use 85% of available space)
 	truncate_limit = 0;
+
+	// Streaming enabled by default
+	streaming = true;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -280,6 +284,21 @@ void Config::load() {
             truncate_limit = config_json["truncate_limit"].get<int>();
         }
 
+        // Load streaming flag
+        if (config_json.contains("streaming")) {
+            streaming = config_json["streaming"].get<bool>();
+        }
+
+        // Load warmup setting
+        if (config_json.contains("warmup")) {
+            warmup = config_json["warmup"].get<bool>();
+        }
+
+        // Load calibration setting
+        if (config_json.contains("calibration")) {
+            calibration = config_json["calibration"].get<bool>();
+        }
+
         // Load RAG memory database path (optional)
         if (config_json.contains("memory_database")) {
             memory_database = config_json["memory_database"];
@@ -313,6 +332,24 @@ void Config::load() {
             for (auto& [backend_name, backend_config] : config_json["backends"].items()) {
                 backend_configs[backend_name] = backend_config.dump();
             }
+        }
+
+        // Handle top-level tp/pp parameters (for backward compatibility)
+        // If tp or pp are specified at top level, inject them into llamacpp backend config
+        if (backend == "llamacpp" && (config_json.contains("tp") || config_json.contains("pp"))) {
+            json llamacpp_config;
+            if (backend_configs.find("llamacpp") != backend_configs.end()) {
+                llamacpp_config = json::parse(backend_configs["llamacpp"]);
+            }
+
+            if (config_json.contains("tp")) {
+                llamacpp_config["tp"] = config_json["tp"];
+            }
+            if (config_json.contains("pp")) {
+                llamacpp_config["pp"] = config_json["pp"];
+            }
+
+            backend_configs["llamacpp"] = llamacpp_config.dump();
         }
 
         LOG_INFO("Loaded configuration from: " + config_path);
@@ -359,6 +396,9 @@ void Config::save() const {
             }
             config_json["backends"] = backends_json;
         }
+
+        // Add streaming flag
+        config_json["streaming"] = streaming;
 
         std::ofstream file(config_path);
         if (!file.is_open()) {

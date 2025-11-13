@@ -24,8 +24,10 @@ set(SHEPHERD_SOURCES
     session.cpp
     config.cpp
     logger.cpp
+    terminal_io.cpp
     http_client.cpp
     rag.cpp
+    sse_parser.cpp
 
     # Backend sources (always included)
     backends/backend.cpp
@@ -59,6 +61,7 @@ set(SHEPHERD_SOURCES
 
     # Server sources
     server/server.cpp
+    server/api_server.cpp
 )
 
 # Add backend sources conditionally
@@ -100,20 +103,25 @@ if(ENABLE_TENSORRT)
     else()
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
     endif()
+
+    # Find Python library for linking
+    find_package(Python3 COMPONENTS Development REQUIRED)
 endif()
 
 # TensorRT-LLM headers (bundled with Shepherd + from package)
 if(ENABLE_TENSORRT)
     target_include_directories(shepherd PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tokenizers/include
     )
     # Add CUDA headers from tensorrt_llm package
     execute_process(
-        COMMAND bash -c "${Python3_EXECUTABLE} -c 'import tensorrt_llm; import os; print(os.path.join(os.path.dirname(tensorrt_llm.__file__), \"include\"))' 2>/dev/null | tail -1"
+        COMMAND ${Python3_EXECUTABLE} -c "import site, os; print(os.path.join(site.getsitepackages()[0], 'tensorrt_llm', 'include'))"
         OUTPUT_VARIABLE TENSORRT_LLM_INCLUDE_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
     )
-    if(TENSORRT_LLM_INCLUDE_DIR)
+    if(TENSORRT_LLM_INCLUDE_DIR AND EXISTS "${TENSORRT_LLM_INCLUDE_DIR}")
         target_include_directories(shepherd PRIVATE ${TENSORRT_LLM_INCLUDE_DIR})
         message(STATUS "TensorRT-LLM include directory: ${TENSORRT_LLM_INCLUDE_DIR}")
     endif()
@@ -157,17 +165,22 @@ if(ENABLE_TENSORRT)
     target_include_directories(shepherd PRIVATE ${MPI_CXX_INCLUDE_DIRS})
     target_link_libraries(shepherd PRIVATE ${MPI_CXX_LIBRARIES})
 
-    # Try to find TensorRT-LLM from Python, fallback to hardcoded venv path
+    # Find TensorRT-LLM from current Python installation
     execute_process(
-        COMMAND bash -c "source ~/venv/bin/activate && python -c 'import tensorrt_llm; import os; print(os.path.join(os.path.dirname(tensorrt_llm.__file__), \"libs\"))' 2>/dev/null | tail -1"
+        COMMAND ${Python3_EXECUTABLE} -c "import tensorrt_llm, os; print(os.path.join(os.path.dirname(tensorrt_llm.__file__), 'libs'))"
         OUTPUT_VARIABLE TENSORRT_LLM_LIB_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE TENSORRT_LLM_FIND_RESULT
+        ERROR_QUIET
     )
 
-    # If not found, try hardcoded venv path
+    # If not found, try to locate via site-packages
     if(NOT TENSORRT_LLM_LIB_DIR OR NOT EXISTS "${TENSORRT_LLM_LIB_DIR}")
-        set(TENSORRT_LLM_LIB_DIR "$ENV{HOME}/venv/lib/python3.12/site-packages/tensorrt_llm/libs")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
+            OUTPUT_VARIABLE VENV_SITE_PACKAGES
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        set(TENSORRT_LLM_LIB_DIR "${VENV_SITE_PACKAGES}/tensorrt_llm/libs")
         if(NOT EXISTS "${TENSORRT_LLM_LIB_DIR}")
             message(FATAL_ERROR "Could not find tensorrt_llm library directory at ${TENSORRT_LLM_LIB_DIR}")
         endif()
@@ -177,22 +190,37 @@ if(ENABLE_TENSORRT)
 
     # Find additional required libraries (TensorRT, NCCL)
     execute_process(
-        COMMAND bash -c "source ~/venv/bin/activate && python -c 'import tensorrt_libs; import os; print(os.path.dirname(tensorrt_libs.__file__))' 2>/dev/null | tail -1"
+        COMMAND ${Python3_EXECUTABLE} -c "import tensorrt_libs; import os; print(os.path.dirname(tensorrt_libs.__file__))"
         OUTPUT_VARIABLE TENSORRT_LIBS_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
     )
     execute_process(
-        COMMAND bash -c "source ~/venv/bin/activate && python -c 'from nvidia import nccl; import os; print(os.path.join(os.path.dirname(nccl.__file__), \"lib\"))' 2>/dev/null | tail -1"
+        COMMAND ${Python3_EXECUTABLE} -c "from nvidia import nccl; import os; print(os.path.join(os.path.dirname(nccl.__file__), 'lib'))"
         OUTPUT_VARIABLE NCCL_LIB_DIR
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
     )
 
-    # Fallback to hardcoded paths
+    # Fallback to /usr/local/tensorrt, then user site-packages
     if(NOT TENSORRT_LIBS_DIR OR NOT EXISTS "${TENSORRT_LIBS_DIR}")
-        set(TENSORRT_LIBS_DIR "$ENV{HOME}/venv/lib/python3.12/site-packages/tensorrt_libs")
+        set(TENSORRT_LIBS_DIR "/usr/local/tensorrt/lib")
+    endif()
+    if(NOT EXISTS "${TENSORRT_LIBS_DIR}")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
+            OUTPUT_VARIABLE VENV_SITE_PACKAGES
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        set(TENSORRT_LIBS_DIR "${VENV_SITE_PACKAGES}/tensorrt_libs")
     endif()
     if(NOT NCCL_LIB_DIR OR NOT EXISTS "${NCCL_LIB_DIR}")
-        set(NCCL_LIB_DIR "$ENV{HOME}/venv/lib/python3.12/site-packages/nvidia/nccl/lib")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
+            OUTPUT_VARIABLE VENV_SITE_PACKAGES
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        set(NCCL_LIB_DIR "${VENV_SITE_PACKAGES}/nvidia/nccl/lib")
     endif()
 
     if(TENSORRT_LIBS_DIR AND EXISTS "${TENSORRT_LIBS_DIR}")
@@ -204,14 +232,27 @@ if(ENABLE_TENSORRT)
         target_link_directories(shepherd PRIVATE ${NCCL_LIB_DIR})
     endif()
 
-    target_link_directories(shepherd PRIVATE ${TENSORRT_LLM_LIB_DIR})
+    # Find PyTorch libraries
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+        OUTPUT_VARIABLE TORCH_LIB_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    target_link_directories(shepherd PRIVATE ${TENSORRT_LLM_LIB_DIR} ${TENSORRT_LIBS_DIR} ${NCCL_LIB_DIR} ${TORCH_LIB_DIR})
     target_link_libraries(shepherd PRIVATE
         -Wl,--no-as-needed
-        ${TENSORRT_LLM_LIB_DIR}/libtensorrt_llm.so
-        ${TENSORRT_LLM_LIB_DIR}/libnvinfer_plugin_tensorrt_llm.so
-        ${TENSORRT_LIBS_DIR}/libnvinfer.so.10
-        ${NCCL_LIB_DIR}/libnccl.so.2
-        ${CMAKE_SOURCE_DIR}/lib/libtokenizers_cpp.a
+        -ltensorrt_llm
+        -lnvinfer_plugin_tensorrt_llm
+        -lnvinfer
+        -lnccl
+        -ltorch_python
+        -ltorch
+        -ltorch_cpu
+        Python3::Python
+        -ltorch_cuda
+        -lc10
+        -lc10_cuda
         ${CMAKE_SOURCE_DIR}/lib/libtokenizers_c.a
         dl
         pthread
@@ -221,8 +262,8 @@ if(ENABLE_TENSORRT)
     # Using --disable-new-dtags to force RPATH instead of RUNPATH (for transitive deps)
     # Using --export-dynamic to make all symbols globally available (like RTLD_GLOBAL)
     set_target_properties(shepherd PROPERTIES
-        BUILD_RPATH "${TENSORRT_LLM_LIB_DIR}:${TENSORRT_LIBS_DIR}:${NCCL_LIB_DIR}"
-        INSTALL_RPATH "${TENSORRT_LLM_LIB_DIR}:${TENSORRT_LIBS_DIR}:${NCCL_LIB_DIR}"
+        BUILD_RPATH "${TENSORRT_LLM_LIB_DIR}:${TENSORRT_LIBS_DIR}:${NCCL_LIB_DIR}:${TORCH_LIB_DIR}"
+        INSTALL_RPATH "${TENSORRT_LLM_LIB_DIR}:${TENSORRT_LIBS_DIR}:${NCCL_LIB_DIR}:${TORCH_LIB_DIR}"
         LINK_FLAGS "-Wl,--disable-new-dtags -Wl,--export-dynamic"
         ENABLE_EXPORTS ON
     )
@@ -285,13 +326,11 @@ if(ENABLE_LLAMACPP)
     )
 endif()
 
-# Readline support
-find_library(READLINE_LIB readline)
-if(READLINE_LIB)
-    target_link_libraries(shepherd PRIVATE ${READLINE_LIB})
-    target_compile_definitions(shepherd PRIVATE USE_READLINE)
-    message(STATUS "Using readline for line editing")
-endif()
+# replxx for line editing
+add_subdirectory(vendor/replxx)
+target_link_libraries(shepherd PRIVATE replxx)
+target_include_directories(shepherd PRIVATE vendor/replxx/include)
+message(STATUS "Using replxx for line editing")
 
 # Compiler options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

@@ -303,6 +303,75 @@ bool Session::evict_messages(const std::vector<std::pair<int, int>>& ranges) {
     return true;
 }
 
+Response Session::add_message_stream(Message::Type type,
+                                    const std::string& content,
+                                    StreamCallback callback,
+                                    const std::string& tool_name,
+                                    const std::string& tool_id,
+                                    int prompt_tokens,
+                                    int max_tokens) {
+    // Auto-calculate prompt_tokens if not provided
+    if (prompt_tokens == 0) {
+        prompt_tokens = backend->count_message_tokens(type, content, tool_name, tool_id);
+    }
+
+    // Auto-calculate max_tokens from available space if not provided
+    if (max_tokens == 0) {
+        max_tokens = calculate_desired_completion_tokens(backend->context_size, backend->max_output_tokens);
+    }
+
+    // Delegate to backend to format and send the message with streaming
+    // Pass prompt_tokens and max_tokens (already calculated if they were 0)
+    Response resp = backend->add_message_stream(*this, type, content, callback,
+                                               tool_name, tool_id, prompt_tokens, max_tokens);
+
+    // Auto-continuation: if response hit length limit, continue generating with streaming
+    // Safety limits to prevent infinite generation
+    const int MAX_CONTINUATIONS = 10;
+    const int MAX_TOTAL_TOKENS = 10000;
+    int continuations = 0;
+    int total_completion_tokens = resp.completion_tokens;
+
+    while (resp.success && resp.finish_reason == "length" &&
+           continuations < MAX_CONTINUATIONS &&
+           total_completion_tokens < MAX_TOTAL_TOKENS) {
+
+        LOG_INFO("Response hit length limit, auto-continuing (continuation " +
+                std::to_string(continuations + 1) + ")");
+
+        // Continue generation with same max_tokens limit and streaming
+        // KV cache is already populated, backend will continue from where it left off
+        Response continuation = backend->add_message_stream(*this, type, "", callback,
+                                                          tool_name, tool_id, 0, max_tokens);
+
+        if (!continuation.success) {
+            LOG_WARN("Auto-continuation failed: " + continuation.error);
+            break;
+        }
+
+        // Append continuation to response
+        resp.content += continuation.content;
+        resp.completion_tokens += continuation.completion_tokens;
+        total_completion_tokens += continuation.completion_tokens;
+        resp.finish_reason = continuation.finish_reason;
+
+        // Update the last assistant message with concatenated content
+        if (!messages.empty() && messages.back().type == Message::ASSISTANT) {
+            messages.back().content = resp.content;
+            messages.back().tokens = resp.completion_tokens;
+        }
+
+        continuations++;
+    }
+
+    if (continuations > 0) {
+        LOG_INFO("Auto-continuation complete: " + std::to_string(continuations) +
+                " continuations, " + std::to_string(total_completion_tokens) + " total tokens");
+    }
+
+    return resp;
+}
+
 Response Session::add_message(Message::Type type,
                              const std::string& content,
                              const std::string& tool_name,
@@ -422,6 +491,49 @@ Response Session::add_message(Message::Type type,
     // Delegate to backend to format and send the message
     // Pass prompt_tokens and max_tokens (already calculated if they were 0)
     Response resp = backend->add_message(*this, type, content, tool_name, tool_id, prompt_tokens, max_tokens);
+
+    // Auto-continuation: if response hit length limit, continue generating
+    // This provides seamless long responses without truncation
+    if (resp.success && resp.finish_reason == "length") {
+        LOG_DEBUG("Response hit length limit, auto-continuing generation...");
+
+        // Safety limit: don't auto-continue forever
+        const int MAX_CONTINUATIONS = 10;
+        const int MAX_TOTAL_TOKENS = 10000;
+        int continuations = 0;
+        int total_generated = resp.completion_tokens;
+
+        while (resp.finish_reason == "length" &&
+               continuations < MAX_CONTINUATIONS &&
+               total_generated < MAX_TOTAL_TOKENS) {
+
+            // Continue generation with same max_tokens limit
+            // KV cache is already populated, backend will continue from where it left off
+            Response continuation = backend->add_message(*this, type, "", tool_name, tool_id, 0, max_tokens);
+
+            if (!continuation.success) {
+                LOG_WARN("Auto-continuation failed: " + continuation.error);
+                break;
+            }
+
+            // Append continuation to original response
+            resp.content += continuation.content;
+            resp.completion_tokens += continuation.completion_tokens;
+            resp.finish_reason = continuation.finish_reason;
+
+            total_generated += continuation.completion_tokens;
+            continuations++;
+
+            LOG_DEBUG("Auto-continuation " + std::to_string(continuations) +
+                     ": added " + std::to_string(continuation.completion_tokens) +
+                     " tokens, finish_reason=" + continuation.finish_reason);
+        }
+
+        if (continuations > 0) {
+            LOG_INFO("Auto-continuation complete: " + std::to_string(continuations) +
+                    " continuations, " + std::to_string(total_generated) + " total tokens");
+        }
+    }
 
     // Transaction: only add to session if backend succeeded
     // Backend is responsible for adding the message to session.messages on success

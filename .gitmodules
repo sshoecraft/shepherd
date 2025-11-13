@@ -6,3 +6,6 @@
 	path = tokenizers
 	url = https://github.com/mlc-ai/tokenizers-cpp.git
 	ignore = dirty
+[submodule "vendor/replxx"]
+	path = vendor/replxx
+	url = https://github.com/AmokHuginnsson/replxx.git

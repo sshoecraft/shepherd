@@ -17,13 +17,11 @@
 #include <cstring>
 #include <ctime>
 
-#ifdef USE_READLINE
-#include <readline/readline.h>
-#include <readline/history.h>
-#endif
+#include "terminal_io.h"
 
 // External globals from main.cpp
 extern int g_debug_level;
+extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
 
 // Helper: Extract tool call from Response (handles both structured and text-based)
@@ -38,312 +36,14 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
 }
 
 // CLI Implementation
-CLI::CLI() : interactive_mode(false), eof_received(false),
-			 generation_cancelled(false), term_raw_mode(false), tty_handle(nullptr) {
+CLI::CLI() : eof_received(false), generation_cancelled(false) {
 }
 
 CLI::~CLI() {
-	restore_terminal();
-	if (tty_handle) {
-		fclose(tty_handle);
-	}
-}
-
-void CLI::initialize() {
-	// Set stderr to unbuffered mode for immediate prompt display
-	// We print prompts to stderr because mpirun handles it better
-	setvbuf(stderr, NULL, _IONBF, 0);
-
-	// Check if input is from a terminal or piped
-	interactive_mode = isatty(STDIN_FILENO);
-
-	// For MPI rank 0: Force interactive mode even if stdin is not a TTY
-	// (mpirun makes stdin appear as non-TTY even in interactive sessions)
-	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
-	if (mpi_rank_env) {
-		int mpi_rank = std::stoi(mpi_rank_env);
-		if (mpi_rank == 0) {
-			// Rank 0 handles user interaction
-			interactive_mode = true;
-			LOG_DEBUG("CLI initialized in interactive mode (MPI rank 0)");
-			// Open /dev/tty once for prompts (bypasses mpirun buffering)
-			tty_handle = fopen("/dev/tty", "w");
-			if (!tty_handle) {
-				LOG_DEBUG("Warning: Could not open /dev/tty, falling back to stderr for prompts");
-			}
-			return;
-		}
-	}
-
-	if (interactive_mode) {
-		LOG_DEBUG("CLI initialized in interactive mode");
-		// Open /dev/tty once for prompts (bypasses mpirun buffering)
-		tty_handle = fopen("/dev/tty", "w");
-		if (!tty_handle) {
-			LOG_DEBUG("Warning: Could not open /dev/tty, falling back to stderr for prompts");
-		}
-	} else {
-		LOG_DEBUG("CLI initialized in piped mode");
-	}
-}
-
-void CLI::set_terminal_raw() {
-	if (term_raw_mode) return;
-
-	struct termios raw;
-	tcgetattr(STDIN_FILENO, &original_term);
-	raw = original_term;
-
-	// Disable canonical mode and echo
-	raw.c_lflag &= ~(ICANON | ECHO);
-	raw.c_cc[VMIN] = 0;   // Non-blocking read
-	raw.c_cc[VTIME] = 0;
-
-	tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-	term_raw_mode = true;
-}
-
-void CLI::restore_terminal() {
-	if (!term_raw_mode) return;
-	tcsetattr(STDIN_FILENO, TCSANOW, &original_term);
-	term_raw_mode = false;
-}
-
-bool CLI::check_escape_pressed() {
-	if (!term_raw_mode) return false;
-
-	fd_set readfds;
-	FD_ZERO(&readfds);
-	FD_SET(STDIN_FILENO, &readfds);
-
-	struct timeval tv = {0, 0};  // No wait
-
-	if (select(STDIN_FILENO + 1, &readfds, nullptr, nullptr, &tv) > 0) {
-		char c;
-		if (read(STDIN_FILENO, &c, 1) == 1) {
-			if (c == 27) {	// ESC key
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
-std::string CLI::strip_bracketed_paste_sequences(const std::string& input) {
-	std::string result = input;
-
-	// Strip common bracketed paste markers that leak through EditLine
-	// Variants seen: [200~, 200~, 00~ (start) and [201~, 201~, 01~ (end)
-
-	// Remove paste start sequences (various formats)
-	std::vector<std::string> start_markers = {"[200~", "200~", "00~"};
-	for (const auto& marker : start_markers) {
-		size_t pos = 0;
-		while ((pos = result.find(marker, pos)) != std::string::npos) {
-			result.erase(pos, marker.length());
-		}
-	}
-
-	// Remove paste end sequences (various formats)
-	std::vector<std::string> end_markers = {"[201~", "201~", "01~"};
-	for (const auto& marker : end_markers) {
-		size_t pos = 0;
-		while ((pos = result.find(marker, pos)) != std::string::npos) {
-			result.erase(pos, marker.length());
-		}
-	}
-
-	return result;
-}
-
-std::string CLI::get_input_line() {
-#ifdef USE_READLINE
-	if (interactive_mode) {
-		char* line = readline("");	// No prompt, we handle it separately
-		if (line == nullptr) {
-			eof_received = true;
-			return "";	// EOF
-		}
-		eof_received = false;
-		std::string result(line);
-
-		// Debug: Show what we actually received
-		if (g_debug_level) {
-			LOG_DEBUG("Raw input received: '" + result + "'");
-			// Show hex bytes for debugging escape sequences
-			std::string hex_dump;
-			for (unsigned char c : result.substr(0, std::min(size_t(50), result.length()))) {
-				char buf[10];
-				snprintf(buf, sizeof(buf), "%02x ", c);
-				hex_dump += buf;
-			}
-			LOG_DEBUG("First 50 bytes (hex): " + hex_dump);
-		}
-
-		// Detect bracketed paste mode (EditLine on macOS doesn't strip these automatically)
-		// If we see the paste start sequence, accumulate until paste end
-		// Check for various formats: 200~, 00~, [200~, etc.
-		if (result.find("200~") != std::string::npos || result.find("00~") != std::string::npos) {
-			LOG_DEBUG("Detected bracketed paste start");
-			std::string pasted_content = strip_bracketed_paste_sequences(result);
-
-			// Keep reading lines until we see the paste end marker (various formats)
-			while (result.find("201~") == std::string::npos && result.find("01~") == std::string::npos) {
-				free(line);
-				line = readline("");  // No prompt for continuation
-				if (line == nullptr) {
-					eof_received = true;
-					break;
-				}
-				result = std::string(line);
-
-				// Check for end marker (various formats)
-				if (result.find("201~") != std::string::npos || result.find("01~") != std::string::npos) {
-					// Add final content before end marker
-					std::string final_line = strip_bracketed_paste_sequences(result);
-					if (!final_line.empty()) {
-						pasted_content += "\n" + final_line;
-					}
-					break;
-				} else {
-					// Accumulate this line
-					pasted_content += "\n" + result;
-				}
-			}
-
-			free(line);
-			if (!pasted_content.empty()) {
-				add_history(pasted_content.c_str());
-			}
-			LOG_DEBUG("Bracketed paste complete, length: " + std::to_string(pasted_content.length()));
-			return pasted_content;
-		}
-
-		// Check for triple-quote multi-line mode (alternative for explicit multi-line)
-		if (result == "\"\"\"" || result.find("\"\"\"") == 0) {
-			// Multi-line mode - keep reading until closing """
-			std::string multi_line;
-			bool first_line = true;
-
-			// If line has content after """, include it
-			if (result.length() > 3) {
-				multi_line = result.substr(3);
-				first_line = false;
-			}
-
-			while (true) {
-				free(line);  // Free previous line
-				line = readline("");  // No prompt for continuation lines
-				if (line == nullptr) {
-					eof_received = true;
-					break;
-				}
-
-				std::string continued(line);
-
-				// Check for closing """
-				if (continued == "\"\"\"" || continued.find("\"\"\"") != std::string::npos) {
-					// If """ is at end of line with content before it, include that content
-					size_t pos = continued.find("\"\"\"");
-					if (pos > 0) {
-						if (!first_line) multi_line += "\n";
-						multi_line += continued.substr(0, pos);
-					}
-					break;
-				}
-
-				// Add line to multi-line buffer
-				if (!first_line) multi_line += "\n";
-				multi_line += continued;
-				first_line = false;
-			}
-
-			if (!multi_line.empty()) {
-				add_history(multi_line.c_str());
-			}
-			free(line);
-			return multi_line;
-		}
-
-		if (!result.empty()) {
-			add_history(line);
-		}
-		free(line);
-		return result;
-	} else {
-		// Non-interactive mode - use getline
-		std::string line;
-		if (!std::getline(std::cin, line)) {
-			eof_received = true;
-			return "";	// EOF
-		}
-		eof_received = false;
-		return line;
-	}
-#else
-	// No readline - use basic getline
-	// Prompt is already shown by caller, just read input
-	std::string line;
-	if (!std::getline(std::cin, line)) {
-		eof_received = true;
-		return "";	// EOF
-	}
-	eof_received = false;
-	return line;
-#endif
-}
-
-void CLI::show_prompt() {
-	if (interactive_mode) {
-		// Write to /dev/tty if available (bypasses mpirun buffering)
-		if (tty_handle) {
-			fprintf(tty_handle, "\033[32m> \033[0m");
-			fflush(tty_handle);
-		} else {
-			// Fallback to stderr if /dev/tty unavailable
-			std::cerr << "\033[32m> \033[0m" << std::flush;
-		}
-	}
-}
-
-void CLI::show_user_message(const std::string& msg) {
-	// In piped mode, echo the user input as transcript
-	if (!interactive_mode) {
-		printf("> %s\n", msg.c_str());
-		fflush(stdout);
-	}
-}
-
-void CLI::show_assistant_message(const std::string& msg) {
-	// Split message by lines - first line gets <, rest are indented
-	std::istringstream stream(msg);
-	std::string line;
-	bool first_line = true;
-
-	while (std::getline(stream, line)) {
-		if (first_line) {
-			// First line gets the < prefix
-			if (interactive_mode) {
-				printf("\033[33m< %s\033[0m\n", line.c_str());
-			} else {
-				printf("< %s\n", line.c_str());
-			}
-			first_line = false;
-		} else {
-			// Subsequent lines are indented
-			if (interactive_mode) {
-				printf("\033[33m  %s\033[0m\n", line.c_str());
-			} else {
-				printf("  %s\n", line.c_str());
-			}
-		}
-	}
-	fflush(stdout);
 }
 
 void CLI::show_tool_call(const std::string& name, const std::string& params) {
-	if (interactive_mode) {
+	if (tio.interactive_mode) {
 		printf("\033[33m* %s(%s)\033[0m\n", name.c_str(), params.c_str());
 	} else {
 		printf("* %s(%s)\n", name.c_str(), params.c_str());
@@ -372,7 +72,7 @@ void CLI::show_tool_result(const std::string& result) {
 	while (std::getline(stream, line)) {
 		if (first_line) {
 			// First line gets the > prefix
-			if (interactive_mode) {
+			if (tio.interactive_mode) {
 				printf("\033[36m> %s\033[0m\n", line.c_str());
 			} else {
 				printf("> %s\n", line.c_str());
@@ -380,7 +80,7 @@ void CLI::show_tool_result(const std::string& result) {
 			first_line = false;
 		} else {
 			// Subsequent lines are indented
-			if (interactive_mode) {
+			if (tio.interactive_mode) {
 				printf("\033[36m  %s\033[0m\n", line.c_str());
 			} else {
 				printf("  %s\n", line.c_str());
@@ -391,7 +91,7 @@ void CLI::show_tool_result(const std::string& result) {
 }
 
 void CLI::show_error(const std::string& error) {
-	if (interactive_mode) {
+	if (tio.interactive_mode) {
 		printf("\033[31mError: %s\033[0m\n", error.c_str());
 	} else {
 		fprintf(stderr, "Error: %s\n", error.c_str());
@@ -399,7 +99,7 @@ void CLI::show_error(const std::string& error) {
 }
 
 void CLI::show_cancelled() {
-	if (interactive_mode) {
+	if (tio.interactive_mode) {
 		printf("\n\033[31m[Cancelled]\033[0m\n");
 	}
 }
@@ -407,40 +107,42 @@ void CLI::show_cancelled() {
 // Main CLI loop - handles all user interaction
 int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 	CLI cli;
-	cli.initialize();
 
-	LOG_DEBUG("Starting CLI mode (interactive: " + std::string(cli.interactive_mode ? "yes" : "no") + ")");
+	LOG_DEBUG("Starting CLI mode (interactive: " + std::string(tio.interactive_mode ? "yes" : "no") + ")");
 
-	bool warmup_done = false;
+	// Configure TerminalIO output filtering for this session
+	// Get tool call markers from backend (model-specific from chat template)
+	tio.markers.tool_call_start = backend->get_tool_call_markers();
+	tio.markers.tool_call_end = backend->get_tool_call_end_markers();
+
+	// Get thinking markers from backend (model-specific)
+	tio.markers.thinking_start = backend->get_thinking_start_markers();
+	tio.markers.thinking_end = backend->get_thinking_end_markers();
+	tio.show_thinking = g_show_thinking;  // From --thinking flag
+
+	// Queue warmup message if needed
+	if (config->warmup) {
+		LOG_DEBUG("Queueing warmup message...");
+		tio.add_input(config->warmup_message);
+	}
+
 	std::string user_input;
 
 	// Main interaction loop
 	while (true) {
-		// Ensure terminal is in normal mode before reading input
-		cli.restore_terminal();
-
-		// Check if we need to do warmup first
-		if (config->warmup && !warmup_done) {
-			LOG_DEBUG("Warming up with warmup message...");
-			user_input = config->warmup_message;
-			warmup_done = true;
-			// Don't show prompt for warmup message
-		} else {
-			// Normal user input
-			cli.show_prompt();
-			user_input = cli.get_input_line();
-		}
+		// Get next input (from queue or user)
+		user_input = tio.read(">");
 
 		if (user_input.empty()) {
 			// Empty string indicates EOF (Ctrl+D) or empty input
 			if (cli.eof_received || std::cin.eof()) {
-				if (!cli.interactive_mode) {
+				if (!tio.interactive_mode) {
 					LOG_DEBUG("End of piped input");
 				} else {
 					LOG_INFO("User pressed Ctrl+D - exiting");
 				}
 				break;
-			} else if (cli.interactive_mode) {
+			} else if (tio.interactive_mode) {
 				// Interactive mode: empty line continues (just prompt again)
 				continue;
 			} else {
@@ -456,11 +158,6 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 		}
 
 		// Show user message in transcript (for piped mode)
-		// Skip showing warmup message prompt
-		if (!warmup_done || user_input != config->warmup_message) {
-			cli.show_user_message(user_input);
-		}
-
 		LOG_DEBUG("User input: " + user_input);
 
 		try {
@@ -469,8 +166,7 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 			// Enable raw terminal mode for escape detection during generation
 			// Only if stdin is actually a TTY (not piped input)
-			if (cli.interactive_mode && isatty(STDIN_FILENO)) {
-				cli.set_terminal_raw();
+			if (tio.interactive_mode && isatty(STDIN_FILENO)) {
 			}
 
 			// Sanitize user input: strip control characters and validate size
@@ -503,12 +199,36 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 			// Check for error
 			if (!resp.success) {
-				cli.restore_terminal();
 				std::cerr << "\n\033[31mError: " << resp.error << "\033[0m\n" << std::flush;
 				continue; // Back to prompt
 			}
 
 			LOG_DEBUG("Got response, length: " + std::to_string(resp.content.length()));
+
+#if 0
+			// For API backends, always process through ModelOutput (they don't stream)
+			// For local backends with tools, also process through ModelOutput (streaming was suppressed)
+			// For local backends without tools, ModelOutput was already called during streaming
+			auto& registry = ToolRegistry::instance();
+			auto available_tools = registry.list_tools();
+			bool local_with_tools = backend->is_local && !available_tools.empty();
+
+			if (!backend->is_local || local_with_tools) {
+				tio.write(resp.content.c_str(), resp.content.length());
+			}
+#else
+			// API backends now stream - only output if it wasn't already streamed
+			// Local backends with tools suppress streaming and output here instead
+			auto& registry = ToolRegistry::instance();
+			auto available_tools = registry.list_tools();
+			bool local_with_tools = backend->is_local && !available_tools.empty();
+
+			if (!resp.was_streamed && (!backend->is_local || local_with_tools)) {
+				tio.begin_response();
+				tio.write(resp.content.c_str(), resp.content.length());
+				tio.end_response();
+			}
+#endif
 
 			// Tool execution loop - orchestrated by CLI
 			int tool_loop_iteration = 0;
@@ -519,16 +239,18 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 				tool_loop_iteration++;
 				LOG_DEBUG("Tool loop iteration: " + std::to_string(tool_loop_iteration));
 
-				// Check if user cancelled during generation
-				if (cli.interactive_mode && cli.check_escape_pressed()) {
-					cli.generation_cancelled = true;
-					cli.restore_terminal();
-					cli.show_cancelled();
-					break;
+				// Check for tool calls from TerminalIO buffer first
+				std::optional<ToolParser::ToolCall> tool_call_opt;
+				if (!tio.buffered_tool_call.empty()) {
+					// Tool call was intercepted by TerminalIO filtering
+					tool_call_opt = ToolParser::parse_tool_call(
+						tio.buffered_tool_call,
+						backend->get_tool_call_markers()
+					);
+				} else {
+					// Fallback to extracting from Response (for backwards compatibility)
+					tool_call_opt = extract_tool_call(resp, backend.get());
 				}
-
-				// Check for tool calls (handles both structured and text-based)
-				auto tool_call_opt = extract_tool_call(resp, backend.get());
 
 				if (tool_call_opt.has_value()) {
 					auto tool_call = tool_call_opt.value();
@@ -574,7 +296,6 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 						if (recent_tool_calls[i] == call_signature) {
 							consecutive_count++;
 							if (consecutive_count >= max_consecutive_identical_calls) {
-								cli.restore_terminal();
 								cli.show_error("Detected infinite loop: " + call_signature +
 											 " called " + std::to_string(consecutive_count) +
 											 " times consecutively. Stopping.");
@@ -629,63 +350,9 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 						params_str += param.first + "=" + value_str;
 					}
 
-					// Show assistant reasoning/content before tool call if present (only on first iteration)
-					// But skip if content is ONLY the tool call XML (no reasoning to show)
-					if (tool_loop_iteration == 1 && !resp.content.empty()) {
-						// Check if there's actual content beyond just the tool call
-						// Search entire message content (may span multiple lines)
-						bool has_content_beyond_tool_call = false;
-						size_t tool_call_start = resp.content.find("<tool_call>");
-						size_t tool_call_end = resp.content.find("</tool_call>");
-
-						if (tool_call_start != std::string::npos && tool_call_end != std::string::npos) {
-							// Check if there's non-whitespace content before OR after the tool call
-							std::string before = resp.content.substr(0, tool_call_start);
-							std::string after = resp.content.substr(tool_call_end + 12); // 12 = length of "</tool_call>"
-
-							has_content_beyond_tool_call =
-								(before.find_first_not_of(" \t\n\r") != std::string::npos) ||
-								(after.find_first_not_of(" \t\n\r") != std::string::npos);
-						} else {
-							// No complete tool call found in content - show everything
-							has_content_beyond_tool_call = true;
-						}
-
-						if (has_content_beyond_tool_call) {
-							// Strip the tool call XML from display, only show reasoning
-							// Get content before and after the tool call (may span multiple lines)
-							std::string display_content = resp.content.substr(0, tool_call_start);
-							if (tool_call_end != std::string::npos && tool_call_end + 12 < resp.content.length()) {
-								display_content += resp.content.substr(tool_call_end + 12);
-							}
-
-							// Also remove <think>...</think> blocks unless in debug mode
-							if (g_debug_level == 0) {
-								size_t think_start = 0;
-								while ((think_start = display_content.find("<think>", think_start)) != std::string::npos) {
-									size_t think_end = display_content.find("</think>", think_start);
-									if (think_end != std::string::npos) {
-										display_content.erase(think_start, (think_end + 8) - think_start);
-									} else {
-										break;
-									}
-								}
-							}
-
-							// Trim whitespace
-							while (!display_content.empty() && std::isspace(display_content.back())) {
-								display_content.pop_back();
-							}
-							while (!display_content.empty() && std::isspace(display_content.front())) {
-								display_content.erase(0, 1);
-							}
-
-							if (!display_content.empty()) {
-								cli.show_assistant_message(display_content);
-							}
-						}
-					}
-
+					// ModelOutput already processed and output the response content
+					// (thinking tags hidden, tool call intercepted)
+					// Just show the tool call indicator for user feedback
 					cli.show_tool_call(tool_name, params_str);
 
 					// Execute tool using utility function
@@ -810,6 +477,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 						// Pass tool_result_tokens=0, let Session calculate max_tokens automatically
 						LOG_DEBUG("Sending tool result to backend (tool_tokens=" + std::to_string(tool_result_tokens) +
 								 ", attempt " + std::to_string(tool_retry + 1) + "/" + std::to_string(MAX_TOOL_RETRIES) + ")");
+
+						// Reset TerminalIO filtering state before generating response to tool
+						tio.reset();
+
 						resp = session.add_message(Message::TOOL, truncated_result, tool_name, tool_call_id, tool_result_tokens, 0);
 
 						// Check for MAX_TOKENS_TOO_HIGH error
@@ -874,12 +545,19 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 					// Check for error after retries
 					if (!resp.success) {
-						cli.restore_terminal();
 						std::cerr << "\n\033[31mError: " << resp.error << "\033[0m\n" << std::flush;
 						break;
 					}
 
 					LOG_DEBUG("Got response after tool, length: " + std::to_string(resp.content.length()));
+
+					// For API backends or local backends with tools, process through TerminalIO filtering
+					// Only output if it wasn't already streamed
+					if (!resp.was_streamed && (!backend->is_local || local_with_tools)) {
+						tio.begin_response();
+						tio.write(resp.content.c_str(), resp.content.length());
+						tio.end_response();
+					}
 
 					// Output token count for monitoring (used by test scripts)
 					LOG_DEBUG("tokens: "+std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
@@ -888,49 +566,8 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 					continue;
 				} else {
 					// No tool call - this is the final response
-					// Show assistant response
-					// (Backend already added it to session via add_message)
-					if (!resp.content.empty()) {
-						// Filter out incomplete <tool_call> markers (ones without closing tags)
-						std::string display_content = resp.content;
-						if (display_content.find("<tool_call>") != std::string::npos &&
-						    display_content.find("</tool_call>") == std::string::npos) {
-							// Has opening tag but no closing tag - strip it
-							size_t pos = display_content.find("<tool_call>");
-							display_content = display_content.substr(0, pos);
-							// Trim trailing whitespace
-							while (!display_content.empty() && std::isspace(display_content.back())) {
-								display_content.pop_back();
-							}
-						}
-
-						// Remove <think>...</think> blocks unless in debug mode
-						if (g_debug_level == 0) {
-							size_t think_start = 0;
-							while ((think_start = display_content.find("<think>", think_start)) != std::string::npos) {
-								size_t think_end = display_content.find("</think>", think_start);
-								if (think_end != std::string::npos) {
-									// Remove the entire <think>...</think> block
-									display_content.erase(think_start, (think_end + 8) - think_start);
-								} else {
-									// No closing tag found, break to avoid infinite loop
-									break;
-								}
-							}
-						}
-
-						// Trim leading and trailing whitespace
-						while (!display_content.empty() && std::isspace(display_content.back())) {
-							display_content.pop_back();
-						}
-						while (!display_content.empty() && std::isspace(display_content.front())) {
-							display_content.erase(0, 1);
-						}
-
-						if (!display_content.empty()) {
-							cli.show_assistant_message(display_content);
-						}
-					}
+					// ModelOutput already processed and output the response content
+					// (thinking tags hidden, output already shown to user)
 
 					// Output token count for monitoring (used by test scripts)
 					LOG_DEBUG("tokens: "+std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
@@ -940,16 +577,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 				}
 			}
 
-			// Restore terminal to normal mode after generation
-			if (cli.interactive_mode) {
-				cli.restore_terminal();
-			}
+			// Print newline after final assistant response
+			tio.write("\n", 1);
 
 		} catch (const std::exception& e) {
-			// Restore terminal on error
-			if (cli.interactive_mode) {
-				cli.restore_terminal();
-			}
 			cli.show_error(e.what());
 			LOG_ERROR("Error during generation: " + std::string(e.what()));
 		}

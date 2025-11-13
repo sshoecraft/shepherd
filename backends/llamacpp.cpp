@@ -12,10 +12,12 @@
 #include <filesystem>
 
 #ifdef ENABLE_LLAMACPP
-#include "../llama.cpp/include/llama.h"
-#include "../llama.cpp/src/llama-batch.h"
-#include "../llama.cpp/common/chat.h"
+#include "llama.cpp/include/llama.h"
+#include "llama.cpp/src/llama-batch.h"
+#include "llama.cpp/common/chat.h"
 #endif
+
+#include "terminal_io.h"
 
 
 // LlamaCppBackend implementation
@@ -43,17 +45,31 @@ void LlamaCppBackend::parse_backend_config(const std::string& json) {
     try {
         auto j = nlohmann::json::parse(json);
 
-        if (j.contains("temperature")) temperature = j["temperature"].get<float>();
-        if (j.contains("top_p")) top_p = j["top_p"].get<float>();
-        if (j.contains("top_k")) top_k = j["top_k"].get<int>();
+        if (j.contains("temperature")) {
+            temperature = j["temperature"].get<float>();
+            temperature_from_config = true;
+        }
+        if (j.contains("top_p")) {
+            top_p = j["top_p"].get<float>();
+            top_p_from_config = true;
+        }
+        if (j.contains("top_k")) {
+            top_k = j["top_k"].get<int>();
+            top_k_from_config = true;
+        }
         if (j.contains("min_keep")) min_keep = j["min_keep"].get<int>();
         if (j.contains("penalty_repeat")) penalty_repeat = j["penalty_repeat"].get<float>();
         if (j.contains("penalty_freq")) penalty_freq = j["penalty_freq"].get<float>();
         if (j.contains("penalty_present")) penalty_present = j["penalty_present"].get<float>();
         if (j.contains("penalty_last_n")) penalty_last_n = j["penalty_last_n"].get<int>();
         if (j.contains("gpu_layers")) gpu_layers = j["gpu_layers"].get<int>();
+
+        // Accept both full names and short names for tensor/pipeline parallel
         if (j.contains("tensor_parallel")) tensor_parallel = j["tensor_parallel"].get<int>();
+        else if (j.contains("tp")) tensor_parallel = j["tp"].get<int>();
+
         if (j.contains("pipeline_parallel")) pipeline_parallel = j["pipeline_parallel"].get<int>();
+        else if (j.contains("pp")) pipeline_parallel = j["pp"].get<int>();
 
         LOG_DEBUG("Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
                   ", gpu_layers=" + std::to_string(gpu_layers) +
@@ -83,10 +99,7 @@ int LlamaCppBackend::count_tokens_in_text(const std::string& text) const {
     return static_cast<int>(text.length() / 4.0 + 0.5);
 }
 
-int LlamaCppBackend::count_message_tokens(Message::Type type,
-                                         const std::string& content,
-                                         const std::string& tool_name,
-                                         const std::string& tool_id) {
+int LlamaCppBackend::count_message_tokens(Message::Type type, const std::string& content, const std::string& tool_name, const std::string& tool_id) {
 #ifdef ENABLE_LLAMACPP
     if (!model || !template_node) {
         // Fallback to simple text tokenization if model not initialized
@@ -188,6 +201,18 @@ std::vector<std::string> LlamaCppBackend::get_tool_call_markers() const {
 #else
     return {};
 #endif
+}
+
+std::vector<std::string> LlamaCppBackend::get_tool_call_end_markers() const {
+    return model_config.tool_call_end_markers;
+}
+
+std::vector<std::string> LlamaCppBackend::get_thinking_start_markers() const {
+    return model_config.thinking_start_markers;
+}
+
+std::vector<std::string> LlamaCppBackend::get_thinking_end_markers() const {
+    return model_config.thinking_end_markers;
 }
 
 bool LlamaCppBackend::is_ready() const {
@@ -436,6 +461,16 @@ std::string LlamaCppBackend::generate(int max_tokens) {
                 for (const auto& marker : tool_call_markers) {
                     LOG_INFO("  - " + marker);
                 }
+
+                // Populate model_config with tool markers and infer end markers
+                model_config.tool_call_start_markers = tool_call_markers;
+                // Infer end markers from start markers (add closing slash)
+                for (const auto& start_marker : tool_call_markers) {
+                    if (start_marker.front() == '<' && start_marker.back() == '>') {
+                        std::string end_marker = "</" + start_marker.substr(1);
+                        model_config.tool_call_end_markers.push_back(end_marker);
+                    }
+                }
             } else {
                 LOG_INFO("No preserved_tokens from template - checking vocabulary");
 
@@ -548,7 +583,16 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     bool suppress_stream = g_server_mode || !available_tools.empty();
     std::string raw_response = run_inference("", max_tokens, suppress_stream);  // Empty prompt since everything is cached
     LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
-    LOG_DEBUG("Raw response: " + raw_response);
+    LOG_DEBUG("Raw response content: " + raw_response);
+
+    // Write full response to debug file for inspection
+    if (getenv("SHEPHERD_DEBUG_RESPONSES")) {
+        std::ofstream debug_file("/tmp/shepherd_response_debug.txt", std::ios::app);
+        debug_file << "=== Response at " << std::time(nullptr) << " ===\n";
+        debug_file << raw_response << "\n";
+        debug_file << "=== End (length: " << raw_response.length() << ") ===\n\n";
+        debug_file.close();
+    }
 
     // CRITICAL FIX: After generation, add the closing tag to KV cache
     // The generation prompt added assistant_start_tag, and run_inference() generated tokens,
@@ -597,6 +641,9 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 #ifdef ENABLE_LLAMACPP
     // Reset cancellation flag at start of generation
     g_generation_cancelled = false;
+
+    // Reset TerminalIO filtering state for new generation
+    tio.reset();
 
     if (!model || !model_ctx) {
         LOG_ERROR("llama.cpp model or context not initialized");
@@ -739,7 +786,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
             // Stream output only if not suppressed (suppressed for tool calls)
             if (!suppress_streaming) {
-                std::cout << std::string(token_str, token_len) << std::flush;
+                tio.write(token_str, token_len);
             }
         }
 
@@ -773,11 +820,6 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
     llama_sampler_free(sampler);
 
-    // Add newline after streaming is complete (only if we actually streamed)
-    if (n_generated > 0 && !suppress_streaming) {
-        std::cout << std::endl;
-    }
-
     // Always show performance metrics to stderr (visible even without debug mode)
     if (n_generated > 0) {
         int context_used = get_context_token_count();
@@ -792,6 +834,12 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
     // Store completion token count for server to return (like API backends do)
     last_completion_tokens = n_generated;
+
+    // Check if we hit the length limit (generated exactly max_gen_tokens)
+    last_generation_hit_length_limit = (n_generated == max_gen_tokens);
+    if (last_generation_hit_length_limit) {
+        LOG_DEBUG("Generation stopped due to max_tokens limit (" + std::to_string(max_gen_tokens) + " tokens)");
+    }
 
     return response;
 #else
@@ -931,8 +979,17 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
         return false;
     }
 
-    // Render just this single message through the template
-    std::string rendered_msg = render_message(msg, false);
+    // IMPORTANT: Do NOT run chat template on ASSISTANT messages
+    // Templates are for formatting prompts, not parsing model outputs
+    // Running template on assistant messages causes think tag stripping
+    std::string rendered_msg;
+    if (msg.get_role() == "assistant") {
+        // Use raw content for assistant messages - no template processing
+        rendered_msg = msg.content;
+    } else {
+        // Render user/system messages through the template
+        rendered_msg = render_message(msg, false);
+    }
 
     llama_context* ctx = static_cast<llama_context*>(model_ctx);
     llama_model* mdl = static_cast<llama_model*>(model);
@@ -1033,103 +1090,6 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 
 
 
-std::string LlamaCppBackend::format_system_message_with_tools(const std::string& system_content,
-                                                               const std::vector<Session::Tool>& tools) {
-    // For models that don't need special tool formatting (most models)
-    if (model_config.family != ModelFamily::QWEN_2_X &&
-        model_config.family != ModelFamily::LLAMA_3_X) {
-        // Simple format: append tool descriptions to system message
-        if (tools.empty()) {
-            return system_content;
-        }
-
-        std::string result = system_content;
-        if (!result.empty() && result.back() != '\n') {
-            result += "\n\n";
-        }
-
-        result += "Here are the available tools:\n\n";
-        for (const auto& tool : tools) {
-            result += "- " + tool.name + ": " + tool.description +
-                      " (parameters: " + tool.parameters_text() + ")\n";
-        }
-
-        // Add tool call format instructions
-        result += "\n**IMPORTANT - Tool Call Format:**\n";
-        result += "Tool calls must be raw JSON as the ENTIRE message (no markdown, no text, no quotes).\n";
-        result += "Format: {\"name\": \"tool_name\", \"parameters\": {\"key\": \"value\"}}\n";
-        result += "Use \"name\" (not \"tool_name\") and \"parameters\" (not \"params\").\n";
-        result += "If a tool fails, continue gracefully without retrying indefinitely.\n";
-
-        return result;
-    }
-
-    // For Qwen 2.x: Use minja template to format tools
-    if (model_config.family == ModelFamily::QWEN_2_X && template_node) {
-        // Build tools array for minja
-        auto tools_array = minja::Value::array();
-        for (const auto& tool : tools) {
-            auto tool_obj = minja::Value::object();
-            tool_obj.set("name", minja::Value(tool.name));
-            tool_obj.set("description", minja::Value(tool.description));
-
-            // Set parameters - pass the JSON object directly (not as string)
-            // The template expects a proper object structure, not a JSON string
-            // Convert nlohmann::json to ordered_json for minja compatibility
-            if (!tool.parameters.empty()) {
-                nlohmann::ordered_json params_ordered = tool.parameters;
-                tool_obj.set("parameters", minja::Value(params_ordered));
-            }
-
-            tools_array.push_back(tool_obj);
-        }
-
-        // Use Qwen's special tool system format
-        auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
-        auto context = minja::Context::builtins();
-
-        // Set tools in context - try both variable names
-        context->set("tools", tools_array);
-        context->set("builtin_tools", tools_array);
-
-        // Render the system message with tools
-        std::string qwen_system = system_content.empty() ? "You are a helpful assistant." : system_content;
-
-        auto messages = minja::Value::array();
-        auto system_msg = minja::Value::object();
-        system_msg.set("role", minja::Value("system"));
-        system_msg.set("content", minja::Value(qwen_system));
-        messages.push_back(system_msg);
-
-        context->set("messages", messages);
-        context->set("add_generation_prompt", minja::Value(false));
-
-        try {
-            auto rendered = (*template_ptr)->render(context);
-            if (rendered.empty()) {
-                LOG_ERROR("Failed to render Qwen system message with tools");
-                return system_content;  // Fallback
-            }
-            return rendered;
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception rendering Qwen system message: " + std::string(e.what()));
-            return system_content;  // Fallback
-        }
-    }
-
-    // For Llama 3.x: Format tools as JSON schemas in first user message
-    if (model_config.family == ModelFamily::LLAMA_3_X) {
-        // Llama 3.x puts tools in the first user message, not system
-        // Return unmodified system message
-        return system_content;
-    }
-
-    // Default fallback
-    return system_content;
-}
-
-
-
 Response LlamaCppBackend::generate_from_session(const Session& session, int max_tokens) {
 #ifdef ENABLE_LLAMACPP
     if (!is_ready()) {
@@ -1221,10 +1181,41 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
         LOG_DEBUG("Adding system message to KV cache");
 
         // Format system message with tools
-        std::string formatted_system = format_system_message_with_tools(
-            session.system_message,
-            session.tools
-        );
+        // If session.tools is populated (API mode), build tool descriptions from it
+        // Otherwise use ToolRegistry (CLI mode)
+        auto& registry = ToolRegistry::instance();
+        bool has_session_tools = !session.tools.empty();
+
+        std::string formatted_system;
+        if (has_session_tools) {
+            // Build tool descriptions from session.tools for API mode
+            std::vector<std::pair<std::string, std::string>> tool_descriptions;
+            for (const auto& tool : session.tools) {
+                tool_descriptions.push_back({tool.name, tool.description});
+            }
+
+            // Format system message with inline tool descriptions
+            formatted_system = session.system_message.empty() ?
+                "You are a helpful AI assistant." : session.system_message;
+
+            if (!tool_descriptions.empty()) {
+                formatted_system += "\n\n# Tools\n\nYou have access to the following tools:\n\n";
+                for (const auto& [name, desc] : tool_descriptions) {
+                    formatted_system += "- " + name + ": " + desc + "\n";
+                }
+                formatted_system += "\nTo use a tool, output XML in this format:\n";
+                formatted_system += "<tool_call>\n<name>tool_name</name>\n<parameters>{\"param\":\"value\"}</parameters>\n</tool_call>";
+            }
+            LOG_DEBUG("Formatted system prompt with " + std::to_string(session.tools.size()) + " tools from session");
+        } else {
+            // Use ToolRegistry for CLI mode
+            formatted_system = Models::format_system_message(
+                model_config,
+                session.system_message,
+                registry,
+                template_node
+            );
+        }
 
         // Create system message
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
@@ -1418,14 +1409,27 @@ void LlamaCppBackend::initialize(Session& session) {
             LOG_INFO("Auto GPU layers (loading all layers to GPU)");
         }
 
-        // Multi-GPU support: Use tensor_parallel config to control GPU usage
-        if (tensor_parallel == 0 || tensor_parallel > 1) {
-            // TP=0 (auto) or TP>1: Use multiple GPUs with LAYER split mode
-            model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+        // Multi-GPU support: Use pipeline_parallel or tensor_parallel config to control GPU usage
+        // Note: pipeline_parallel is preferred over tensor_parallel for semantic clarity
+        // Both use LLAMA_SPLIT_MODE_LAYER which distributes layers across GPUs
+        int num_gpus_for_splitting = 0;
+
+        // Determine which config to use (prefer pipeline_parallel if both specified)
+        if (pipeline_parallel > 1) {
+            num_gpus_for_splitting = pipeline_parallel;
+        } else if (tensor_parallel == 0 || tensor_parallel > 1) {
+            num_gpus_for_splitting = tensor_parallel;
+        }
+
+        if (num_gpus_for_splitting != 0) {
+            // Multi-GPU with ROW split mode (tensor parallelism + layer splitting)
+            // ROW mode is more aggressive and splits both layers AND tensors across GPUs
+            // This is essential for very large models (>100B parameters)
+            model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
             model_params.main_gpu = 0;
 
             // Configure tensor_split array to distribute model across GPUs
-            int num_gpus = tensor_parallel > 0 ? tensor_parallel : 16;  // Max 16 GPUs if auto
+            int num_gpus = num_gpus_for_splitting > 0 ? num_gpus_for_splitting : 16;  // Max 16 GPUs if auto
             tensor_split.resize(128, 0.0f);  // Initialize all to 0 (unused)
             for (int i = 0; i < num_gpus && i < 128; i++) {
                 tensor_split[i] = 1.0f;  // Equal proportion for each GPU
@@ -1451,17 +1455,19 @@ void LlamaCppBackend::initialize(Session& session) {
 
             LOG_INFO("Configured " + std::to_string(gpu_devices.size() - 1) + " devices for multi-GPU");
 
-            if (tensor_parallel == 0) {
-                LOG_INFO("Tensor parallelism: AUTO (using all available GPUs with LAYER splitting)");
+            if (pipeline_parallel > 1) {
+                LOG_INFO("Pipeline parallelism: PP=" + std::to_string(pipeline_parallel) + " GPUs with ROW split mode (tensor + layer splitting)");
+            } else if (num_gpus_for_splitting == 0) {
+                LOG_INFO("Multi-GPU: AUTO (using all available GPUs with ROW split mode)");
             } else {
-                LOG_INFO("Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with LAYER split mode");
+                LOG_INFO("Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with ROW split mode (consider using --pp for clarity)");
             }
         } else {
-            // TP=1: Single GPU only, no splitting
+            // Single GPU only, no splitting
             model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
             model_params.main_gpu = 0;
             model_params.tensor_split = nullptr;
-            LOG_INFO("Tensor parallelism: TP=1 (single GPU, no splitting)");
+            LOG_INFO("Single GPU mode (no splitting)");
         }
 
         LOG_INFO("GPU detected, offloading layers to GPU (n_gpu_layers=" + std::to_string(model_params.n_gpu_layers) + ")");
@@ -1599,15 +1605,33 @@ void LlamaCppBackend::initialize(Session& session) {
              ", uses_eom_token=" + (model_config.uses_eom_token ? "true" : "false") +
              ", uses_python_tag=" + (model_config.uses_python_tag ? "true" : "false"));
 
+    // Try to load sampling parameters from generation_config.json
+    // Priority: config file values > generation_config.json > hardcoded defaults
+    std::filesystem::path model_file_path(model_path);
+    std::filesystem::path model_dir_path = model_file_path.parent_path();
+
+    float gen_temperature = temperature;  // Start with current value
+    float gen_top_p = top_p;
+    int gen_top_k = top_k;
+
+    if (Models::load_generation_config(model_dir_path.string(), gen_temperature, gen_top_p, gen_top_k)) {
+        // Only apply values that weren't explicitly set in config file
+        if (!temperature_from_config) temperature = gen_temperature;
+        if (!top_p_from_config) top_p = gen_top_p;
+        if (!top_k_from_config) top_k = gen_top_k;
+    }
+
     LOG_INFO("LlamaCppBackend initialized with model: " + model_path);
     initialized = true;
 
     // Add system message in cli mode
 	if (!g_server_mode) {
         // Format system message with tools
-        std::string formatted_system = format_system_message_with_tools(
+        std::string formatted_system = Models::format_system_message(
+            model_config,
             session.system_message,
-            session.tools
+            ToolRegistry::instance(),
+            template_node
         );
 
         // Use add_message to properly decode and add system message
@@ -1650,7 +1674,12 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     int message_tokens = prompt_tokens;
     if (message_tokens == 0) {
         if (type == Message::SYSTEM && !session.tools.empty()) {
-            std::string formatted_content = format_system_message_with_tools(content, session.tools);
+            std::string formatted_content = Models::format_system_message(
+                model_config,
+                content,
+                ToolRegistry::instance(),
+                template_node
+            );
             message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
         } else {
             message_tokens = count_message_tokens(type, content, tool_name, tool_id);
@@ -1752,6 +1781,8 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
         std::string finish_reason = "stop";
         if (!tool_calls.empty()) {
             finish_reason = "tool_calls";
+        } else if (last_generation_hit_length_limit) {
+            finish_reason = "length";
         }
 
         // Build Response

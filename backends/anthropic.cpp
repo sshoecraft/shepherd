@@ -1,6 +1,7 @@
 #include "anthropic.h"
 #include "shepherd.h"
 #include "nlohmann/json.hpp"
+#include "sse_parser.h"
 #include <sstream>
 #include <algorithm>
 #include <vector>
@@ -15,6 +16,8 @@ AnthropicBackend::AnthropicBackend(size_t context_size)
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
+
+    // Don't assume streaming - will test during initialize()
 
     // Detect model configuration from Models database
     model_config = Models::detect_from_api_model("anthropic", model_name);
@@ -288,6 +291,13 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
         request["tools"] = tools;
     }
 
+    // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
+    request["temperature"] = temperature;
+    request["top_p"] = top_p;
+    if (top_k > 0) {
+        request["top_k"] = top_k;
+    }
+
     return request;
 }
 
@@ -401,6 +411,13 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
         request["tools"] = tools;
     }
 
+    // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
+    request["temperature"] = temperature;
+    request["top_p"] = top_p;
+    if (top_k > 0) {
+        request["top_k"] = top_k;
+    }
+
     return request;
 }
 
@@ -480,6 +497,252 @@ std::map<std::string, std::string> AnthropicBackend::get_api_headers() {
 std::string AnthropicBackend::get_api_endpoint() {
     return api_endpoint;
 }
+Response AnthropicBackend::add_message_stream(Session& session,
+                                             Message::Type type,
+                                             const std::string& content,
+                                             StreamCallback callback,
+                                             const std::string& tool_name,
+                                             const std::string& tool_id,
+                                             int prompt_tokens,
+                                             int max_tokens) {
+    LOG_DEBUG("AnthropicBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
+             ", max_tokens=" + std::to_string(max_tokens));
+
+    const int MAX_RETRIES = 3;
+    int retry = 0;
+
+    while (retry < MAX_RETRIES) {
+        // Build request with entire session + new message + max_tokens
+        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+
+        // Add streaming flag
+        request["stream"] = true;
+
+        LOG_DEBUG("Sending streaming request to Anthropic API with max_tokens=" + std::to_string(max_tokens));
+
+        // Get headers and endpoint
+        auto headers = get_api_headers();
+        std::string endpoint = get_api_endpoint();
+
+        // Streaming state
+        Response accumulated_resp;
+        accumulated_resp.success = true;
+        accumulated_resp.code = Response::SUCCESS;
+        std::string accumulated_content;
+        SSEParser sse_parser;
+        bool stream_complete = false;
+        bool message_started = false;
+
+        // Streaming callback to process SSE chunks
+        auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+            // Process SSE events from chunk
+            return sse_parser.process_chunk(chunk,
+                [&](const std::string& event_type, const std::string& data, const std::string& id) -> bool {
+                    // Parse JSON data
+                    try {
+                        json event_json = json::parse(data);
+
+                        // Handle different event types
+                        if (event_type == "message_start") {
+                            message_started = true;
+                            // Extract usage from message object
+                            if (event_json.contains("message")) {
+                                const auto& message = event_json["message"];
+                                if (message.contains("usage")) {
+                                    accumulated_resp.prompt_tokens = message["usage"].value("input_tokens", 0);
+                                }
+                            }
+                        }
+                        else if (event_type == "content_block_start") {
+                            // Content block starting - could be text or tool_use
+                            if (event_json.contains("content_block")) {
+                                const auto& block = event_json["content_block"];
+                                std::string block_type = block.value("type", "");
+
+                                if (block_type == "tool_use") {
+                                    // Tool use block starting
+                                    LOG_DEBUG("Tool use block starting in stream");
+                                }
+                            }
+                        }
+                        else if (event_type == "content_block_delta") {
+                            // Content delta - text chunk
+                            if (event_json.contains("delta")) {
+                                const auto& delta = event_json["delta"];
+
+                                if (delta.contains("text")) {
+                                    std::string delta_text = delta["text"].get<std::string>();
+                                    accumulated_content += delta_text;
+                                    accumulated_resp.content = accumulated_content;
+
+                                    // Invoke user callback with delta
+                                    if (callback) {
+                                        if (!callback(delta_text, accumulated_content, accumulated_resp)) {
+                                            // User requested stop
+                                            return false;
+                                        }
+                                    }
+                                }
+                                else if (delta.contains("partial_json")) {
+                                    // Tool use parameters being streamed
+                                    LOG_DEBUG("Tool parameters streaming not fully implemented yet");
+                                }
+                            }
+                        }
+                        else if (event_type == "content_block_stop") {
+                            // Content block finished
+                            LOG_DEBUG("Content block finished");
+                        }
+                        else if (event_type == "message_delta") {
+                            // Message metadata updates
+                            if (event_json.contains("delta")) {
+                                const auto& delta = event_json["delta"];
+                                if (delta.contains("stop_reason")) {
+                                    accumulated_resp.finish_reason = delta["stop_reason"].get<std::string>();
+                                }
+                            }
+                            // Usage updates
+                            if (event_json.contains("usage")) {
+                                accumulated_resp.completion_tokens = event_json["usage"].value("output_tokens", 0);
+                            }
+                        }
+                        else if (event_type == "message_stop") {
+                            // Message complete
+                            stream_complete = true;
+                            return false; // Stop processing
+                        }
+                        else if (event_type == "error") {
+                            // Error event
+                            accumulated_resp.success = false;
+                            accumulated_resp.code = Response::ERROR;
+                            accumulated_resp.finish_reason = "error";
+                            if (event_json.contains("error")) {
+                                const auto& error = event_json["error"];
+                                accumulated_resp.error = error.value("message", "Unknown error");
+                            }
+                            return false; // Stop processing
+                        }
+
+                    } catch (const std::exception& e) {
+                        LOG_WARN("Failed to parse Anthropic SSE data: " + std::string(e.what()));
+                    }
+
+                    return true; // Continue processing
+                });
+
+            // Always return true to curl so it doesn't report errors
+            // We handle stream completion via stream_complete flag
+            return true;
+        };
+
+        // Make streaming HTTP call
+        HttpResponse http_response = http_client->post_stream(endpoint, request.dump(), headers,
+                                                             stream_handler, nullptr);
+
+        // Check for HTTP errors
+        if (!http_response.is_success()) {
+            accumulated_resp.success = false;
+            accumulated_resp.code = Response::ERROR;
+            accumulated_resp.finish_reason = "error";
+            accumulated_resp.error = http_response.error_message;
+
+            // Check if context length error
+            int tokens_to_evict = extract_tokens_to_evict(http_response);
+
+            if (tokens_to_evict > 0) {
+                // Calculate which messages to evict
+                auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
+
+                if (ranges.empty()) {
+                    accumulated_resp.code = Response::CONTEXT_FULL;
+                    accumulated_resp.error = "Context full, cannot evict enough messages";
+                    return accumulated_resp;
+                }
+
+                // Evict messages
+                if (!session.evict_messages(ranges)) {
+                    accumulated_resp.error = "Failed to evict messages";
+                    return accumulated_resp;
+                }
+
+                retry++;
+                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + ")");
+                continue; // Retry
+            }
+
+            return accumulated_resp; // Return error
+        }
+
+        // Success - update session with messages
+        if (stream_complete && accumulated_resp.success) {
+            // Calculate token counts
+            int new_message_tokens;
+            if (accumulated_resp.prompt_tokens > 0 && session.last_prompt_tokens > 0) {
+                new_message_tokens = accumulated_resp.prompt_tokens - session.last_prompt_tokens;
+                if (new_message_tokens < 0) new_message_tokens = 1;
+            } else {
+                new_message_tokens = estimate_message_tokens(content);
+            }
+
+            // Update EMA ratio
+            if (new_message_tokens > 0 && content.length() > 0) {
+                float actual_ratio = (float)content.length() / new_message_tokens;
+                float deviation_ratio = actual_ratio / chars_per_token;
+
+                if (deviation_ratio >= 0.5f && deviation_ratio <= 2.0f) {
+                    const float alpha = 0.2f;
+                    chars_per_token = (1.0f - alpha) * chars_per_token + alpha * actual_ratio;
+                    if (chars_per_token < 2.0f) chars_per_token = 2.0f;
+                    if (chars_per_token > 5.0f) chars_per_token = 5.0f;
+                }
+            }
+
+            // Add messages to session
+            Message user_msg(type, content, new_message_tokens);
+            user_msg.tool_name = tool_name;
+            user_msg.tool_call_id = tool_id;
+            session.messages.push_back(user_msg);
+
+            if (type == Message::USER) {
+                session.last_user_message_index = session.messages.size() - 1;
+                session.last_user_message_tokens = new_message_tokens;
+            }
+
+            // Update baseline
+            if (accumulated_resp.prompt_tokens > 0) {
+                session.last_prompt_tokens = accumulated_resp.prompt_tokens;
+            }
+
+            // Add assistant response
+            int assistant_tokens = (accumulated_resp.completion_tokens > 0) ?
+                                 accumulated_resp.completion_tokens :
+                                 estimate_message_tokens(accumulated_resp.content);
+            Message assistant_msg(Message::ASSISTANT, accumulated_resp.content, assistant_tokens);
+            assistant_msg.tool_calls_json = accumulated_resp.tool_calls_json;
+            session.messages.push_back(assistant_msg);
+
+            session.last_assistant_message_index = session.messages.size() - 1;
+            session.last_assistant_message_tokens = assistant_tokens;
+
+            if (accumulated_resp.prompt_tokens > 0 && assistant_tokens > 0) {
+                session.last_prompt_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            }
+
+            session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+        }
+
+        return accumulated_resp;
+    }
+
+    Response err_resp;
+    err_resp.success = false;
+    err_resp.code = Response::ERROR;
+    err_resp.finish_reason = "error";
+    err_resp.error = "Max retries exceeded trying to fit context";
+    return err_resp;
+}
+
 size_t AnthropicBackend::query_model_context_size(const std::string& model_name) {
     // Anthropic doesn't have a /v1/models endpoint to query
     // Return 0 to let models database handle known models

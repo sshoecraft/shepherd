@@ -10,7 +10,7 @@ namespace fs = std::filesystem;
 
 std::vector<ParameterDef> ReadFileTool::get_parameters_schema() const {
     return {
-        {"file_path", "string", "The absolute path to the file to read", true, "", "", {}},
+        {"file_path", "string", "path to the file to be read", true, "", "", {}},
         {"offset", "number", "Optional line number to start reading from (1-indexed)", false, "1", "", {}},
         {"limit", "number", "Optional number of lines to read (-1 for unlimited)", false, "-1", "", {}}
     };
@@ -173,7 +173,7 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
 
 std::vector<ParameterDef> WriteFileTool::get_parameters_schema() const {
     return {
-        {"file_path", "string", "The absolute path to the file to write", true, "", "", {}},
+        {"file_path", "string", "path to the file to be written", true, "", "", {}},
         {"content", "string", "The content to write to the file", true, "", "", {}}
     };
 }

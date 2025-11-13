@@ -1,4 +1,5 @@
 #include "logger.h"
+#include "terminal_io.h"
 #include <iostream>
 #include <ctime>
 
@@ -127,10 +128,15 @@ void Logger::write_log(LogLevel level, const std::string& message) {
 
     // Output to console if enabled
     if (console_output_enabled_) {
-        if (level >= LogLevel::ERROR) {
-            std::cerr << formatted_message << std::endl;
+        formatted_message += "\n";
+
+        // WARN, ERROR, and FATAL go to stderr to avoid polluting stdout
+        if (level >= LogLevel::WARN) {
+            std::cerr << formatted_message;
         } else {
-            std::cout << formatted_message << std::endl;
+            // DEBUG and INFO go through tio for proper formatting
+            Color color = (level == LogLevel::DEBUG) ? Color::GRAY : Color::DEFAULT;
+            tio.write(formatted_message.c_str(), formatted_message.length(), color);
         }
     }
 

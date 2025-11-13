@@ -108,9 +108,10 @@ void Logger::error_fmt(const std::string& format, Args... args) {
     log_fmt(LogLevel::ERROR, format, args...);
 }
 
+// Fixed format_helper implementation
 template<typename T>
 std::string Logger::format_helper(const std::string& format, T&& value) const {
-    size_t pos = format.find("{}");
+    size_t pos = format.find("{}", 0);
     if (pos != std::string::npos) {
         std::ostringstream oss;
         oss << value;
@@ -121,9 +122,10 @@ std::string Logger::format_helper(const std::string& format, T&& value) const {
     return format;
 }
 
+// Fixed format_helper implementation for variadic template
 template<typename T, typename... Args>
 std::string Logger::format_helper(const std::string& format, T&& value, Args&&... args) const {
-    size_t pos = format.find("{}");
+    size_t pos = format.find("{}", 0);
     if (pos != std::string::npos) {
         std::ostringstream oss;
         oss << value;

@@ -418,7 +418,7 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
 // EditTool implementation
 std::vector<ParameterDef> EditTool::get_parameters_schema() const {
     return {
-        {"file_path", "string", "Absolute path to the file to edit", true, "", "", {}},
+        {"file_path", "string", "path to the file to be edited", true, "", "", {}},
         {"old_string", "string", "The exact text to replace", true, "", "", {}},
         {"new_string", "string", "The replacement text", true, "", "", {}},
         {"replace_all", "boolean", "Replace all occurrences (false = replace first only)", false, "false", "", {}}

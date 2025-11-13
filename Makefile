@@ -4,11 +4,17 @@ all:
 
 config:
 	rm -rf build && mkdir -p build
-	cd build && cmake -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=ON -DENABLE_TENSORRT=ON ..
+	cd build && (. ~/venv/bin/activate && cmake -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=ON -DENABLE_TENSORRT=ON ..)
 
 install:
 #	(cd build && make install)
-	install build/shepherd ~/bin/
+#	install build/shepherd ~/bin/
+
+clean:
+	(cd build && make clean)
+
+distclean:
+	rm -rf build
 
 # this is just for quick testing - use cmake for full support (and for tensorrt support)
 BACKENDS=backends/backend.cpp backends/factory.cpp backends/llamacpp.cpp backends/models.cpp backends/api.cpp backends/openai.cpp backends/ollama.cpp backends/anthropic.cpp backends/gemini.cpp
@@ -40,7 +46,7 @@ shepherd: $(OBJS)
 $(DEPDIR):
 	@mkdir -p $(DEPDIR)/backends $(DEPDIR)/tools $(DEPDIR)/mcp $(DEPDIR)/api_tools $(DEPDIR)/server
 
-clean:
+oclean:
 	rm -f shepherd $(OBJS)
 	rm -rf $(DEPDIR)
 

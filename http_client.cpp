@@ -206,6 +206,7 @@ HttpResponse HttpClient::post(const std::string& url,
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
         LOG_DEBUG("POST body:\n" + body);
+#if 0
         // Also write to file for easy inspection
         std::ofstream dump_file("/tmp/shepherd_request.json");
         if (dump_file.is_open()) {
@@ -213,6 +214,7 @@ HttpResponse HttpClient::post(const std::string& url,
             dump_file.close();
             LOG_DEBUG("Request saved to /tmp/shepherd_request.json");
         }
+#endif
     }
 
     configure_curl();
@@ -255,6 +257,9 @@ HttpResponse HttpClient::post(const std::string& url,
         LOG_DEBUG("HTTP POST completed with status: " + std::to_string(response.status_code));
         if (response.body.length() > 100) {
             LOG_DEBUG("Response body (first 100 chars): " + response.body.substr(0, 100));
+            if (g_debug_level >= 5) {
+                LOG_DEBUG("Full response body:\n" + response.body);
+            }
         } else {
             LOG_DEBUG("Response body: " + response.body);
         }

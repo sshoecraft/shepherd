@@ -7,6 +7,7 @@
 #include "rag.h"
 #include "server/server.h"
 #include "cli.h"
+#include "terminal_io.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
 #include "backends/models.h"
@@ -32,6 +33,11 @@
 #include <arpa/inet.h>
 #include <cerrno>
 
+// MPI support for multi-GPU TensorRT
+#ifdef ENABLE_TENSORRT
+#include <mpi.h>
+#endif
+
 // Global storage for original command-line arguments (for MPI re-exec)
 static int g_argc = 0;
 static char** g_argv = nullptr;
@@ -54,6 +60,7 @@ void get_global_args(int& argc, char**& argv) {
 // Global debug level (0=off, 1-9=increasing verbosity)
 // Used by dprintf() macro in debug.h for fine-grained debug control
 int g_debug_level = 0;
+bool g_show_thinking = false;
 
 // Global config instance
 std::unique_ptr<Config> config;
@@ -98,6 +105,8 @@ static void print_usage(int, char** argv) {
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --server)\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
+	printf("	--colors		   Force enable colored output (overrides environment)\n");
+	printf("	--no-colors		   Force disable colored output (overrides environment)\n");
 	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
 	printf("\nMCP Management:\n");
@@ -652,6 +661,17 @@ int main(int argc, char** argv) {
 	// Store original arguments for potential MPI re-exec
 	set_global_args(argc, argv);
 
+	// Detect interactivity BEFORE any MPI re-exec (isatty fails after mpirun)
+	// Only check if not already set (preserve across MPI re-exec)
+	if (!getenv("SHEPHERD_INTERACTIVE")) {
+		int is_interactive = isatty(STDIN_FILENO);
+		setenv("SHEPHERD_INTERACTIVE", is_interactive ? "1" : "0", 0);
+		LOG_DEBUG("Set SHEPHERD_INTERACTIVE=" + std::string(is_interactive ? "1" : "0") +
+		          " (isatty=" + std::to_string(is_interactive) + ")");
+	} else {
+		LOG_DEBUG("SHEPHERD_INTERACTIVE already set to: " + std::string(getenv("SHEPHERD_INTERACTIVE")));
+	}
+
 	// Detect MPI rank early (for multi-GPU TensorRT models)
 	int mpi_rank = 0;
 	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
@@ -724,7 +744,9 @@ int main(int argc, char** argv) {
 	bool no_mcp = false;
 	bool no_tools = false;
 	bool warmup_enable = false;
+	bool calibration_enable = false;
 	int truncate_limit = 0;
+	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	std::string log_file;
 	std::string config_file_path;
 	std::string model_override;
@@ -767,6 +789,10 @@ int main(int argc, char** argv) {
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
 		{"pp", required_argument, 0, 1030},
+		{"thinking", no_argument, 0, 1031},
+		{"colors", no_argument, 0, 1032},
+		{"no-colors", no_argument, 0, 1033},
+		{"calibration", no_argument, 0, 1034},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -867,6 +893,18 @@ int main(int argc, char** argv) {
 					return 1;
 				}
 				break;
+			case 1031: // --thinking
+				g_show_thinking = true;
+				break;
+			case 1032: // --colors
+				color_override = 1;
+				break;
+			case 1033: // --no-colors
+				color_override = 0;
+				break;
+			case 1034: // --calibration
+				calibration_enable = true;
+				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
 				return 0;
@@ -879,8 +917,10 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	// Check if input is from a terminal or piped (do this early)
-	bool is_interactive = isatty(STDIN_FILENO);
+	// Initialize terminal I/O early (before logger and other systems)
+	if (!tio.init(color_override)) {
+		return 1;  // Failed to initialize terminal
+	}
 
 	// Initialize logger early
 	Logger& logger = Logger::instance();
@@ -889,6 +929,13 @@ int main(int argc, char** argv) {
 	if (g_debug_level) {
 		logger.set_log_level(LogLevel::DEBUG);
 		std::cout << "Debug mode enabled (level " << g_debug_level << ")" << std::endl;
+
+		// Log interactivity detection for debugging
+		const char* interactive_env = getenv("SHEPHERD_INTERACTIVE");
+		std::string debug_msg = "SHEPHERD_INTERACTIVE=" + std::string(interactive_env ? interactive_env : "not set") +
+		                        " (tio.interactive_mode=" + std::to_string(tio.interactive_mode) + ")";
+		std::cerr << "[DEBUG-MAIN] " << debug_msg << std::endl;
+		LOG_DEBUG(debug_msg);
 	} else {
 		// Suppress INFO logs unless in debug mode
 		logger.set_log_level(LogLevel::WARN);
@@ -927,6 +974,9 @@ int main(int argc, char** argv) {
 	}
 	if (warmup_enable) {
 		config->warmup = true;
+	}
+	if (calibration_enable) {
+		config->calibration = true;
 	}
 	if (gpu_layers_override != -999) {  // -999 means not specified
 		// Update llamacpp backend config with gpu_layers
@@ -1051,13 +1101,6 @@ int main(int argc, char** argv) {
 			}
 		}
 
-		// Show status to user (only for local backends that actually load models)
-		bool is_local_backend = (config->backend == "llamacpp" || config->backend == "tensorrt");
-		if (is_interactive && is_local_backend) {
-			printf("Initializing Engine...\n");
-			fflush(stdout);
-		}
-
 		// Create the backend
 		auto backend = BackendFactory::create_backend(config->backend, context_size);
 
@@ -1099,12 +1142,6 @@ int main(int argc, char** argv) {
 				LOG_ERROR("Failed to initialize RAG system");
 				return 1;
 			}
-		}
-
-		// Show status to user before the slow model load (only for local backends)
-		if (is_interactive && is_local_backend) {
-			printf("Loading Model...\n");
-			fflush(stdout);
 		}
 
 		// Create the session that will be used throughout (not in server mode)
@@ -1159,6 +1196,44 @@ int main(int argc, char** argv) {
 					LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
 				}
 
+				// Populate session.tools from ToolRegistry for API backends
+				for (const auto& tool_name : tools) {
+					Tool* tool_ptr = registry.get_tool(tool_name);
+					if (tool_ptr) {
+						Session::Tool session_tool;
+						session_tool.name = tool_ptr->name();
+						session_tool.description = tool_ptr->description();
+
+						// Build JSON schema from parameter definitions
+						auto params = tool_ptr->get_parameters_schema();
+						nlohmann::json schema;
+						schema["type"] = "object";
+						schema["properties"] = nlohmann::json::object();
+						nlohmann::json required = nlohmann::json::array();
+
+						for (const auto& param : params) {
+							nlohmann::json param_schema;
+							param_schema["type"] = param.type;
+							if (!param.description.empty()) {
+								param_schema["description"] = param.description;
+							}
+							schema["properties"][param.name] = param_schema;
+
+							if (param.required) {
+								required.push_back(param.name);
+							}
+						}
+
+						if (!required.empty()) {
+							schema["required"] = required;
+						}
+
+						session_tool.parameters = schema;
+						session.tools.push_back(session_tool);
+					}
+				}
+				LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools");
+
 				} catch (const std::exception& e) {
 					LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
 					return 1;
@@ -1189,6 +1264,19 @@ int main(int argc, char** argv) {
 			// Initialize backend before starting server
 			LOG_DEBUG("Initializing backend for server mode...");
 			backend->initialize(session);
+
+			// MPI rank check: Only rank 0 should run the server
+			// (backend->initialize() may have re-exec'd with mpirun for multi-GPU models)
+			LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
+			if (!is_mpi_leader) {
+				LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0...");
+				// Keep process alive - backend will be controlled via MPI by rank 0
+				while (true) {
+					std::this_thread::sleep_for(std::chrono::seconds(3600));
+				}
+			}
+
+			// Only rank 0 continues to run server
 			return run_server(backend, server_host, server_port);
 		}
 
@@ -1256,10 +1344,11 @@ int main(int argc, char** argv) {
 			backend->max_output_tokens
 		);
 
-		// Enable auto-eviction for API backends when context size is specified
+		// Enable auto-eviction ONLY for API backends in CLI mode
+		// In server mode, never auto-evict - return 400 error and let client handle cleanup
 		// Local backends (llamacpp) handle eviction through reactive callbacks
 		// Must be set AFTER initialization when backend->context_size is finalized
-		session.auto_evict = (backend->context_size > 0 && !backend->is_local);
+		session.auto_evict = (!g_server_mode && backend->context_size > 0 && !backend->is_local);
 		if (session.auto_evict) {
 			LOG_INFO("Auto-eviction enabled (context_size=" + std::to_string(backend->context_size) +
 			         ", desired_completion=" + std::to_string(session.desired_completion_tokens) + ")");
@@ -1280,9 +1369,6 @@ int main(int argc, char** argv) {
 		// From here on, only rank 0 continues...
 		LOG_DEBUG("Rank 0 continuing to user input loop...");
 
-		// Force interactive mode for rank 0 (mpirun can make isatty return false)
-		is_interactive = true;
-
 	// ============================================================================
 	// Server Mode - HTTP API via FastAPI
 	// ============================================================================
@@ -1293,11 +1379,38 @@ int main(int argc, char** argv) {
 	// ============================================================================
 	// CLI Mode - Interactive or Piped Input
 	// ============================================================================
-	return run_cli(backend, session);
+	int cli_result = run_cli(backend, session);
+
+	// If we're running under MPI, abort all ranks when rank 0 exits
+	// This ensures worker processes (ranks 1, 2, ...) don't keep running
+	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
+	if (mpi_rank_env && std::atoi(mpi_rank_env) == 0) {
+		const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
+		if (mpi_size_env && std::atoi(mpi_size_env) > 1) {
+			LOG_DEBUG("Rank 0 exiting, aborting MPI job to terminate worker ranks");
+#ifdef ENABLE_TENSORRT
+			MPI_Abort(MPI_COMM_WORLD, cli_result);
+#endif
+		}
+	}
+
+	return cli_result;
 
 } catch (const std::exception& e) {
 	fprintf(stderr, "Fatal error: %s\n", e.what());
 	LOG_FATAL("Fatal error: " + std::string(e.what()));
+
+	// Also abort MPI on fatal error
+	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
+	if (mpi_rank_env && std::atoi(mpi_rank_env) == 0) {
+		const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
+		if (mpi_size_env && std::atoi(mpi_size_env) > 1) {
+#ifdef ENABLE_TENSORRT
+			MPI_Abort(MPI_COMM_WORLD, 1);
+#endif
+		}
+	}
+
 	return 1;
 }
 }

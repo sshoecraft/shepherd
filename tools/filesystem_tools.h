@@ -5,8 +5,8 @@
 class ReadFileTool : public Tool {
 public:
     std::string unsanitized_name() const override { return "Read"; }
-    std::string description() const override { return "Read files from the filesystem (supports text, images, PDFs, Jupyter notebooks)"; }
-    std::string parameters() const override { return "file_path=\"absolute path to file\", offset=\"line number to start\" (optional), limit=\"number of lines\" (optional)"; }
+    std::string description() const override { return "Read files from the filesystem (supports text, images, PDFs, Jupyter notebooks). Accepts relative or absolute paths."; }
+    std::string parameters() const override { return "file_path=\"path\", offset=\"line number to start\" (optional), limit=\"number of lines\" (optional)"; }
     std::vector<ParameterDef> get_parameters_schema() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };
@@ -14,8 +14,8 @@ public:
 class WriteFileTool : public Tool {
 public:
     std::string unsanitized_name() const override { return "Write"; }
-    std::string description() const override { return "Write new files or overwrite existing files"; }
-    std::string parameters() const override { return "file_path=\"absolute path to file\", content=\"file content\""; }
+    std::string description() const override { return "Write new files or overwrite existing files. Accepts relative or absolute paths."; }
+    std::string parameters() const override { return "file_path=\"path\", content=\"file content\""; }
     std::vector<ParameterDef> get_parameters_schema() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };

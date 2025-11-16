@@ -78,6 +78,18 @@ public:
     };
     std::vector<Tool> tools;
 
+    // Sampling parameters (per-request overrides from API)
+    // If set (non-negative), these override backend config defaults
+    float temperature = -1.0f;
+    float top_p = -1.0f;
+    int top_k = -1;
+    float min_p = -1.0f;
+    float repetition_penalty = -1.0f;
+    float presence_penalty = -999.0f;  // Use -999 since 0 is valid
+    float frequency_penalty = -999.0f;
+    float length_penalty = -999.0f;
+    int no_repeat_ngram_size = -1;
+
     // Main message interface - handles eviction and delegates to backend
     /// @brief Add a message to the session with automatic eviction if needed
     /// @param type Message type (USER, ASSISTANT, TOOL)
@@ -123,6 +135,9 @@ public:
     /// @param ranges Vector of (start_idx, end_idx) ranges to evict (inclusive)
     /// @return true if successful
     bool evict_messages(const std::vector<std::pair<int, int>>& ranges);
+
+    /// @brief Dump session contents to stdout for debugging
+    void dump() const;
 
 private:
     // Helper methods for auto-eviction

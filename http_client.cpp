@@ -288,6 +288,12 @@ HttpResponse HttpClient::post_stream(const std::string& url,
     LOG_DEBUG("HTTP POST (streaming): " + url);
     LOG_DEBUG("POST body length: " + std::to_string(body.length()));
 
+    // Dump full request body at high debug level
+    extern int g_debug_level;
+    if (g_debug_level >= 5 && body.length() < 50000) {
+        LOG_DEBUG("POST body:\n" + body);
+    }
+
     configure_curl();
 
     // Set URL

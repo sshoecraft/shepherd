@@ -332,24 +332,26 @@ std::string Models::format_system_message(const ModelConfig& config, const std::
     // Llama 3.x: JSON schemas format (BFCL-style)
     if (config.family == ModelFamily::LLAMA_3_X) {
         if (!custom_system_prompt.empty()) {
-            system_message = custom_system_prompt + "\n\n";
+            system_message = custom_system_prompt;
         } else {
-            system_message = "You are a helpful assistant.\n\n";
+            system_message = "You are a helpful assistant.";
         }
 
-        // Add JSON schemas for tools
-        system_message += "The following functions are available IF needed to answer the user's request:\n\n";
-        system_message += "IMPORTANT: Only call a function if you actually need external information or capabilities. ";
-        system_message += "For greetings, casual conversation, or questions you can answer directly - respond normally without calling any function.\n\n";
-        system_message += "When you DO need to call a function, respond with ONLY a JSON object in this format: ";
-        system_message += "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use variables.\n\n";
+        // Add JSON schemas for tools (only if tools exist)
+        if (!tool_descriptions.empty()) {
+            system_message += "\n\nThe following functions are available IF needed to answer the user's request:\n\n";
+            system_message += "IMPORTANT: Only call a function if you actually need external information or capabilities. ";
+            system_message += "For greetings, casual conversation, or questions you can answer directly - respond normally without calling any function.\n\n";
+            system_message += "When you DO need to call a function, respond with ONLY a JSON object in this format: ";
+            system_message += "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use variables.\n\n";
 
-        // TODO: Add actual JSON schema generation from tool registry
-        // For now, just list tools
-        for (const auto& [tool_name, tool_desc] : tool_descriptions) {
-            Tool* tool = registry.get_tool(tool_name);
-            if (tool) {
-                system_message += "- " + tool_name + ": " + tool_desc + "\n";
+            // TODO: Add actual JSON schema generation from tool registry
+            // For now, just list tools
+            for (const auto& [tool_name, tool_desc] : tool_descriptions) {
+                Tool* tool = registry.get_tool(tool_name);
+                if (tool) {
+                    system_message += "- " + tool_name + ": " + tool_desc + "\n";
+                }
             }
         }
 
@@ -1149,4 +1151,124 @@ bool Models::load_generation_config(const std::string& model_dir_path,
         LOG_WARN("Failed to parse generation_config.json: " + std::string(e.what()));
         return false;
     }
+}
+
+// Default chat templates embedded from https://github.com/chujiezheng/chat_templates
+// These serve as fallbacks when tokenizer_config.json doesn't provide a chat_template
+namespace {
+    // ChatML format - used by Qwen2, Yi, and other models with <|im_start|>/<|im_end|> tokens
+    constexpr const char* CHATML_TEMPLATE = R"({{ bos_token }}{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] | trim + '<|im_end|>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %})";
+
+    // Llama 3 format - uses <|start_header_id|> and <|end_header_id|>
+    constexpr const char* LLAMA3_TEMPLATE = R"({% if messages[0]['role'] == 'system' %}
+    {% set offset = 1 %}
+{% else %}
+    {% set offset = 0 %}
+{% endif %}
+
+{{ bos_token }}
+{% for message in messages %}
+    {% if (message['role'] == 'user') != (loop.index0 % 2 == offset) %}
+        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+    {% endif %}
+
+    {{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' }}
+{% endfor %}
+
+{% if add_generation_prompt %}
+    {{ '<|start_header_id|>' + 'assistant' + '<|end_header_id|>\n\n' }}
+{% endif %})";
+
+    // Llama 2 format - uses [INST] and <<SYS>>
+    constexpr const char* LLAMA2_TEMPLATE = R"({% if messages[0]['role'] == 'system' %}
+    {% set system_message = '<<SYS>>\n' + messages[0]['content'] | trim + '\n<</SYS>>\n\n' %}
+    {% set messages = messages[1:] %}
+{% else %}
+    {% set system_message = '' %}
+{% endif %}
+
+{% for message in messages %}
+    {% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}
+        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+    {% endif %}
+
+    {% if loop.index0 == 0 %}
+        {% set content = system_message + message['content'] %}
+    {% else %}
+        {% set content = message['content'] %}
+    {% endif %}
+
+    {% if message['role'] == 'user' %}
+        {{ bos_token + '[INST] ' + content | trim + ' [/INST]' }}
+    {% elif message['role'] == 'assistant' %}
+        {{ ' ' + content | trim + ' ' + eos_token }}
+    {% endif %}
+{% endfor %})";
+
+    // Mistral format - similar to Llama 2 but slightly different
+    constexpr const char* MISTRAL_TEMPLATE = R"({% if messages[0]['role'] == 'system' %}
+    {% set system_message = messages[0]['content'] | trim + '\n\n' %}
+    {% set messages = messages[1:] %}
+{% else %}
+    {% set system_message = '' %}
+{% endif %}
+
+{{ bos_token + system_message}}
+{% for message in messages %}
+    {% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}
+        {{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}
+    {% endif %}
+
+    {% if message['role'] == 'user' %}
+        {{ '[INST] ' + message['content'] | trim + ' [/INST]' }}
+    {% elif message['role'] == 'assistant' %}
+        {{ ' ' + message['content'] | trim + eos_token }}
+    {% endif %}
+{% endfor %})";
+}
+
+std::string Models::get_default_chat_template(ModelFamily family) {
+    switch (family) {
+        case ModelFamily::LLAMA_3_X:
+            return LLAMA3_TEMPLATE;
+        case ModelFamily::QWEN_2_X:
+        case ModelFamily::QWEN_3_X:
+            return CHATML_TEMPLATE;
+        case ModelFamily::MISTRAL:
+            return MISTRAL_TEMPLATE;
+        case ModelFamily::GENERIC:
+        default:
+            // Return ChatML as a generic default for unknown models
+            // ChatML is widely compatible with many models
+            return CHATML_TEMPLATE;
+    }
+}
+
+ModelFamily Models::detect_from_tokenizer_class(const std::string& tokenizer_class) {
+    // Detect model family from tokenizer class name
+    // This is used as a fallback when chat_template is missing
+
+    if (tokenizer_class.find("Llama") != std::string::npos) {
+        // LlamaTokenizer or LlamaTokenizerFast
+        // Default to Llama 3 as it's more common now
+        return ModelFamily::LLAMA_3_X;
+    }
+
+    if (tokenizer_class.find("Qwen2") != std::string::npos) {
+        // Qwen2Tokenizer - uses ChatML format
+        return ModelFamily::QWEN_2_X;
+    }
+
+    if (tokenizer_class.find("Qwen") != std::string::npos) {
+        // QwenTokenizer or other Qwen variants
+        // Qwen 3.x also uses ChatML, so default to 3.x
+        return ModelFamily::QWEN_3_X;
+    }
+
+    if (tokenizer_class.find("Mistral") != std::string::npos) {
+        return ModelFamily::MISTRAL;
+    }
+
+    // Default to GENERIC which uses ChatML format
+    return ModelFamily::GENERIC;
 }

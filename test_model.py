@@ -280,26 +280,41 @@ class ShepherdProcess:
         self.config_file = config_file  # Only use if explicitly provided
         self.verbose = verbose
         self.process = None
-        self.stdout_queue = queue.Queue()
-        self.stderr_queue = queue.Queue()
-        self.stdout_thread = None
-        self.stderr_thread = None
 
-    def _read_stream(self, stream, q):
-        """Read stream in background thread"""
+    def _read_char_with_timeout(self, timeout_ms: int) -> tuple[str, bool]:
+        """
+        Read one character from stdout with timeout.
+        Returns: (char, timed_out) where char is the character read (or empty if timeout)
+        and timed_out is True if we hit the timeout.
+        """
+        import select
+        import os
+
+        if not self.process or self.process.poll() is not None:
+            return "", True
+
+        fd = self.process.stdout.fileno()
+        ready, _, _ = select.select([fd], [], [], timeout_ms / 1000.0)
+
+        if not ready:
+            return "", True  # Timeout
+
         try:
-            for line in iter(stream.readline, ''):
-                if line:
-                    q.put(line.rstrip())
-        except:
-            pass
+            data = os.read(fd, 1)
+            if not data:
+                return "", True
+            return data.decode('utf-8', errors='replace'), False
+        except Exception as e:
+            import sys
+            print(f"[read error: {e}]", file=sys.stderr)
+            return "", True
 
     def start(self) -> bool:
         """Start shepherd process"""
         cmd = [
             SHEPHERD_BINARY,
             "--notools",
-            "--system-prompt", "You are a helpful AI assistant. Answer questions directly and concisely."
+            "--system-prompt", "You are taking a test - ***CRITICAL:*** DO NOT respond with any reasons or explanations of any kind - just answer the questions to the best of your ability.  Part of your grade is based on if you are able to answer the question as directed."
         ]
 
         # Use config file which points to server
@@ -315,34 +330,12 @@ class ShepherdProcess:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                bufsize=0,
                 preexec_fn=os.setsid
             )
 
-            # Start background threads
-            self.stdout_thread = threading.Thread(
-                target=self._read_stream,
-                args=(self.process.stdout, self.stdout_queue),
-                daemon=True
-            )
-            self.stderr_thread = threading.Thread(
-                target=self._read_stream,
-                args=(self.process.stderr, self.stderr_queue),
-                daemon=True
-            )
-            self.stdout_thread.start()
-            self.stderr_thread.start()
-
-            # Wait for startup
-            time.sleep(3)
-
-            if self.process.poll() is not None:
-                print(f"  ERROR: Process exited (code {self.process.returncode})")
-                return False
-
-            # Drain initial output
-            self._drain_queues()
+            if self.verbose:
+                print(f"  Process started, ready for questions")
             return True
 
         except Exception as e:
@@ -357,8 +350,7 @@ class ShepherdProcess:
         start_time = time.time()
 
         try:
-            # Convert multi-line question to single line (shepherd reads line-by-line)
-            # Replace newlines with spaces to send as one complete question
+            # Convert multi-line question to single line
             single_line_question = " ".join(line.strip() for line in question_text.split("\n") if line.strip())
 
             # Send question
@@ -367,77 +359,56 @@ class ShepherdProcess:
                 print(f"    {single_line_question}")
                 print(f"    ===============================")
 
-            self.process.stdin.write(single_line_question + "\n")
+            # Write to stdin
+            self.process.stdin.write((single_line_question + "\n").encode('utf-8'))
             self.process.stdin.flush()
 
-            # Collect response
-            response_lines = []
-            stderr_lines = []
-            last_output_time = time.time()
-            answer_lines = []  # Lines starting with '<'
+            # Read characters until 1000ms timeout (after last character received)
+            # First, wait up to 60 seconds for the FIRST character (shepherd thinking time)
+            # Then, keep reading with 1000ms timeout between characters
+            buffer = ""
+            last_ch = ""
 
-            time.sleep(0.2)
+            # Wait for first character (up to 60 seconds)
+            ch, timed_out = self._read_char_with_timeout(60000)
+            if timed_out:
+                # No response at all
+                response_time = (time.time() - start_time) * 1000
+                return "", response_time
 
+            buffer += ch
+            if self.verbose:
+                print(repr(ch), end='', flush=True)
+
+            # Now keep reading with 1000ms timeout until silence
             while True:
-                # Check stdout
-                try:
-                    while True:
-                        line = self.stdout_queue.get_nowait()
-                        response_lines.append(line)
-                        last_output_time = time.time()
+                ch, timed_out = self._read_char_with_timeout(1000)
 
-                        # Track answer lines (starting with '<' but not thinking blocks)
-                        stripped = line.strip()
-                        if stripped.startswith('<') and not stripped.startswith('<think') and not stripped.startswith('</think'):
-                            answer_lines.append(line)
-                except queue.Empty:
-                    pass
-
-                # Check stderr for errors
-                try:
-                    while True:
-                        line = self.stderr_queue.get_nowait()
-                        stderr_lines.append(line)
-                except queue.Empty:
-                    pass
-
-                # If we got answer line and nothing for 2 seconds, assume complete
-                if answer_lines and (time.time() - last_output_time > 2.0):
-                    break
-                # Otherwise wait up to 5 seconds after last output
-                elif response_lines and (time.time() - last_output_time > 5.0):
+                if timed_out:
+                    # Timeout - response is complete
                     break
 
-                time.sleep(0.1)
+                buffer += ch
+                last_ch = ch
+                if self.verbose:
+                    print(repr(ch), end='', flush=True)
 
-            response_time = (time.time() - start_time) * 1000
-            response = '\n'.join(response_lines)
+            # Record time (subtracting the final 1000ms timeout)
+            response_time = (time.time() - start_time) * 1000 - 1000
 
             if self.verbose:
                 print(f"    ===== RESPONSE FROM SHEPHERD =====")
-                print(f"    {response}")
+                print(f"    {buffer}")
                 print(f"    ===================================")
+                print(f"    Last 2 chars: {repr(buffer[-2:])}")
 
-            return response, response_time
+            return buffer, response_time
 
         except Exception as e:
             if self.verbose:
                 print(f"    [DEBUG] Exception: {e}")
             return f"ERROR: {e}", 0
 
-    def _drain_queues(self):
-        """Drain queues without blocking"""
-        try:
-            while True:
-                self.stdout_queue.get_nowait()
-        except queue.Empty:
-            pass
-
-        try:
-            while True:
-                self.stderr_queue.get_nowait()
-        except queue.Empty:
-            pass
 
     def stop(self):
         """Stop shepherd process"""
@@ -450,6 +421,7 @@ class ShepherdProcess:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
                 except:
                     pass
+
 
     def cleanup(self):
         """Clean up resources"""

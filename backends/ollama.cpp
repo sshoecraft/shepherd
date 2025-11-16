@@ -23,7 +23,7 @@ OllamaBackend::OllamaBackend(size_t context_size) : ApiBackend(context_size) {
     // else: keep default api_endpoint = "http://localhost:11434/api/chat"
 
     // Parse backend-specific config if available
-    parse_backend_config(config->backend_config("ollama"));
+    parse_backend_config();
 }
 
 OllamaBackend::~OllamaBackend() {

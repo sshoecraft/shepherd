@@ -217,12 +217,45 @@ TensorRTBackend::TensorRTBackend(size_t context_size)
     tokenizer_ = std::make_unique<TensorRTTokenizer>("");
 #endif
     LOG_DEBUG("TensorRTBackend created with context_size: " + std::to_string(context_size));
+
+    // Parse config
+    parse_backend_config();
 }
 
 TensorRTBackend::~TensorRTBackend() {
 #ifdef ENABLE_TENSORRT
     shutdown();
 #endif
+}
+
+void TensorRTBackend::parse_backend_config() {
+    if (config->json.is_null() || config->json.empty()) {
+        return;  // No config, use defaults
+    }
+
+    try {
+        // Sampling parameters
+        if (config->json.contains("temperature")) temperature = config->json["temperature"].get<float>();
+        if (config->json.contains("top_p")) top_p = config->json["top_p"].get<float>();
+        if (config->json.contains("top_k")) top_k = config->json["top_k"].get<int>();
+        if (config->json.contains("min_p")) min_p = config->json["min_p"].get<float>();
+
+        // Penalty parameters (TensorRT-LLM naming)
+        if (config->json.contains("repetition_penalty")) repetition_penalty = config->json["repetition_penalty"].get<float>();
+        if (config->json.contains("presence_penalty")) presence_penalty = config->json["presence_penalty"].get<float>();
+        if (config->json.contains("frequency_penalty")) frequency_penalty = config->json["frequency_penalty"].get<float>();
+        if (config->json.contains("length_penalty")) length_penalty = config->json["length_penalty"].get<float>();
+        if (config->json.contains("no_repeat_ngram_size")) no_repeat_ngram_size = config->json["no_repeat_ngram_size"].get<int>();
+
+        LOG_DEBUG("Loaded TensorRT backend config: temperature=" + std::to_string(temperature) +
+                  ", top_p=" + std::to_string(top_p) +
+                  ", top_k=" + std::to_string(top_k) +
+                  ", repetition_penalty=" + std::to_string(repetition_penalty) +
+                  ", frequency_penalty=" + std::to_string(frequency_penalty));
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to parse TensorRT backend config: " + std::string(e.what()));
+    }
 }
 
 #ifdef ENABLE_TENSORRT
@@ -366,7 +399,7 @@ void TensorRTBackend::initialize(Session& session) {
     try {
         LOG_INFO("Initializing TensorRT-LLM Executor with model: " + model_path_);
 
-        // Parse config.json to check parallelism settings
+        // Parse config.json to extract engine build parameters
         std::string config_file = model_path_ + "/config.json";
         LOG_DEBUG("About to open config file: " + config_file);
         std::ifstream file(config_file);
@@ -374,46 +407,60 @@ void TensorRTBackend::initialize(Session& session) {
             throw BackendError("Failed to open config file: " + config_file);
         }
 
-        std::string config_json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        file.close();
-
-        // Simple JSON parsing to extract world_size and max_seq_len
-        int required_world_size = 1;
-        int max_seq_len = 2048; // Default fallback
+        nlohmann::json engine_config;
+        try {
+            file >> engine_config;
+            file.close();
+        } catch (const std::exception& e) {
+            throw BackendError("Failed to parse config.json: " + std::string(e.what()));
+        }
 
         // Extract world_size from mapping section
-        size_t mapping_pos = config_json.find("\"mapping\"");
-        if (mapping_pos != std::string::npos) {
-            size_t world_size_pos = config_json.find("\"world_size\"", mapping_pos);
-            if (world_size_pos != std::string::npos) {
-                size_t colon_pos = config_json.find(":", world_size_pos);
-                if (colon_pos != std::string::npos) {
-                    size_t comma_pos = config_json.find_first_of(",}", colon_pos);
-                    if (comma_pos != std::string::npos) {
-                        std::string value = config_json.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                        value.erase(std::remove_if(value.begin(), value.end(), ::isspace), value.end());
-                        required_world_size = std::stoi(value);
-                    }
-                }
-            }
+        int required_world_size = 1;
+        if (engine_config.contains("pretrained_config") &&
+            engine_config["pretrained_config"].contains("mapping") &&
+            engine_config["pretrained_config"]["mapping"].contains("world_size")) {
+            required_world_size = engine_config["pretrained_config"]["mapping"]["world_size"];
         }
 
-        // Extract max_seq_len from build_config section
-        size_t build_config_pos = config_json.find("\"build_config\"");
-        if (build_config_pos != std::string::npos) {
-            size_t max_seq_pos = config_json.find("\"max_seq_len\"", build_config_pos);
-            if (max_seq_pos != std::string::npos) {
-                size_t colon_pos = config_json.find(":", max_seq_pos);
-                if (colon_pos != std::string::npos) {
-                    size_t comma_pos = config_json.find_first_of(",}", colon_pos);
-                    if (comma_pos != std::string::npos) {
-                        std::string value = config_json.substr(colon_pos + 1, comma_pos - colon_pos - 1);
-                        value.erase(std::remove_if(value.begin(), value.end(), ::isspace), value.end());
-                        max_seq_len = std::stoi(value);
-                    }
-                }
+        // Extract build_config parameters
+        int max_seq_len = 2048;           // Default fallback
+        int max_batch_size = 1;
+        int max_beam_width = 1;
+        int max_num_tokens = 8192;
+        int max_input_len = 1024;
+
+        if (engine_config.contains("build_config")) {
+            auto& build_config = engine_config["build_config"];
+
+            if (build_config.contains("max_seq_len")) {
+                max_seq_len = build_config["max_seq_len"];
             }
+            if (build_config.contains("max_batch_size")) {
+                max_batch_size = build_config["max_batch_size"];
+            }
+            if (build_config.contains("max_beam_width")) {
+                max_beam_width = build_config["max_beam_width"];
+            }
+            if (build_config.contains("max_num_tokens")) {
+                max_num_tokens = build_config["max_num_tokens"];
+            }
+            if (build_config.contains("max_input_len")) {
+                max_input_len = build_config["max_input_len"];
+            }
+
+            LOG_INFO("Engine build config:");
+            LOG_INFO("  max_seq_len: " + std::to_string(max_seq_len));
+            LOG_INFO("  max_batch_size: " + std::to_string(max_batch_size));
+            LOG_INFO("  max_beam_width: " + std::to_string(max_beam_width));
+            LOG_INFO("  max_num_tokens: " + std::to_string(max_num_tokens));
+            LOG_INFO("  max_input_len: " + std::to_string(max_input_len));
         }
+
+        // Store build config for later use in ExecutorConfig
+        this->max_seq_len = max_seq_len;
+        this->max_batch_size = max_batch_size;
+        this->max_beam_width = max_beam_width;
 
         // Update context_size if auto-detect
         if (context_size == 0) {
@@ -496,11 +543,12 @@ void TensorRTBackend::initialize(Session& session) {
 
         LOG_INFO("World size verified, creating ExecutorConfig...");
 
-        // Create ExecutorConfig
+        // Create ExecutorConfig using parameters from engine build config
         namespace tle = tensorrt_llm::executor;
 
         tle::ExecutorConfig config;
-        config.setMaxBeamWidth(1);  // Greedy decoding
+        config.setMaxBeamWidth(max_beam_width);
+        LOG_INFO("ExecutorConfig max_beam_width set to: " + std::to_string(max_beam_width));
 
         // Set KV cache configuration with event monitoring enabled
         tle::KvCacheConfig kvCacheConfig;
@@ -572,6 +620,62 @@ void TensorRTBackend::initialize(Session& session) {
                         LOG_ERROR("Failed to parse chat template: " + std::string(e.what()));
                         LOG_WARN("Will fall back to simple format");
                     }
+                } else {
+                    // No chat_template in tokenizer_config.json - try loading from chat_template.jinja file
+                    std::string jinja_file = model_path_ + "/chat_template.jinja";
+                    std::ifstream jinja_stream(jinja_file);
+                    bool loaded_from_jinja = false;
+
+                    if (jinja_stream.is_open()) {
+                        LOG_INFO("Found chat_template.jinja, loading...");
+                        std::stringstream buffer;
+                        buffer << jinja_stream.rdbuf();
+                        chat_template_text_ = buffer.str();
+                        jinja_stream.close();
+
+                        if (!chat_template_text_.empty()) {
+                            LOG_INFO("Loaded chat template from .jinja file (" + std::to_string(chat_template_text_.length()) + " chars)");
+
+                            // Parse the jinja template
+                            try {
+                                minja::Options options{};
+                                auto parsed_template = minja::Parser::parse(chat_template_text_, options);
+                                template_node_ = new std::shared_ptr<minja::TemplateNode>(parsed_template);
+                                LOG_INFO("Jinja chat template parsed successfully");
+                                loaded_from_jinja = true;
+                            } catch (const std::exception& e) {
+                                LOG_ERROR("Failed to parse jinja chat template: " + std::string(e.what()));
+                                LOG_WARN("Will try default template fallback");
+                            }
+                        }
+                    }
+
+                    // If jinja file didn't work, fall back to default based on tokenizer_class
+                    if (!loaded_from_jinja) {
+                        if (tokenizer_config.contains("tokenizer_class")) {
+                            std::string tokenizer_class = tokenizer_config["tokenizer_class"].get<std::string>();
+                            LOG_INFO("Detecting model family from tokenizer_class: " + tokenizer_class);
+
+                            ModelFamily family = Models::detect_from_tokenizer_class(tokenizer_class);
+                            chat_template_text_ = Models::get_default_chat_template(family);
+
+                            if (!chat_template_text_.empty()) {
+                                LOG_INFO("Using default chat template for detected family");
+
+                                // Parse the default template
+                                try {
+                                    minja::Options options{};
+                                    auto parsed_template = minja::Parser::parse(chat_template_text_, options);
+                                    template_node_ = new std::shared_ptr<minja::TemplateNode>(parsed_template);
+                                    LOG_INFO("Default chat template parsed successfully");
+                                } catch (const std::exception& e) {
+                                    LOG_ERROR("Failed to parse default chat template: " + std::string(e.what()));
+                                }
+                            }
+                        } else {
+                            LOG_WARN("No chat_template, jinja file, or tokenizer_class found - chat template unavailable");
+                        }
+                    }
                 }
 
                 // Load stop tokens (eos_token) from tokenizer config
@@ -584,8 +688,15 @@ void TensorRTBackend::initialize(Session& session) {
                         eos_token = tokenizer_config["eos_token"]["content"].get<std::string>();
                     }
                     if (!eos_token.empty()) {
-                        stop_tokens_.push_back(eos_token);
+                        stop_tokens.push_back(eos_token);
                         LOG_INFO("Loaded stop token from tokenizer config: " + eos_token);
+
+                        // Encode the EOS token to get its ID
+                        std::vector<int> encoded = tokenizer_->encode(eos_token, false);
+                        if (!encoded.empty()) {
+                            eos_token_id = encoded[0];
+                            LOG_INFO("EOS token ID: " + std::to_string(*eos_token_id));
+                        }
                     }
                 }
 
@@ -863,7 +974,9 @@ Response TensorRTBackend::add_message(Session& session, Message::Type type,
     return resp;
 }
 
-Response TensorRTBackend::generate_from_session(const Session& session, int max_tokens) {
+Response TensorRTBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
+    LOG_DEBUG("generate_from_session CALLED - accumulated_tokens.size=" + std::to_string(accumulated_tokens.size()));
+
     if (!is_ready()) {
         Response err_resp;
         err_resp.success = false;
@@ -874,6 +987,12 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
     }
 
     LOG_DEBUG("TensorRT generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+
+    std::cout << "===== INCOMING SESSION =====" << std::endl;
+    session.dump();
+
+    std::cout << "===== BACKEND SESSION (CACHED) =====" << std::endl;
+    backend_session.dump();
 
     // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
     size_t cached_count = backend_session.messages.size();
@@ -974,7 +1093,7 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
             }
 
             Message msg_copy = msg;
-			std::cout << "Sending: " << msg.content << std::endl;
+//			std::cout << "Sending: " << msg.content << std::endl;
 
             if (msg_copy.tokens == 0) {
                 msg_copy.tokens = count_message_tokens(msg_copy.type, msg_copy.content,
@@ -1008,15 +1127,52 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
                   std::to_string(new_messages) + " new");
     } else {
         LOG_DEBUG("All messages already in cache (100% prefix cache hit)");
+        // The KV cache contains all the context from previous messages
+        // accumulated_tokens was cleared after last generation
+        // We need to resend ALL tokens (TensorRT's KV cache will handle deduplication)
+        LOG_DEBUG("Rebuilding accumulated_tokens from all cached messages");
+
+        // Rebuild accumulated_tokens by re-tokenizing all cached messages
+        accumulated_tokens.clear();
+        for (size_t i = 0; i < backend_session.messages.size(); i++) {
+            Message msg_copy = backend_session.messages[i];
+            // For the last message (user), add generation prompt to start assistant response
+            bool is_last = (i == backend_session.messages.size() - 1);
+            bool will_generate = is_last && (msg_copy.type == Message::USER);
+            tokenize_and_accumulate_message(msg_copy, will_generate);
+        }
+
+        LOG_DEBUG("Rebuilt " + std::to_string(accumulated_tokens.size()) + " tokens from " +
+                  std::to_string(backend_session.messages.size()) + " cached messages");
     }
 
     // Copy tools and system_message
     backend_session.tools = session.tools;
     backend_session.system_message = session.system_message;
 
-    // Generate response
-    std::string result = generate(backend_session, max_tokens);
+    // Copy sampling parameters from request
+    backend_session.temperature = session.temperature;
+    backend_session.top_p = session.top_p;
+    backend_session.top_k = session.top_k;
+    backend_session.min_p = session.min_p;
+    backend_session.repetition_penalty = session.repetition_penalty;
+    backend_session.presence_penalty = session.presence_penalty;
+    backend_session.frequency_penalty = session.frequency_penalty;
+    backend_session.length_penalty = session.length_penalty;
+    backend_session.no_repeat_ngram_size = session.no_repeat_ngram_size;
 
+    // Generate response
+    std::string result = generate(backend_session, max_tokens, callback);
+
+    // If streaming (callback provided), return empty response
+    if (callback) {
+        Response empty_resp;
+        empty_resp.success = true;
+        empty_resp.code = Response::SUCCESS;
+        return empty_resp;
+    }
+
+    // Non-streaming: return full response
     Response success_resp;
     success_resp.success = true;
     success_resp.code = Response::SUCCESS;
@@ -1101,7 +1257,7 @@ bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_gen
 
     // Render message through template
     std::string formatted_text = render_message(msg, add_generation_prompt);
-	std::cout << "Formatted text: " << formatted_text << std::endl;
+//	std::cout << "Formatted text: " << formatted_text << std::endl;
 
     // Tokenize with add_special_tokens=false to avoid unwanted BOS/EOS tokens
     std::vector<int> tokens = tokenizer_->encode(formatted_text, false);
@@ -1123,9 +1279,11 @@ bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_gen
     return true;
 }
 
-std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
+std::string TensorRTBackend::generate(const Session& session, int max_tokens, StreamCallback callback) {
     namespace tle = tensorrt_llm::executor;
     auto* executor = static_cast<tle::Executor*>(executor_);
+
+    LOG_DEBUG("generate() called with callback=" + std::string(callback ? "SET" : "NULL"));
 
     // Reset ModelOutput state for new generation
     tio.reset();
@@ -1164,10 +1322,53 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
         // Track finish reason for detecting length limit
         tle::FinishReason finish_reason = tle::FinishReason::kNOT_FINISHED;
 
-        // Create sampling config
+        // Create sampling config - use Session overrides if set, otherwise use backend defaults
+        float use_temperature = (session.temperature >= 0.0f) ? session.temperature : temperature;
+        float use_top_p = (session.top_p >= 0.0f) ? session.top_p : top_p;
+        int use_top_k = (session.top_k >= 0) ? session.top_k : top_k;
+        float use_min_p = (session.min_p >= 0.0f) ? session.min_p : min_p;
+        float use_repetition_penalty = (session.repetition_penalty >= 0.0f) ? session.repetition_penalty : repetition_penalty;
+        float use_presence_penalty = (session.presence_penalty > -999.0f) ? session.presence_penalty : presence_penalty;
+        float use_frequency_penalty = (session.frequency_penalty > -999.0f) ? session.frequency_penalty : frequency_penalty;
+        float use_length_penalty = (session.length_penalty > -999.0f) ? session.length_penalty : length_penalty;
+        int use_no_repeat_ngram = (session.no_repeat_ngram_size >= 0) ? session.no_repeat_ngram_size : no_repeat_ngram_size;
+
+        LOG_DEBUG("Sampling config: temp=" + std::to_string(use_temperature) +
+                  " top_p=" + std::to_string(use_top_p) +
+                  " top_k=" + std::to_string(use_top_k) +
+                  " rep_penalty=" + std::to_string(use_repetition_penalty) +
+                  " freq_penalty=" + std::to_string(use_frequency_penalty) +
+                  " pres_penalty=" + std::to_string(use_presence_penalty));
+
         tle::SamplingConfig samplingConfig;
         samplingConfig.setBeamWidth(1);
-        samplingConfig.setTemperature(temperature);
+        samplingConfig.setTemperature(use_temperature);
+        if (use_top_p > 0.0f && use_top_p <= 1.0f) {
+            samplingConfig.setTopP(use_top_p);
+        }
+        if (use_top_k > 0) {
+            samplingConfig.setTopK(use_top_k);
+        }
+        if (use_min_p > 0.0f) {
+            samplingConfig.setMinP(use_min_p);
+        }
+
+        // Apply penalty parameters
+        if (use_repetition_penalty != 1.0f) {
+            samplingConfig.setRepetitionPenalty(use_repetition_penalty);
+        }
+        if (use_presence_penalty != 0.0f) {
+            samplingConfig.setPresencePenalty(use_presence_penalty);
+        }
+        if (use_frequency_penalty != 0.0f) {
+            samplingConfig.setFrequencyPenalty(use_frequency_penalty);
+        }
+        if (use_length_penalty != 0.0f) {
+            samplingConfig.setLengthPenalty(use_length_penalty);
+        }
+        if (use_no_repeat_ngram > 0) {
+            samplingConfig.setNoRepeatNgramSize(use_no_repeat_ngram);
+        }
 
         // Create output config
         tle::OutputConfig outputConfig;
@@ -1203,20 +1404,20 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
             true,  // streaming
             samplingConfig,
             outputConfig,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            retention
+            eos_token_id,  // endId - EOS token ID to stop generation
+            std::nullopt,  // padId
+            std::nullopt,  // positionIds
+            std::nullopt,  // badWords
+            std::nullopt,  // stopWords - could add additional stop sequences here
+            std::nullopt,  // embeddingBias
+            std::nullopt,  // externalDraftTokensConfig
+            std::nullopt,  // pTuningConfig
+            std::nullopt,  // multimodalInput
+            std::nullopt,  // multimodalEmbedding
+            std::nullopt,  // mRopeConfig
+            std::nullopt,  // loraConfig
+            std::nullopt,  // lookaheadConfig
+            retention       // kvCacheRetentionConfig
         );
         LOG_DEBUG("Request object constructed successfully");
 
@@ -1293,7 +1494,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
                     std::string new_text = tokenizer_->decode(new_tokens);
 
                     // Debug: Log token IDs and decoded text to track think tag issues
-                    if (g_debug_level > 0) {
+                    if (g_debug_level > 2) {
                         std::string token_ids_str;
                         for (auto tid : new_tokens) {
                             if (!token_ids_str.empty()) token_ids_str += ",";
@@ -1302,10 +1503,23 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
                         LOG_DEBUG("Tokens [" + token_ids_str + "] -> \"" + new_text + "\"");
                     }
 
-                    response_text += new_text;
-                    // Only write to terminal in interactive mode, not in server mode
-                    if (!g_server_mode) {
-                        tio.write(new_text.c_str(), new_text.length());
+                    if (callback) {
+                        // Streaming mode: invoke callback with new text
+                        Response partial_resp;
+                        partial_resp.success = true;
+                        partial_resp.content = response_text + new_text;
+                        if (!callback(new_text, response_text + new_text, partial_resp)) {
+                            request_active_ = false;
+                            break;
+                        }
+                        response_text += new_text;
+                    } else {
+                        // Non-streaming mode: accumulate text
+                        response_text += new_text;
+                        // Only write to terminal in interactive mode
+                        if (!g_server_mode) {
+                            tio.write(new_text.c_str(), new_text.length());
+                        }
                     }
                 }
 
@@ -1320,7 +1534,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
                 }
             }
         }
-		std::cout << "Response: " << response_text << std::endl;
+//		std::cout << "Response: " << response_text << std::endl;
 
         LOG_DEBUG("Generated " + std::to_string(output_tokens.size()) + " tokens");
         LOG_DEBUG("Decoded " + std::to_string(response_text.length()) + " characters");
@@ -1372,7 +1586,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens) {
         }
 
         // Strip stop tokens from final response
-        for (const auto& stop_token : stop_tokens_) {
+        for (const auto& stop_token : stop_tokens) {
             size_t pos = response_text.find(stop_token);
             if (pos != std::string::npos) {
                 response_text = response_text.substr(0, pos);

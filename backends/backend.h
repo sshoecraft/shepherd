@@ -90,7 +90,9 @@ public:
     }
 
     // Stateless generation from Session (for server with prefix caching)
-    virtual Response generate_from_session(const Session& session, int max_tokens = 0) = 0;
+    // If callback is provided, streaming mode: callback invoked per token, returns empty Response
+    // If callback is nullptr, non-streaming mode: accumulates text, returns full Response
+    virtual Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) = 0;
 
     // Tool and thinking tag markers (model-specific, extracted from chat template)
     virtual std::vector<std::string> get_tool_call_markers() const { return {}; }
@@ -126,7 +128,7 @@ public:
     bool streaming_enabled = false;  // true if backend supports and has enabled streaming
 
 protected:
-    virtual void parse_backend_config(const std::string& json) {
+    virtual void parse_backend_config() {
         // Default: no-op. Backends override if they have specific config
     }
 };

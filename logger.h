@@ -66,6 +66,7 @@ private:
     std::string log_filename_;
     mutable std::mutex log_mutex_;
     bool is_destructing_ = false;
+    int mpi_rank_;  // MPI rank (0 if not using MPI)
 
     std::string get_timestamp() const;
     std::string level_to_string(LogLevel level) const;

@@ -13,27 +13,25 @@ ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
 	LOG_DEBUG("ApiBackend created");
 }
 
-void ApiBackend::parse_backend_config(const std::string& json) {
-    if (json.empty() || json == "{}") {
+void ApiBackend::parse_backend_config() {
+    if (config->json.is_null() || config->json.empty()) {
         LOG_DEBUG("ApiBackend::parse_backend_config: empty config, using defaults");
         return;  // No config, use defaults
     }
 
     try {
-        auto j = nlohmann::json::parse(json);
-
-        if (j.contains("temperature")) temperature = j["temperature"].get<float>();
-        if (j.contains("top_p")) top_p = j["top_p"].get<float>();
-        if (j.contains("top_k")) top_k = j["top_k"].get<int>();
-        if (j.contains("frequency_penalty")) frequency_penalty = j["frequency_penalty"].get<float>();
-        if (j.contains("presence_penalty")) presence_penalty = j["presence_penalty"].get<float>();
-        if (j.contains("repeat_penalty")) repeat_penalty = j["repeat_penalty"].get<float>();
-        if (j.contains("stop")) {
+        if (config->json.contains("temperature")) temperature = config->json["temperature"].get<float>();
+        if (config->json.contains("top_p")) top_p = config->json["top_p"].get<float>();
+        if (config->json.contains("top_k")) top_k = config->json["top_k"].get<int>();
+        if (config->json.contains("frequency_penalty")) frequency_penalty = config->json["frequency_penalty"].get<float>();
+        if (config->json.contains("presence_penalty")) presence_penalty = config->json["presence_penalty"].get<float>();
+        if (config->json.contains("repeat_penalty")) repeat_penalty = config->json["repeat_penalty"].get<float>();
+        if (config->json.contains("stop")) {
             stop_sequences.clear();  // Clear defaults when user explicitly sets stop
-            if (j["stop"].is_array() && !j["stop"].empty()) {
-                stop_sequences = j["stop"].get<std::vector<std::string>>();
-            } else if (j["stop"].is_string()) {
-                stop_sequences.push_back(j["stop"].get<std::string>());
+            if (config->json["stop"].is_array() && !config->json["stop"].empty()) {
+                stop_sequences = config->json["stop"].get<std::vector<std::string>>();
+            } else if (config->json["stop"].is_string()) {
+                stop_sequences.push_back(config->json["stop"].get<std::string>());
             }
             // If stop is empty array [], stop_sequences remains empty (no stopping)
         }
@@ -277,7 +275,7 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
     return err_resp;
 }
 
-Response ApiBackend::generate_from_session(const Session& session, int max_tokens) {
+Response ApiBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
     // Build request using backend-specific format
     nlohmann::json request = build_request_from_session(session, max_tokens);
 

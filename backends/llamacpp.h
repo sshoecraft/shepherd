@@ -27,7 +27,7 @@ public:
     Response add_message(Session& session, Message::Type type, const std::string& content,
                         const std::string& tool_name = "", const std::string& tool_id = "",
                         int prompt_tokens = 0, int max_tokens = 0) override;
-    Response generate_from_session(const Session& session, int max_tokens = 0) override;
+    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
 
     std::vector<std::string> get_tool_call_markers() const override;
     std::vector<std::string> get_tool_call_end_markers() const override;
@@ -64,7 +64,7 @@ public:
     int pipeline_parallel = 0;
 
 protected:
-    void parse_backend_config(const std::string& json) override;
+    void parse_backend_config() override;
 
 private:
     // Internal methods (not part of public interface)

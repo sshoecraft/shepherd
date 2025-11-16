@@ -28,7 +28,7 @@ public:
     virtual ~ApiBackend() = default;
 
     // Parse backend configuration (sampling parameters)
-    void parse_backend_config(const std::string& json) override;
+    void parse_backend_config() override;
 
     // Initialize backend (query context size if needed, calibrate tokens)
     void initialize(Session& session) override;
@@ -53,7 +53,7 @@ public:
                               int max_tokens = 0) override;
 
     // Stateless generation from Session (for server with prefix caching)
-    Response generate_from_session(const Session& session, int max_tokens = 0) override;
+    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
 
     // Count tokens for a message (formats JSON and estimates using EMA)
     int count_message_tokens(Message::Type type,
@@ -278,7 +278,7 @@ public:
     void build_session_from_context(SessionContext& session);
 
 protected:
-    void parse_backend_config(const std::string& json) override;
+    void parse_backend_config() override;
     virtual void parse_specific_config(const std::string& json) {
         // Override in derived classes for backend-specific config
     }

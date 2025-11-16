@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <iostream>
 
 #if 0
 #include <string>
@@ -60,3 +61,19 @@ struct Message {
 		}
 	}
 };
+
+inline std::ostream& operator<<(std::ostream& os, const Message& msg) {
+	os << msg.get_role() << " (" << msg.tokens << " tokens): ";
+	if (msg.content.length() > 100) {
+		os << msg.content.substr(0, 100) << "...";
+	} else {
+		os << msg.content;
+	}
+	if (!msg.tool_name.empty()) {
+		os << " [tool: " << msg.tool_name << "]";
+	}
+	if (!msg.tool_call_id.empty()) {
+		os << " [tool_call_id: " << msg.tool_call_id << "]";
+	}
+	return os;
+}

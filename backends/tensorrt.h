@@ -47,12 +47,14 @@ public:
     explicit TensorRTBackend(size_t context_size);
     ~TensorRTBackend() override;
 
+    void parse_backend_config() override;
+
     // New v2.0.0 interface
     void initialize(Session& session) override;
     Response add_message(Session& session, Message::Type type, const std::string& content,
                         const std::string& tool_name = "", const std::string& tool_id = "",
                         int prompt_tokens = 0, int max_tokens = 0) override;
-    Response generate_from_session(const Session& session, int max_tokens = 0) override;
+    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
     int count_message_tokens(Message::Type type, const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
@@ -79,7 +81,7 @@ private:
     bool tokenize_and_accumulate_message(Message& msg, bool add_generation_prompt = false);
 
     /// @brief Internal generation logic called by add_message and generate_from_session
-    std::string generate(const Session& session, int max_tokens);
+    std::string generate(const Session& session, int max_tokens, StreamCallback callback = nullptr);
 
     // TensorRT executor and event management
     void* executor_ = nullptr;    // tensorrt_llm::executor::Executor*
@@ -97,6 +99,11 @@ private:
     uint64_t current_request_id_ = 0;  // Track active request
     bool request_active_ = false;
 
+    // Engine build config parameters (read from config.json)
+    int max_seq_len = 2048;
+    int max_batch_size = 1;
+    int max_beam_width = 1;
+
     // KV cache event monitoring
     std::thread kv_event_monitor_thread_;
     std::atomic<bool> monitoring_events_{false};
@@ -109,7 +116,9 @@ private:
     // Chat template support
     void* template_node_ = nullptr; // std::shared_ptr<minja::TemplateNode>*
     std::string chat_template_text_;
-    std::vector<std::string> stop_tokens_;  // Loaded from tokenizer_config.json
+    std::vector<std::string> stop_tokens;  // Loaded from tokenizer_config.json (string form)
+    std::vector<std::vector<int32_t>> stop_token_ids;  // Encoded stop token IDs for TensorRT
+    std::optional<int32_t> eos_token_id;  // EOS token ID for TensorRT
 
     // BOS token configuration (loaded from tokenizer_config.json)
     bool add_bos_token_ = false;
@@ -122,9 +131,18 @@ private:
     ModelConfig model_config_;
 
     // Sampling parameters
+    // Sampling parameters
     float temperature = 0.7f;
     float top_p = 1.0f;
     int top_k = 0;
+    float min_p = 0.0f;
+
+    // Penalty parameters
+    float repetition_penalty = 1.2f;  // Match API backend default
+    float presence_penalty = 0.0f;
+    float frequency_penalty = 0.5f;   // Match API backend default
+    float length_penalty = 0.0f;
+    int no_repeat_ngram_size = 0;
 
     // Track orphaned user questions during eviction
     std::optional<Message> open_user_question_;

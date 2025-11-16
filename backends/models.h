@@ -323,6 +323,18 @@ public:
     /// @return ModelConfig with full API metadata (context window, capabilities, etc.)
     static ModelConfig detect_from_api_model(const std::string& provider, const std::string& model_name);
 
+    /// @brief Get default chat template for a model family
+    /// Returns a standard Jinja2 chat template when tokenizer_config.json is missing one
+    /// @param family The detected model family
+    /// @return Default chat template string, or empty string if no default available
+    static std::string get_default_chat_template(ModelFamily family);
+
+    /// @brief Detect model family from tokenizer class name
+    /// Used as fallback when chat_template is missing from tokenizer_config.json
+    /// @param tokenizer_class The tokenizer_class field from tokenizer_config.json
+    /// @return Detected ModelFamily based on tokenizer class
+    static ModelFamily detect_from_tokenizer_class(const std::string& tokenizer_class);
+
     /// @brief Load generation_config.json from model directory
     /// Reads sampling parameters (temperature, top_p, top_k) from generation_config.json
     /// @param model_dir_path Path to model directory

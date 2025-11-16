@@ -230,88 +230,87 @@ void Config::load() {
             throw ConfigError("Failed to open config file: " + config_path);
         }
 
-        json config_json;
-        file >> config_json;
+        file >> json;
 
         // Load values with fallbacks to defaults
-        if (config_json.contains("backend")) {
-            backend = config_json["backend"];
+        if (json.contains("backend")) {
+            backend = json["backend"];
         }
-        if (config_json.contains("model")) {
-            model = config_json["model"];
+        if (json.contains("model")) {
+            model = json["model"];
         }
-        if (config_json.contains("model_path") || config_json.contains("path")) {
-            model_path = config_json.contains("model_path") ?
-                config_json["model_path"].get<std::string>() :
-                config_json["path"].get<std::string>();
+        if (json.contains("model_path") || json.contains("path")) {
+            model_path = json.contains("model_path") ?
+                json["model_path"].get<std::string>() :
+                json["path"].get<std::string>();
         }
-        if (config_json.contains("context_size")) {
-            context_size = config_json["context_size"];
+        if (json.contains("context_size")) {
+            context_size = json["context_size"];
         }
-        if (config_json.contains("key")) {
-            key = config_json["key"];
+        if (json.contains("key")) {
+            key = json["key"];
         }
-        if (config_json.contains("api_key")) {
-            key = config_json["api_key"];
+        if (json.contains("api_key")) {
+            key = json["api_key"];
         }
-        if (config_json.contains("api_base")) {
-            api_base = config_json["api_base"];
+        if (json.contains("api_base")) {
+            api_base = json["api_base"];
         }
-        if (config_json.contains("models_file")) {
-            models_file = config_json["models_file"];
+        if (json.contains("models_file")) {
+            models_file = json["models_file"];
         }
-        if (config_json.contains("system")) {
-            system_prompt = config_json["system"];
+        if (json.contains("system")) {
+            system_prompt = json["system"];
         }
-        if (config_json.contains("mcp_servers")) {
+        if (json.contains("mcp_servers")) {
             // Store MCP servers as JSON string for MCPManager to parse
-            mcp_config = config_json["mcp_servers"].dump();
+            mcp_config = json["mcp_servers"].dump();
         }
 
         // Load web search configuration (optional)
-        if (config_json.contains("web_search_provider")) {
-            web_search_provider = config_json["web_search_provider"];
+        if (json.contains("web_search_provider")) {
+            web_search_provider = json["web_search_provider"];
         }
-        if (config_json.contains("web_search_api_key")) {
-            web_search_api_key = config_json["web_search_api_key"];
+        if (json.contains("web_search_api_key")) {
+            web_search_api_key = json["web_search_api_key"];
         }
-        if (config_json.contains("web_search_instance_url")) {
-            web_search_instance_url = config_json["web_search_instance_url"];
+        if (json.contains("web_search_instance_url")) {
+            web_search_instance_url = json["web_search_instance_url"];
         }
 
         // Load tool result truncation limit
-        if (config_json.contains("truncate_limit")) {
-            truncate_limit = config_json["truncate_limit"].get<int>();
+        if (json.contains("truncate_limit")) {
+            truncate_limit = json["truncate_limit"].get<int>();
         }
 
         // Load streaming flag
-        if (config_json.contains("streaming")) {
-            streaming = config_json["streaming"].get<bool>();
+        if (json.contains("streaming")) {
+            streaming = json["streaming"].get<bool>();
         }
 
         // Load warmup setting
-        if (config_json.contains("warmup")) {
-            warmup = config_json["warmup"].get<bool>();
+        if (json.contains("warmup")) {
+            warmup = json["warmup"].get<bool>();
         }
 
         // Load calibration setting
-        if (config_json.contains("calibration")) {
-            calibration = config_json["calibration"].get<bool>();
+        if (json.contains("calibration")) {
+            calibration = json["calibration"].get<bool>();
         }
 
         // Load RAG memory database path (optional)
-        if (config_json.contains("memory_database")) {
-            memory_database = config_json["memory_database"];
+        if (json.contains("memory_database")) {
+            memory_database = json["memory_database"];
         }
 
         // Load RAG database size limit (optional, supports both string and numeric formats)
-        if (config_json.contains("max_db_size")) {
-            if (config_json["max_db_size"].is_string()) {
-                max_db_size_str = config_json["max_db_size"].get<std::string>();
+        if (json.contains("max_db_size")) {
+            if (json["max_db_size"].is_string()) {
+                max_db_size_str = json["max_db_size"].get<std::string>();
                 max_db_size = parse_size_string(max_db_size_str);
-            } else if (config_json["max_db_size"].is_number()) {
+            } else if (json["max_db_size"].is_number()) {
                 // Backward compatibility: numeric format
-                max_db_size = config_json["max_db_size"].get<size_t>();
+                max_db_size = json["max_db_size"].get<size_t>();
                 // Convert to string format
                 if (max_db_size >= 1024ULL * 1024 * 1024 * 1024) {
                     max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024 * 1024 * 1024)) + "T";
@@ -325,31 +324,6 @@ void Config::load() {
                     max_db_size_str = std::to_string(max_db_size);
                 }
             }
-        }
-
-        // Load backend-specific configurations
-        if (config_json.contains("backends") && config_json["backends"].is_object()) {
-            for (auto& [backend_name, backend_config] : config_json["backends"].items()) {
-                backend_configs[backend_name] = backend_config.dump();
-            }
-        }
-
-        // Handle top-level tp/pp parameters (for backward compatibility)
-        // If tp or pp are specified at top level, inject them into llamacpp backend config
-        if (backend == "llamacpp" && (config_json.contains("tp") || config_json.contains("pp"))) {
-            json llamacpp_config;
-            if (backend_configs.find("llamacpp") != backend_configs.end()) {
-                llamacpp_config = json::parse(backend_configs["llamacpp"]);
-            }
-
-            if (config_json.contains("tp")) {
-                llamacpp_config["tp"] = config_json["tp"];
-            }
-            if (config_json.contains("pp")) {
-                llamacpp_config["pp"] = config_json["pp"];
-            }
-
-            backend_configs["llamacpp"] = llamacpp_config.dump();
         }
 
         LOG_INFO("Loaded configuration from: " + config_path);
@@ -369,7 +343,7 @@ void Config::save() const {
     std::filesystem::create_directories(dir);
 
     try {
-        json config_json = {
+        nlohmann::json save_json = {
             {"backend", backend},
             {"model", model},
             {"model_path", model_path},
@@ -379,36 +353,27 @@ void Config::save() const {
 
         // Add optional api_base if set
         if (!api_base.empty()) {
-            config_json["api_base"] = api_base;
+            save_json["api_base"] = api_base;
         }
 
         // Add tool result truncation limit
-        config_json["truncate_limit"] = truncate_limit;
+        save_json["truncate_limit"] = truncate_limit;
 
         // Add RAG database size limit (as human-friendly string)
-        config_json["max_db_size"] = max_db_size_str;
-
-        // Save backend-specific configurations
-        if (!backend_configs.empty()) {
-            json backends_json = json::object();
-            for (const auto& [backend_name, config_str] : backend_configs) {
-                backends_json[backend_name] = json::parse(config_str);
-            }
-            config_json["backends"] = backends_json;
-        }
+        save_json["max_db_size"] = max_db_size_str;
 
         // Add streaming flag
-        config_json["streaming"] = streaming;
+        save_json["streaming"] = streaming;
 
         std::ofstream file(config_path);
         if (!file.is_open()) {
             throw ConfigError("Failed to create config file: " + config_path);
         }
 
-        file << config_json.dump(4) << std::endl;
+        file << save_json.dump(4) << std::endl;
         LOG_INFO("Saved configuration to: " + config_path);
 
-    } catch (const json::exception& e) {
+    } catch (const nlohmann::json::exception& e) {
         throw ConfigError("Error creating JSON: " + std::string(e.what()));
     } catch (const std::exception& e) {
         throw ConfigError("Error saving config: " + std::string(e.what()));
@@ -502,12 +467,4 @@ void Config::validate() const {
     }
 
     LOG_DEBUG("Configuration validation passed");
-}
-
-std::string Config::backend_config(const std::string& backend_name) const {
-    auto it = backend_configs.find(backend_name);
-    if (it != backend_configs.end()) {
-        return it->second;
-    }
-    return "{}";  // Empty JSON object if not found
 }

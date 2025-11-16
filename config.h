@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 #include <stdexcept>
+#include "nlohmann/json.hpp"
 
 class ConfigError : public std::runtime_error {
 public:
@@ -29,8 +30,6 @@ public:
     // Get user's home directory (tries getpwuid first, then HOME env var)
     static std::string get_home_directory();
 
-    // Backend-specific configuration helper
-    std::string backend_config(const std::string& backend_name) const;
 
     // Set custom config file path (for command-line override)
     void set_config_path(const std::string& config_path) { custom_config_path_ = config_path; }
@@ -61,9 +60,9 @@ public:
     std::string web_search_provider;
     std::string web_search_api_key;
     std::string web_search_instance_url;
-    std::map<std::string, std::string> backend_configs;
     int truncate_limit;
     bool streaming;
+    nlohmann::json json;  // Parsed config JSON for backends
 
 private:
     // Internal helpers

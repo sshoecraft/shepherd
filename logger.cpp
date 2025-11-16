@@ -2,12 +2,23 @@
 #include "terminal_io.h"
 #include <iostream>
 #include <ctime>
+#include <cstdlib>
+
+// Helper to detect MPI rank
+static int get_mpi_rank() {
+    const char* rank_env = getenv("OMPI_COMM_WORLD_RANK");  // Open MPI
+    if (!rank_env) rank_env = getenv("PMI_RANK");          // Intel MPI
+    if (!rank_env) rank_env = getenv("SLURM_PROCID");      // SLURM
+    if (!rank_env) return 0;  // Default to rank 0 if no MPI
+    return std::atoi(rank_env);
+}
 
 Logger::Logger()
     : min_log_level_(LogLevel::INFO)
     , console_output_enabled_(true)
     , file_output_enabled_(false)
-    , log_file_(nullptr) {
+    , log_file_(nullptr)
+    , mpi_rank_(get_mpi_rank()) {
 }
 
 Logger::~Logger() {
@@ -115,6 +126,11 @@ std::string Logger::level_to_string(LogLevel level) const {
 void Logger::write_log(LogLevel level, const std::string& message) {
     // Don't try to log if we're being destroyed (prevents mutex errors during static destruction)
     if (is_destructing_) {
+        return;
+    }
+
+    // Suppress console output from non-leader MPI ranks to avoid output corruption
+    if (mpi_rank_ > 0 && console_output_enabled_) {
         return;
     }
 

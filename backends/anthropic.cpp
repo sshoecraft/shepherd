@@ -35,7 +35,7 @@ AnthropicBackend::AnthropicBackend(size_t context_size)
     // http_client is inherited from ApiBackend and already initialized
 
     // Parse backend-specific config if available
-    parse_backend_config(config->backend_config("anthropic"));
+    parse_backend_config();
 
     LOG_DEBUG("AnthropicBackend created");
 }

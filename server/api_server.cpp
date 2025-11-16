@@ -7,8 +7,16 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 
 using json = nlohmann::json;
+
+// Global mutex to serialize backend requests (single-threaded processing)
+static std::mutex backend_mutex;
 
 // Generate random ID for chat completion
 static std::string generate_id() {
@@ -72,13 +80,18 @@ static bool is_context_limit_error(const std::string& error_msg) {
             lower_msg.find("exceeded") != std::string::npos);
 }
 
-int run_native_api_server(Backend* backend, const std::string& host, int port) {
+int run_api_server(Backend* backend, const std::string& host, int port) {
     httplib::Server svr;
 
-    LOG_INFO("Starting native C++ API server on " + host + ":" + std::to_string(port));
+    LOG_INFO("Starting API server on " + host + ":" + std::to_string(port));
 
     // POST /v1/chat/completions - OpenAI-compatible chat completions
     svr.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
+        LOG_DEBUG("POST /v1/chat/completions - acquiring lock");
+        // Lock to serialize requests (single-threaded processing)
+        std::lock_guard<std::mutex> lock(backend_mutex);
+        LOG_DEBUG("POST /v1/chat/completions - lock acquired");
+
         try {
             // Parse request body as JSON
             json request;
@@ -90,15 +103,10 @@ int run_native_api_server(Backend* backend, const std::string& host, int port) {
                 return;
             }
 
-            // Check for streaming (not supported yet)
-            if (request.value("stream", false)) {
-                res.status = 400;
-                res.set_content(create_error_response(400, "Streaming not yet supported").dump(), "application/json");
-                return;
-            }
-
             // Create session for this request
             Session session;
+
+            bool stream = request.value("stream", false);
 
             // Parse tools from request (if provided)
             session.tools.clear();
@@ -182,15 +190,101 @@ int run_native_api_server(Backend* backend, const std::string& host, int port) {
                 max_tokens = request["max_tokens"];
             }
 
-            // TODO: Use temperature and top_p from request
-            // float temperature = request.value("temperature", 0.7f);
-            // float top_p = request.value("top_p", 0.9f);
+            // Parse sampling parameters from request (OpenAI-compatible)
+            if (request.contains("temperature")) {
+                session.temperature = request["temperature"].get<float>();
+            }
+            if (request.contains("top_p")) {
+                session.top_p = request["top_p"].get<float>();
+            }
+            if (request.contains("top_k")) {
+                session.top_k = request["top_k"].get<int>();
+            }
+            if (request.contains("min_p")) {
+                session.min_p = request["min_p"].get<float>();
+            }
+            if (request.contains("repetition_penalty")) {
+                session.repetition_penalty = request["repetition_penalty"].get<float>();
+            }
+            if (request.contains("presence_penalty")) {
+                session.presence_penalty = request["presence_penalty"].get<float>();
+            }
+            if (request.contains("frequency_penalty")) {
+                session.frequency_penalty = request["frequency_penalty"].get<float>();
+            }
 
-            // Generate response from Session
+            LOG_DEBUG("Session sampling params: temp=" + std::to_string(session.temperature) +
+                     " top_p=" + std::to_string(session.top_p) +
+                     " freq_penalty=" + std::to_string(session.frequency_penalty));
+
             LOG_DEBUG("Calling generate_from_session with " + std::to_string(session.messages.size()) +
-                     " messages and " + std::to_string(session.tools.size()) + " tools");
+                     " messages and " + std::to_string(session.tools.size()) + " tools (stream=" +
+                     (stream ? "true" : "false") + ")");
 
+            // Handle streaming vs non-streaming
+            if (stream) {
+                // True streaming using set_content_provider
+                std::string request_id = generate_id();
+                std::string model_name = request.value("model", "shepherd");
+
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("X-Accel-Buffering", "no");
+
+                // Use content provider for true token-by-token streaming
+                res.set_content_provider(
+                    "text/event-stream",
+                    [backend, session, max_tokens, request_id, model_name](size_t offset, httplib::DataSink& sink) mutable {
+                        auto stream_callback = [&](const std::string& delta,
+                                                   const std::string& accumulated,
+                                                   const Response& partial_response) -> bool {
+                            json delta_chunk = {
+                                {"id", request_id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", std::time(nullptr)},
+                                {"model", model_name},
+                                {"choices", json::array({{
+                                    {"index", 0},
+                                    {"delta", {{"content", delta}}},
+                                    {"finish_reason", nullptr}
+                                }})}
+                            };
+                            std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
+                            return sink.write(chunk_data.c_str(), chunk_data.size());
+                        };
+
+                        // Generate tokens with streaming callback
+                        Response resp = backend->generate_from_session(
+                            session, max_tokens, stream_callback
+                        );
+
+                        // Send final chunk
+                        json final_chunk = {
+                            {"id", request_id},
+                            {"object", "chat.completion.chunk"},
+                            {"created", std::time(nullptr)},
+                            {"model", model_name},
+                            {"choices", json::array({{
+                                {"index", 0},
+                                {"delta", json::object()},
+                                {"finish_reason", resp.success ? "stop" : "error"}
+                            }})}
+                        };
+                        std::string final_data = "data: " + final_chunk.dump() + "\n\n";
+                        sink.write(final_data.c_str(), final_data.size());
+
+                        std::string done = "data: [DONE]\n\n";
+                        sink.write(done.c_str(), done.size());
+                        sink.done();
+                        return false;  // Done - no more data
+                    }
+                );
+                return;
+            }
+
+            // Non-streaming response
             Response resp = backend->generate_from_session(session, max_tokens);
+			session.dump();
 
             // Check for errors
             if (!resp.success) {

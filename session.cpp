@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "backends/backend.h"
 #include "rag.h"
+#include <iostream>
 
 std::vector<std::pair<int, int>> Session::calculate_messages_to_evict(int tokens_needed) {
     // Two-pass eviction strategy:
@@ -565,4 +566,33 @@ bool Session::needs_eviction(int additional_tokens) const {
 int Session::get_available_tokens() const {
     if (!backend) return 0;
     return backend->context_size;
+}
+
+void Session::dump() const {
+    std::cout << "========== SESSION DUMP ==========" << std::endl;
+    std::cout << "System message: " << system_message << std::endl;
+    std::cout << "System message tokens: " << system_message_tokens << std::endl;
+    std::cout << std::endl;
+
+    std::cout << "Messages (" << messages.size() << " total):" << std::endl;
+    for (size_t i = 0; i < messages.size(); i++) {
+        std::cout << "messages[" << i << "]: " << messages[i] << std::endl;
+    }
+    std::cout << std::endl;
+
+    if (!tools.empty()) {
+        std::cout << "Tools (" << tools.size() << " total):" << std::endl;
+        for (size_t i = 0; i < tools.size(); i++) {
+            std::cout << "tools[" << i << "]: " << tools[i].name << std::endl;
+            std::cout << "  description: " << tools[i].description << std::endl;
+            std::cout << "  parameters: " << tools[i].parameters_text() << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    std::cout << "Total tokens: " << total_tokens << std::endl;
+    std::cout << "Last prompt tokens: " << last_prompt_tokens << std::endl;
+    std::cout << "Auto-evict: " << (auto_evict ? "true" : "false") << std::endl;
+    std::cout << "Desired completion tokens: " << desired_completion_tokens << std::endl;
+    std::cout << "==================================" << std::endl;
 }

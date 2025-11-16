@@ -936,10 +936,11 @@ int main(int argc, char** argv) {
 		                        " (tio.interactive_mode=" + std::to_string(tio.interactive_mode) + ")";
 		std::cerr << "[DEBUG-MAIN] " << debug_msg << std::endl;
 		LOG_DEBUG(debug_msg);
-	} else {
-		// Suppress INFO logs unless in debug mode
+	} else if (!g_server_mode) {
+		// In client mode, suppress INFO logs unless debug is enabled
 		logger.set_log_level(LogLevel::WARN);
 	}
+	// In server mode, default log level is INFO (set in Logger constructor)
 
 	// Load configuration
 	config = std::make_unique<Config>();
@@ -979,31 +980,13 @@ int main(int argc, char** argv) {
 		config->calibration = true;
 	}
 	if (gpu_layers_override != -999) {  // -999 means not specified
-		// Update llamacpp backend config with gpu_layers
-		json backend_config;
-		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
-			backend_config = json::parse(config->backend_configs["llamacpp"]);
-		}
-		backend_config["gpu_layers"] = gpu_layers_override;
-		config->backend_configs["llamacpp"] = backend_config.dump();
+		config->json["gpu_layers"] = gpu_layers_override;
 	}
 	if (tp_override != -1) {  // -1 means not specified
-		// Update llamacpp backend config with tensor_parallel
-		json backend_config;
-		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
-			backend_config = json::parse(config->backend_configs["llamacpp"]);
-		}
-		backend_config["tensor_parallel"] = tp_override;
-		config->backend_configs["llamacpp"] = backend_config.dump();
+		config->json["tp"] = tp_override;
 	}
 	if (pp_override != -1) {  // -1 means not specified
-		// Update llamacpp backend config with pipeline_parallel
-		json backend_config;
-		if (config->backend_configs.find("llamacpp") != config->backend_configs.end()) {
-			backend_config = json::parse(config->backend_configs["llamacpp"]);
-		}
-		backend_config["pipeline_parallel"] = pp_override;
-		config->backend_configs["llamacpp"] = backend_config.dump();
+		config->json["pp"] = pp_override;
 	}
 
 	// Validate configuration (skip model path check if overridden)

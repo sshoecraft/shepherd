@@ -13,6 +13,9 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
 
     // Don't assume streaming - will test during initialize()
 
+    // Initialize model_config with generic defaults to avoid uninitialized memory
+    model_config = ModelConfig::create_generic();
+
     // Detect model configuration from Models database (if model is specified)
     // If model is empty, it will be auto-detected in initialize() and config will be set there
     if (!model_name.empty()) {
@@ -42,7 +45,7 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
     // http_client is inherited from ApiBackend and already initialized
 
     // Parse backend-specific config if available
-    parse_backend_config(config->backend_config("openai"));
+    parse_backend_config();
 }
 
 OpenAIBackend::~OpenAIBackend() {
@@ -257,6 +260,10 @@ void OpenAIBackend::initialize(Session& session) {
             if (server_context > 0) {
                 model_config.context_window = server_context;
                 LOG_INFO("Using server-reported context size: " + std::to_string(server_context));
+            } else {
+                // Server didn't report context size, and model is unknown
+                // Don't use the provider default - it's misleading
+                model_config.context_window = 0;
             }
         } else {
             LOG_WARN("Failed to query server for model, will use first API response to determine");
@@ -267,6 +274,15 @@ void OpenAIBackend::initialize(Session& session) {
     if (context_size == 0 && model_config.context_window > 0) {
         context_size = model_config.context_window;
         LOG_INFO("Using model's context size: " + std::to_string(context_size));
+    }
+
+    // If we still don't have a context size, require user to specify it
+    if (context_size == 0) {
+        throw std::runtime_error(
+            "Cannot determine context size for model '" + model_name + "'. "
+            "Please specify --context-size explicitly. "
+            "Check your model's config.json or documentation for the correct max_seq_len value."
+        );
     }
 
     // Call base class initialize() which handles calibration
@@ -379,6 +395,16 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
     HttpResponse response = http_client->get(full_url, headers);
 
     if (!response.is_success()) {
+        // Check for connection errors (status 0 = couldn't connect)
+        if (response.status_code == 0) {
+            std::string error_msg = response.error_message.empty()
+                ? "Could not connect to server"
+                : response.error_message;
+            LOG_ERROR("Connection failed: " + error_msg);
+            throw BackendError("Failed to connect to API server at " + full_url + ": " + error_msg +
+                             "\nPlease check that the server is running and accessible.");
+        }
+
         // Check for authentication errors - these should fail immediately
         if (response.status_code == 401 || response.status_code == 403) {
             std::string error_msg = "Authentication failed";

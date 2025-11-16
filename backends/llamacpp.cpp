@@ -32,44 +32,41 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
 
     LOG_DEBUG("LlamaCppBackend created with context_size: " + std::to_string(context_size));
 
-    // Parse backend-specific config
-    std::string backend_cfg = config->backend_config(backend_name);
-    parse_backend_config(backend_cfg);
+    // Parse config
+    parse_backend_config();
 }
 
-void LlamaCppBackend::parse_backend_config(const std::string& json) {
-    if (json.empty() || json == "{}") {
+void LlamaCppBackend::parse_backend_config() {
+    if (config->json.is_null() || config->json.empty()) {
         return;  // No config, use defaults
     }
 
     try {
-        auto j = nlohmann::json::parse(json);
-
-        if (j.contains("temperature")) {
-            temperature = j["temperature"].get<float>();
+        if (config->json.contains("temperature")) {
+            temperature = config->json["temperature"].get<float>();
             temperature_from_config = true;
         }
-        if (j.contains("top_p")) {
-            top_p = j["top_p"].get<float>();
+        if (config->json.contains("top_p")) {
+            top_p = config->json["top_p"].get<float>();
             top_p_from_config = true;
         }
-        if (j.contains("top_k")) {
-            top_k = j["top_k"].get<int>();
+        if (config->json.contains("top_k")) {
+            top_k = config->json["top_k"].get<int>();
             top_k_from_config = true;
         }
-        if (j.contains("min_keep")) min_keep = j["min_keep"].get<int>();
-        if (j.contains("penalty_repeat")) penalty_repeat = j["penalty_repeat"].get<float>();
-        if (j.contains("penalty_freq")) penalty_freq = j["penalty_freq"].get<float>();
-        if (j.contains("penalty_present")) penalty_present = j["penalty_present"].get<float>();
-        if (j.contains("penalty_last_n")) penalty_last_n = j["penalty_last_n"].get<int>();
-        if (j.contains("gpu_layers")) gpu_layers = j["gpu_layers"].get<int>();
+        if (config->json.contains("min_keep")) min_keep = config->json["min_keep"].get<int>();
+        if (config->json.contains("penalty_repeat")) penalty_repeat = config->json["penalty_repeat"].get<float>();
+        if (config->json.contains("penalty_freq")) penalty_freq = config->json["penalty_freq"].get<float>();
+        if (config->json.contains("penalty_present")) penalty_present = config->json["penalty_present"].get<float>();
+        if (config->json.contains("penalty_last_n")) penalty_last_n = config->json["penalty_last_n"].get<int>();
+        if (config->json.contains("gpu_layers")) gpu_layers = config->json["gpu_layers"].get<int>();
 
         // Accept both full names and short names for tensor/pipeline parallel
-        if (j.contains("tensor_parallel")) tensor_parallel = j["tensor_parallel"].get<int>();
-        else if (j.contains("tp")) tensor_parallel = j["tp"].get<int>();
+        if (config->json.contains("tensor_parallel")) tensor_parallel = config->json["tensor_parallel"].get<int>();
+        else if (config->json.contains("tp")) tensor_parallel = config->json["tp"].get<int>();
 
-        if (j.contains("pipeline_parallel")) pipeline_parallel = j["pipeline_parallel"].get<int>();
-        else if (j.contains("pp")) pipeline_parallel = j["pp"].get<int>();
+        if (config->json.contains("pipeline_parallel")) pipeline_parallel = config->json["pipeline_parallel"].get<int>();
+        else if (config->json.contains("pp")) pipeline_parallel = config->json["pp"].get<int>();
 
         LOG_DEBUG("Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
                   ", gpu_layers=" + std::to_string(gpu_layers) +
@@ -1090,7 +1087,7 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 
 
 
-Response LlamaCppBackend::generate_from_session(const Session& session, int max_tokens) {
+Response LlamaCppBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
 #ifdef ENABLE_LLAMACPP
     if (!is_ready()) {
         Response err_resp;

@@ -169,6 +169,7 @@ def main():
     try:
         import tensorrt_llm
         from tensorrt_llm import BuildConfig
+        from tensorrt_llm.models import MODEL_MAP
         print(f"Using TensorRT-LLM version: {tensorrt_llm.__version__ if hasattr(tensorrt_llm, '__version__') else 'unknown'}")
     except ImportError as e:
         print(f"Error: Failed to import tensorrt_llm: {e}")
@@ -352,14 +353,14 @@ def main():
 
     else:
         # No quantization - use direct model loading
-        # Build engines for all ranks
+        # Build engines for all ranks sequentially
         print(f"Building engines for {world_size} ranks (TP={args.tp_size}, PP={args.pp_size})...")
         print(f"This will create: {', '.join([f'rank{r}.engine' for r in range(world_size)])}\n")
 
         from tensorrt_llm.mapping import Mapping
 
         for rank in range(world_size):
-            print(f"[Rank {rank}/{world_size-1}] Building...")
+            print(f"Building rank{rank}.engine...")
 
             # Create mapping for this rank
             mapping = Mapping(
@@ -370,6 +371,8 @@ def main():
             )
 
             # Load model from HuggingFace for this rank
+            print(f"  Loading model checkpoint...")
+            sys.stdout.flush()
             try:
                 model = model_class.from_hugging_face(
                     model_dir,
@@ -383,6 +386,8 @@ def main():
                 sys.exit(1)
 
             # Build engine for this rank
+            print(f"  Building TensorRT engine (this may take several minutes)...")
+            sys.stdout.flush()
             try:
                 engine = tensorrt_llm.build(model, build_config)
             except Exception as e:
@@ -392,9 +397,11 @@ def main():
                 sys.exit(1)
 
             # Save engine for this rank
+            print(f"  Saving engine...")
+            sys.stdout.flush()
             try:
                 engine.save(output_dir)
-                print(f"✓ Rank {rank} engine saved\n")
+                print(f"✓ rank{rank}.engine saved\n")
             except Exception as e:
                 print(f"✗ Error saving engine for rank {rank}: {e}")
                 import traceback
@@ -416,7 +423,8 @@ def main():
         'special_tokens_map.json',
         'tokenizer.model',
         'vocab.json',
-        'merges.txt'
+        'merges.txt',
+        'chat_template.jinja'
     ]
 
     for fname in tokenizer_files:

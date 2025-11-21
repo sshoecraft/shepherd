@@ -11,7 +11,7 @@ APITools& APITools::instance() {
 bool APITools::initialize() {
     LOG_INFO("Initializing API Tools...");
 
-    std::string config_path = std::string(getenv("HOME")) + "/.shepherd/config.json";
+    std::string config_path = Config::get_default_config_path();
 
     try {
         // Load API tool configurations
@@ -84,7 +84,7 @@ void APITools::shutdown() {
 
 std::vector<std::string> APITools::get_tool_names() const {
     std::vector<std::string> names;
-    std::string config_path = std::string(getenv("HOME")) + "/.shepherd/config.json";
+    std::string config_path = Config::get_default_config_path();
     std::vector<APIToolEntry> tools = APIToolConfig::load(config_path);
 
     for (const auto& tool : tools) {

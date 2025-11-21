@@ -676,11 +676,11 @@ bool RAGManager::initialize(const std::string& db_path, size_t max_db_size) {
 
     std::string rag_path = db_path;
     if (rag_path.empty()) {
-        // Generate default path: $HOME/.shepherd/memory.db
+        // Generate default path using XDG spec
         try {
-            rag_path = Config::get_home_directory() + "/.shepherd/memory.db";
+            rag_path = Config::get_default_memory_db_path();
         } catch (const ConfigError& e) {
-            LOG_ERROR("Failed to determine home directory: " + std::string(e.what()));
+            LOG_ERROR("Failed to determine memory database path: " + std::string(e.what()));
             return false;
         }
     }

@@ -66,6 +66,15 @@ public:
     /// @param ratio New chars/token ratio to set
     void set_chars_per_token(float ratio) { chars_per_token = ratio; }
 
+    // Override to provide default tool call filtering for API backends
+    std::vector<std::string> get_tool_call_markers() const override {
+        return {"<tool_call", "<function_call"};
+    }
+
+    std::vector<std::string> get_tool_call_end_markers() const override {
+        return {"</tool_call>", "</function_call>"};
+    }
+
 protected:
     /// @brief Flag to track if we've tested streaming capability
     bool streaming_tested = false;

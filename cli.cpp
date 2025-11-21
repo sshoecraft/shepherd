@@ -7,7 +7,9 @@
 #include "tools/utf8_sanitizer.h"
 #include "message.h"
 #include "config.h"
+#include "provider.h"
 #include "backends/api.h"  // For ApiBackend::set_chars_per_token()
+#include "backends/factory.h"
 
 #include <iostream>
 #include <sstream>
@@ -104,6 +106,410 @@ void CLI::show_cancelled() {
 	}
 }
 
+// Handle provider slash commands
+// Returns true if command was handled, false otherwise
+bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>& backend, Session& session) {
+	static Provider provider_manager;
+	// Reload providers to pick up any external changes
+	provider_manager.load_providers();
+
+	// Tokenize the input
+	std::istringstream iss(input);
+	std::string cmd;
+	iss >> cmd;
+
+	// Parse remaining arguments
+	std::vector<std::string> args;
+	std::string arg;
+	while (iss >> arg) {
+		args.push_back(arg);
+	}
+
+	// /provider commands
+	if (cmd == "/provider") {
+		if (args.empty()) {
+			// Show current provider
+			std::string current = provider_manager.get_current_provider();
+			if (current.empty()) {
+				std::cout << "No provider configured\n";
+			} else {
+				auto prov = provider_manager.get_provider(current);
+				if (prov) {
+					std::cout << "Current provider: " << prov->name << "\n";
+					std::cout << "  Type: " << prov->type << "\n";
+					std::cout << "  Model: " << prov->model << "\n";
+					if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+						if (!api->base_url.empty()) {
+							std::cout << "  Base URL: " << api->base_url << "\n";
+						}
+					}
+				}
+			}
+			return true;
+		}
+
+		std::string subcmd = args[0];
+
+		if (subcmd == "list") {
+			auto providers = provider_manager.list_providers();
+			if (providers.empty()) {
+				std::cout << "No providers configured\n";
+			} else {
+				std::cout << "Available providers:\n";
+				for (const auto& name : providers) {
+					if (name == provider_manager.get_current_provider()) {
+						std::cout << "  * " << name << " (current)\n";
+					} else {
+						std::cout << "    " << name << "\n";
+					}
+				}
+			}
+			return true;
+		}
+
+		if (subcmd == "add") {
+			if (args.size() < 2) {
+				std::cout << "Usage: /provider add <type> --name <name> [options...]\n";
+				std::cout << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
+				return true;
+			}
+
+			// Command-line mode: /provider add <type> --name <name> ...
+			std::string type = args[1];
+			std::vector<std::string> cmd_args(args.begin() + 2, args.end());
+			auto new_config = provider_manager.parse_provider_args(type, cmd_args);
+
+			if (new_config->name.empty()) {
+				std::cout << "Error: Provider name is required (use --name <name>)\n";
+			} else {
+				provider_manager.save_provider(*new_config);
+				std::cout << "Provider '" << new_config->name << "' added successfully\n";
+			}
+			return true;
+		}
+
+		if (subcmd == "edit" && args.size() >= 2) {
+			std::string name = args[1];
+			auto prov = provider_manager.get_provider(name);
+			if (!prov) {
+				std::cout << "Provider '" << name << "' not found\n";
+			} else {
+				if (provider_manager.interactive_edit(*prov)) {
+					provider_manager.save_provider(*prov);
+					std::cout << "Provider '" << prov->name << "' updated successfully\n";
+				} else {
+					std::cout << "Edit cancelled\n";
+				}
+			}
+			return true;
+		}
+
+		if (subcmd == "set" && args.size() >= 3) {
+			std::string name = args[1];
+			std::string field = args[2];
+			std::string value = (args.size() >= 4) ? args[3] : "";
+
+			auto prov = provider_manager.get_provider(name);
+			if (!prov) {
+				std::cout << "Provider '" << name << "' not found\n";
+			} else {
+				// Update specific field
+				if (field == "model") {
+					prov->model = value;
+				} else if (field == "tokens_per_month") {
+					prov->rate_limits.tokens_per_month = std::stoi(value);
+				} else if (field == "max_cost") {
+					prov->rate_limits.max_cost_per_month = std::stof(value);
+				} else if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+					if (field == "api_key" || field == "key") {
+						api->api_key = value;
+					} else if (field == "base_url" || field == "url") {
+						api->base_url = value;
+					} else {
+						std::cout << "Unknown field: " << field << "\n";
+						return true;
+					}
+				} else {
+					std::cout << "Unknown field: " << field << "\n";
+					return true;
+				}
+
+				provider_manager.save_provider(*prov);
+				std::cout << "Provider '" << name << "' updated\n";
+			}
+			return true;
+		}
+
+		if (subcmd == "remove" && args.size() >= 2) {
+			std::string name = args[1];
+			provider_manager.remove_provider(name);
+			std::cout << "Provider '" << name << "' removed\n";
+			return true;
+		}
+
+		if (subcmd == "use" && args.size() >= 2) {
+			std::string name = args[1];
+			auto prov = provider_manager.get_provider(name);
+			if (!prov) {
+				std::cout << "Provider '" << name << "' not found\n";
+			} else {
+				// Create new backend from provider
+				auto new_backend = BackendFactory::create_from_provider(prov, backend->context_size);
+				if (!new_backend) {
+					std::cout << "Failed to create backend for provider '" << name << "'\n";
+					return true;
+				}
+
+				// Initialize the new backend
+				new_backend->initialize(session);
+
+				// Switch session to new backend
+				session.switch_backend(new_backend.release());
+				provider_manager.set_current_provider(name);
+
+				std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
+			}
+			return true;
+		}
+
+		if (subcmd == "next") {
+			auto next = provider_manager.get_next_provider();
+			if (!next) {
+				std::cout << "No available providers (all rate limited or none configured)\n";
+			} else {
+				auto prov = provider_manager.get_provider(*next);
+				if (!prov) {
+					std::cout << "Failed to load provider '" << *next << "'\n";
+					return true;
+				}
+
+				// Create new backend from provider
+				auto new_backend = BackendFactory::create_from_provider(prov, backend->context_size);
+				if (!new_backend) {
+					std::cout << "Failed to create backend for provider '" << *next << "'\n";
+					return true;
+				}
+
+				// Initialize the new backend
+				new_backend->initialize(session);
+
+				// Switch session to new backend
+				session.switch_backend(new_backend.release());
+				provider_manager.set_current_provider(*next);
+
+				std::cout << "Switched to provider '" << *next << "' (" << prov->type << " / " << prov->model << ")\n";
+			}
+			return true;
+		}
+
+		if (subcmd == "show") {
+			std::string name = (args.size() >= 2) ? args[1] : provider_manager.get_current_provider();
+			if (name.empty()) {
+				std::cout << "No provider specified\n";
+			} else {
+				auto prov = provider_manager.get_provider(name);
+				if (!prov) {
+					std::cout << "Provider '" << name << "' not found\n";
+				} else {
+					std::cout << "Provider: " << prov->name << "\n";
+					std::cout << "  Type: " << prov->type << "\n";
+					if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+						std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << "\n";
+						if (!api->base_url.empty()) {
+							std::cout << "  Base URL: " << api->base_url << "\n";
+						}
+					}
+					std::cout << "  Model: " << prov->model << "\n";
+
+					if (prov->rate_limits.tokens_per_month > 0) {
+						std::cout << "  Monthly token limit: " << prov->rate_limits.tokens_per_month << "\n";
+					}
+					if (prov->rate_limits.max_cost_per_month > 0) {
+						std::cout << "  Monthly cost limit: $" << prov->rate_limits.max_cost_per_month << "\n";
+					}
+
+					if (prov->pricing.dynamic) {
+						std::cout << "  Pricing: dynamic (from API)\n";
+					} else if (prov->pricing.prompt_cost > 0 || prov->pricing.completion_cost > 0) {
+						std::cout << "  Pricing: $" << prov->pricing.prompt_cost << " / $"
+						          << prov->pricing.completion_cost << " per million tokens\n";
+					}
+				}
+			}
+			return true;
+		}
+
+		// Unknown subcommand
+		std::cout << "Unknown provider command: " << subcmd << "\n";
+		std::cout << "Available: list, add, edit, set, remove, use, next, show\n";
+		return true;
+	}
+
+	// /model commands
+	if (cmd == "/model") {
+		if (args.empty()) {
+			// Show current model
+			std::string current_provider = provider_manager.get_current_provider();
+			if (current_provider.empty()) {
+				std::cout << "No provider configured\n";
+			} else {
+				auto prov = provider_manager.get_provider(current_provider);
+				if (prov) {
+					std::cout << "Current model: " << prov->model << "\n";
+				}
+			}
+			return true;
+		}
+
+		std::string subcmd = args[0];
+
+		if (subcmd == "list") {
+			std::cout << "Available models depend on your provider.\n";
+			std::cout << "Refer to your provider's documentation for model list.\n";
+			std::cout << "Common models:\n";
+			std::cout << "  OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo\n";
+			std::cout << "  Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku\n";
+			std::cout << "  Google: gemini-pro, gemini-ultra\n";
+			std::cout << "  OpenRouter: anthropic/claude-3.5-sonnet, google/gemini-pro\n";
+			return true;
+		}
+
+		if (subcmd == "set" && args.size() >= 2) {
+			std::string model = args[1];
+			std::string current_provider = provider_manager.get_current_provider();
+			if (current_provider.empty()) {
+				std::cout << "No provider configured\n";
+			} else {
+				auto prov = provider_manager.get_provider(current_provider);
+				if (prov) {
+					prov->model = model;
+					provider_manager.save_provider(*prov);
+
+					// Update backend's model
+					backend->model_name = model;
+
+					std::cout << "Model updated to: " << model << "\n";
+					std::cout << "Note: Change takes effect on next message\n";
+				}
+			}
+			return true;
+		}
+
+		// Unknown subcommand
+		std::cout << "Unknown model command: " << subcmd << "\n";
+		std::cout << "Available: list, set\n";
+		return true;
+	}
+
+	// /config command
+	if (cmd == "/config") {
+		if (args.empty() || args[0] == "show") {
+			// Show all configuration
+			std::cout << "=== Configuration ===\n";
+			std::cout << "Current provider: " << provider_manager.get_current_provider() << "\n";
+			std::cout << "Streaming: " << (config->streaming ? "enabled" : "disabled") << "\n";
+			std::cout << "Warmup: " << (config->warmup ? "enabled" : "disabled") << "\n";
+			std::cout << "Calibration: " << (config->calibration ? "enabled" : "disabled") << "\n";
+			std::cout << "Truncate limit: " << config->truncate_limit << "\n";
+			// Add more config fields as needed
+			return true;
+		}
+
+		if (args[0] == "set" && args.size() >= 3) {
+			std::string key = args[1];
+			std::string value = args[2];
+
+			// Update config fields
+			if (key == "streaming") {
+				config->streaming = (value == "true" || value == "1" || value == "on");
+				std::cout << "Streaming " << (config->streaming ? "enabled" : "disabled") << "\n";
+			} else if (key == "warmup") {
+				config->warmup = (value == "true" || value == "1" || value == "on");
+				std::cout << "Warmup " << (config->warmup ? "enabled" : "disabled") << "\n";
+			} else if (key == "calibration") {
+				config->calibration = (value == "true" || value == "1" || value == "on");
+				std::cout << "Calibration " << (config->calibration ? "enabled" : "disabled") << "\n";
+			} else if (key == "truncate_limit") {
+				config->truncate_limit = std::stoi(value);
+				std::cout << "Truncate limit set to: " << config->truncate_limit << "\n";
+			} else {
+				std::cout << "Unknown config key: " << key << "\n";
+			}
+
+			// Save config
+			config->save();
+			return true;
+		}
+
+		std::cout << "Usage: /config [show | set <key> <value>]\n";
+		return true;
+	}
+
+	if (cmd == "/tools") {
+		auto& registry = ToolRegistry::instance();
+
+		if (args.empty() || args[0] == "list") {
+			auto tool_descriptions = registry.list_tools_with_descriptions();
+
+			std::cout << "\n=== Available Tools (" << tool_descriptions.size() << ") ===\n\n";
+
+			size_t enabled_count = 0;
+			size_t disabled_count = 0;
+
+			for (const auto& pair : tool_descriptions) {
+				bool is_enabled = registry.enabled(pair.first);
+				if (is_enabled) {
+					enabled_count++;
+				} else {
+					disabled_count++;
+				}
+
+				std::string status = is_enabled ? "[enabled]" : "[DISABLED]";
+				std::cout << "  " << status << " " << pair.first << "\n";
+				std::cout << "    " << pair.second << "\n\n";
+			}
+
+			std::cout << "Total: " << tool_descriptions.size() << " tools";
+			std::cout << " (" << enabled_count << " enabled, " << disabled_count << " disabled)\n";
+			return true;
+		}
+
+		if (args[0] == "enable" && args.size() >= 2) {
+			std::string tool_name = args[1];
+			Tool* tool = registry.get_tool(tool_name);
+
+			if (!tool) {
+				std::cout << "Tool not found: " << tool_name << "\n";
+				return true;
+			}
+
+			registry.enable_tool(tool_name);
+			std::cout << "Tool '" << tool_name << "' enabled\n";
+			return true;
+		}
+
+		if (args[0] == "disable" && args.size() >= 2) {
+			std::string tool_name = args[1];
+			Tool* tool = registry.get_tool(tool_name);
+
+			if (!tool) {
+				std::cout << "Tool not found: " << tool_name << "\n";
+				return true;
+			}
+
+			registry.disable_tool(tool_name);
+			std::cout << "Tool '" << tool_name << "' disabled\n";
+			return true;
+		}
+
+		std::cout << "Usage: /tools [list | enable <tool_name> | disable <tool_name>]\n";
+		return true;
+	}
+
+	// Command not recognized
+	return false;
+}
+
 // Main CLI loop - handles all user interaction
 int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 	CLI cli;
@@ -157,6 +563,15 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 			break;
 		}
 
+		// Check for slash commands
+		if (!user_input.empty() && user_input[0] == '/') {
+			// Handle provider commands
+			if (handle_provider_command(user_input, backend, session)) {
+				continue;  // Command handled, get next input
+			}
+			// If not a recognized command, treat as regular input
+		}
+
 		// Show user message in transcript (for piped mode)
 		LOG_DEBUG("User input: " + user_input);
 
@@ -200,6 +615,12 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 			// Check for error
 			if (!resp.success) {
 				std::cerr << "\n\033[31mError: " << resp.error << "\033[0m\n" << std::flush;
+				continue; // Back to prompt
+			}
+
+			// Check if generation was cancelled
+			if (resp.finish_reason == "cancelled") {
+				cli.show_cancelled();
 				continue; // Back to prompt
 			}
 
@@ -577,8 +998,10 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 				}
 			}
 
-			// Print newline after final assistant response
-			tio.write("\n", 1);
+			// Add trailing newline for non-local backends (API models don't print decode stats)
+			if (!backend->is_local) {
+				tio.write("\n", 1);
+			}
 
 		} catch (const std::exception& e) {
 			cli.show_error(e.what());

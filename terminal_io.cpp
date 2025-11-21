@@ -7,6 +7,9 @@
 #include <unistd.h>
 #include <sys/select.h>
 
+// External globals
+extern int g_debug_level;
+
 // Global instance
 TerminalIO tio;
 
@@ -90,6 +93,8 @@ bool TerminalIO::init(int color_override) {
         // Configure replxx
         replxx_set_max_history_size(replxx, 1000);
         replxx_set_max_hint_rows(replxx, 3);
+        replxx_set_indent_multiline(replxx, 1);  // Enable multiline input
+        replxx_enable_bracketed_paste(replxx);   // Enable bracketed paste for multi-line pasting
 
         // Disable colors in replxx if needed
         if (!colors_enabled) {
@@ -208,22 +213,24 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
             }
 
             case IN_TOOL_CALL:
-                buffered_tool_call += c;
                 if (c == '<') {
                     tag_buffer = "<";
                     filter_state = CHECKING_CLOSE;
+                } else {
+                    buffered_tool_call += c;
                 }
                 break;
 
             case IN_THINKING:
-                if (!suppress_output) {
-                    write_raw(&c, 1, color);
-                } else {
-                    buffered_thinking += c;
-                }
                 if (c == '<') {
                     tag_buffer = "<";
                     filter_state = CHECKING_CLOSE;
+                } else {
+                    if (!suppress_output) {
+                        write_raw(&c, 1, color);
+                    } else {
+                        buffered_thinking += c;
+                    }
                 }
                 break;
 
@@ -316,8 +323,10 @@ std::string TerminalIO::get_input_line(const char* prompt) {
 
             const char* input = replxx_input(replxx, colored_prompt.c_str());
             if (input == nullptr) {
-                // EOF or error
-                return "";
+                // EOF (Ctrl+D) or Ctrl+C
+                // Exit gracefully
+                printf("\n");
+                exit(0);
             }
 
             line = input;

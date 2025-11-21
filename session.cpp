@@ -596,3 +596,18 @@ void Session::dump() const {
     std::cout << "Desired completion tokens: " << desired_completion_tokens << std::endl;
     std::cout << "==================================" << std::endl;
 }
+
+void Session::switch_backend(Backend* new_backend) {
+    LOG_INFO("Switching backend from " + backend->backend_name + " to " + new_backend->backend_name);
+
+    // Switch backend pointer
+    backend = new_backend;
+
+    // Reset token counters (different backends count differently)
+    total_tokens = 0;
+    last_prompt_tokens = 0;
+
+    // Messages remain intact - conversation history preserved
+    // First message to new backend will establish new baseline
+    LOG_INFO("Backend switched. Token counters reset. Message history preserved.");
+}

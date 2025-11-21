@@ -14,6 +14,7 @@ bool MCP::initialize() {
     LOG_INFO("Initializing MCP Manager...");
 
     std::string mcp_json = config->mcp_config;
+    LOG_DEBUG("MCP config string: " + (mcp_json.empty() ? "(empty)" : mcp_json));
     if (mcp_json.empty()) {
         LOG_INFO("No MCP servers configured");
         return true;
@@ -78,14 +79,14 @@ bool MCP::initialize(const std::vector<ServerConfig>& server_configs) {
     return any_success;
 }
 
-bool MCP::connect_server(const ServerConfig& server_config) {
+bool MCP::connect_server(const ServerConfig& sconfig) {
     try {
         // Create server config
         MCPServer::Config server_config;
-        server_config.name = server_config.name;
-        server_config.command = server_config.command;
-        server_config.args = server_config.args;
-        server_config.env = server_config.env;
+        server_config.name = sconfig.name;
+        server_config.command = sconfig.command;
+        server_config.args = sconfig.args;
+        server_config.env = sconfig.env;
 
         // Create and start server
         auto server = std::make_unique<MCPServer>(server_config);
@@ -127,7 +128,7 @@ bool MCP::connect_server(const ServerConfig& server_config) {
         return true;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Exception connecting to MCP server " + server_config.name + ": " + e.what());
+        LOG_ERROR("Exception connecting to MCP server " + sconfig.name + ": " + e.what());
         return false;
     }
 }

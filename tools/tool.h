@@ -58,8 +58,14 @@ public:
     // Get formatted tool list for system prompts (llama.cpp, TensorRT)
     std::string get_tools_as_system_prompt() const;
 
+    // Enable/disable tools
+    void enable_tool(const std::string& name);
+    void disable_tool(const std::string& name);
+    bool enabled(const std::string& name) const;
+
 private:
     std::map<std::string, std::unique_ptr<Tool>> tools_;
+    std::map<std::string, bool> tool_enabled;  // Track which tools are enabled
 };
 
 // Tool execution result

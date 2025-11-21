@@ -23,6 +23,7 @@ set(SHEPHERD_SOURCES
     cli.cpp
     session.cpp
     config.cpp
+    provider.cpp
     logger.cpp
     terminal_io.cpp
     http_client.cpp

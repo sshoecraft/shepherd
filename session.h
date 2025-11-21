@@ -139,6 +139,11 @@ public:
     /// @brief Dump session contents to stdout for debugging
     void dump() const;
 
+    /// @brief Switch to a different provider/backend
+    /// @param new_backend New backend to switch to
+    /// Keeps message history, resets token counters
+    void switch_backend(Backend* new_backend);
+
 private:
     // Helper methods for auto-eviction
     /// @brief Check if adding message would exceed context limit

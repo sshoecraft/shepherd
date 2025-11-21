@@ -1,5 +1,6 @@
 #include "http_client.h"
 #include "logger.h"
+#include "terminal_io.h"
 #include <sstream>
 #include <cstring>
 #include <fstream>
@@ -9,10 +10,18 @@ HttpClient::HttpClient() {
     if (!curl_) {
         LOG_ERROR("Failed to initialize CURL for HttpClient");
     }
+    multi_handle_ = curl_multi_init();
+    if (!multi_handle_) {
+        LOG_ERROR("Failed to initialize CURL multi handle for HttpClient");
+    }
     LOG_DEBUG("HttpClient initialized");
 }
 
 HttpClient::~HttpClient() {
+    if (multi_handle_) {
+        curl_multi_cleanup(multi_handle_);
+        multi_handle_ = nullptr;
+    }
     if (curl_) {
         curl_easy_cleanup(curl_);
         curl_ = nullptr;
@@ -340,6 +349,142 @@ HttpResponse HttpClient::post_stream(const std::string& url,
 #else
     response.error_message = "API backends not compiled in";
     LOG_ERROR("HttpClient::post_stream() called but API backends not compiled in");
+#endif
+
+    return response;
+}
+
+HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
+                                                  const std::string& body,
+                                                  const std::map<std::string, std::string>& headers,
+                                                  StreamCallback callback,
+                                                  void* user_data) {
+    HttpResponse response;
+
+#ifdef ENABLE_API_BACKENDS
+    if (!curl_ || !multi_handle_) {
+        response.error_message = "CURL not initialized";
+        return response;
+    }
+
+    LOG_DEBUG("HTTP POST (streaming cancellable): " + url);
+    LOG_DEBUG("POST body length: " + std::to_string(body.length()));
+
+    // Dump full request body at high debug level
+    extern int g_debug_level;
+    if (g_debug_level >= 5 && body.length() < 50000) {
+        LOG_DEBUG("POST body:\n" + body);
+    }
+
+    configure_curl();
+
+    // Set URL
+    curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
+
+    // Set POST
+    curl_easy_setopt(curl_, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl_, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl_, CURLOPT_POSTFIELDSIZE, body.length());
+
+    // Set streaming callback
+    StreamCallbackData callback_data;
+    callback_data.callback = callback;
+    callback_data.user_data = user_data;
+
+    curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, stream_callback);
+    curl_easy_setopt(curl_, CURLOPT_WRITEDATA, &callback_data);
+    curl_easy_setopt(curl_, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl_, CURLOPT_HEADERDATA, &response);
+
+    // Set headers
+    struct curl_slist* header_list = set_headers(headers);
+    if (header_list) {
+        curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    // Enable raw mode for escape key detection
+    tio.set_raw_mode();
+
+    // Add handle to multi interface
+    CURLMcode mres = curl_multi_add_handle(multi_handle_, curl_);
+    if (mres != CURLM_OK) {
+        response.error_message = "Failed to add handle to multi interface";
+        LOG_ERROR("curl_multi_add_handle failed: " + std::string(curl_multi_strerror(mres)));
+        tio.restore_terminal();
+        if (header_list) {
+            curl_slist_free_all(header_list);
+        }
+        return response;
+    }
+
+    // Event loop with escape key checking
+    int still_running = 0;
+    bool cancelled = false;
+    CURLcode curl_result = CURLE_OK;
+
+    do {
+        // Perform transfers
+        mres = curl_multi_perform(multi_handle_, &still_running);
+        if (mres != CURLM_OK) {
+            LOG_ERROR("curl_multi_perform failed: " + std::string(curl_multi_strerror(mres)));
+            break;
+        }
+
+        // Check for escape key
+        if (tio.check_escape_pressed()) {
+            LOG_INFO("Escape key pressed, cancelling request");
+            cancelled = true;
+            break;
+        }
+
+        // Wait for activity with short timeout (100ms for responsive cancellation)
+        if (still_running) {
+            mres = curl_multi_poll(multi_handle_, nullptr, 0, 100, nullptr);
+            if (mres != CURLM_OK) {
+                LOG_ERROR("curl_multi_poll failed: " + std::string(curl_multi_strerror(mres)));
+                break;
+            }
+        }
+    } while (still_running);
+
+    // Check for completion messages
+    int msgs_left = 0;
+    CURLMsg* msg = nullptr;
+    while ((msg = curl_multi_info_read(multi_handle_, &msgs_left))) {
+        if (msg->msg == CURLMSG_DONE) {
+            curl_result = msg->data.result;
+            break;
+        }
+    }
+
+    // Get status code
+    curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &response.status_code);
+
+    // Remove handle from multi interface
+    curl_multi_remove_handle(multi_handle_, curl_);
+
+    // Restore terminal
+    tio.restore_terminal();
+
+    // Clean up headers
+    if (header_list) {
+        curl_slist_free_all(header_list);
+    }
+
+    // Set error message if cancelled or failed
+    if (cancelled) {
+        response.error_message = "Request cancelled by user";
+        response.status_code = 0;
+        LOG_INFO("HTTP POST (streaming cancellable) cancelled");
+    } else if (curl_result != CURLE_OK) {
+        response.error_message = curl_easy_strerror(curl_result);
+        LOG_ERROR("HTTP POST (streaming cancellable) failed: " + response.error_message);
+    } else {
+        LOG_DEBUG("HTTP POST (streaming cancellable) completed with status: " + std::to_string(response.status_code));
+    }
+#else
+    response.error_message = "API backends not compiled in";
+    LOG_ERROR("HttpClient::post_stream_cancellable() called but API backends not compiled in");
 #endif
 
     return response;

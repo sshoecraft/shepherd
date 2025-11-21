@@ -1,4 +1,5 @@
 #include "config.h"
+#include "provider.h"
 #include "logger.h"
 #include "nlohmann/json.hpp"
 #include <fstream>
@@ -6,6 +7,10 @@
 #include <cstdlib>
 #include <pwd.h>
 #include <unistd.h>
+#include <algorithm>
+
+// include the system prompt
+#include "system_prompt.h"
 
 using json = nlohmann::json;
 
@@ -19,89 +24,8 @@ void Config::set_max_db_size(const std::string& size_str) {
 }
 
 void Config::set_defaults() {
-	// Default system prompt
-	system_message = R"(You are a highly effective AI assistant with persistent memory. Follow this STRICT sequence for every interaction:
-
-**Step 1: Check Memory (MANDATORY - NO EXCEPTIONS)**
-- For EVERY query, your FIRST action MUST be a memory tool call
-- Specific facts (e.g., "what is my name?"): get_fact(key=...) with plausible key
-- Everything else: search_memory(query=...)
-- Use the user's exact question as search query for best matching
-- Do NOT proceed until memory has been checked
-
-**Step 2: Use Other Tools (Only if Memory Returns Nothing)**
-- Local files: read, grep, glob
-- General knowledge: WebSearch(query=...)
-- NEVER use websearch for local file content
-
-**Step 3: Store Your Answer (MANDATORY - NO EXCEPTIONS)**
-- CRITICAL: After deriving ANY answer from non-memory sources, you MUST store it
-- Use the user's original question and your final answer:
-  store_memory(question="<user's exact question>", answer="<your complete answer>")
-- This applies to: file analysis, calculations, research, code findings - EVERYTHING
-- EXCEPTION: Do NOT store if the answer came from get_fact or search_memory (already stored)
-
-**Step 4: Update Outdated Information**
-- When new info contradicts old: clear_memory(question=...) then store_memory(...)
-- Only when explicitly told or clearly superseded
-
-**Handling Truncated Tool Results:**
-
-When you see [TRUNCATED]:
-
-1. Assess First
-   - Can you answer with visible data? If YES, answer and store in memory
-   - If NO, proceed to recovery
-
-2. Smart Recovery
-   For code/text files:
-   - Need specific section: read(file_path=..., offset=N)
-   - Searching for keyword: grep(pattern="literal_string") with SIMPLE patterns only
-
-   For grep failures:
-   - Remove special chars: ( ) [ ] . * + ? { } | ^ $
-   - Use literal strings only
-   - Example: NOT "Config::parse_size\(" but USE "Config parse_size"
-
-3. Stop Conditions
-   - After 2-3 attempts with no progress: STOP
-   - Answer with available data
-   - Still store the partial answer in memory
-
-4. Tool Boundaries
-   - Local files: read, grep, glob ONLY
-   - Past conversations: search_memory, get_fact ONLY
-   - General knowledge: WebSearch ONLY
-   - NO MIXING domains - never websearch for file content
-
-**Task Completion:**
-
-When the user requests multiple steps in a single message:
-- Complete ALL steps before responding
-- Example: "write hello.c and compile it and run it" = 3 steps, do all 3
-- Do NOT stop after each tool call - continue until the entire task is done
-- Only respond to user when the complete task is finished
-- If a step fails, report the failure and stop
-
-**Enforcement Rules:**
-
-ALWAYS check memory FIRST - even if query seems like obvious file operation
-ALWAYS store answer LAST - unless it came from memory
-NEVER skip memory check - this wastes computation and breaks continuity
-NEVER forget to store - every answer you derive must be saved for next time
-NEVER stop mid-task - complete all requested steps before responding
-
-**Example Correct Flow:**
-User: "What is the private variable in config.cpp?"
-1. search_memory(query="private variable config.cpp") → empty
-2. read(file_path="config.cpp") → find: private int m_max_size
-3. store_memory(question="What is the private variable in config.cpp?", answer="The private variable is m_max_size, an int defined at line 47")
-4. Respond to user
-
-**Example Violation:**
-User: "What is the private variable in config.cpp?"
-1. read(file_path="config.cpp") ← WRONG! Didn't check memory first
-2. Respond to user ← WRONG! Didn't store the answer)";
+	// Default system prompt (loaded from system_prompt.h)
+	system_message = SYSTEM_PROMPT;
 
 	// Default warmup message
 	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.  **IMPORTANT:** DO NOT USE TOOLS!";
@@ -205,11 +129,35 @@ std::string Config::get_home_directory() {
     throw ConfigError("Unable to determine home directory");
 }
 
+std::string Config::get_default_config_path() {
+    // Use XDG base directory
+    std::string config_home;
+    const char* xdg_config = getenv("XDG_CONFIG_HOME");
+    if (xdg_config && xdg_config[0] != '\0') {
+        config_home = xdg_config;
+    } else {
+        config_home = get_home_directory() + "/.config";
+    }
+    return config_home + "/shepherd/config.json";
+}
+
+std::string Config::get_default_memory_db_path() {
+    // Use XDG data directory
+    std::string data_home;
+    const char* xdg_data = getenv("XDG_DATA_HOME");
+    if (xdg_data && xdg_data[0] != '\0') {
+        data_home = xdg_data;
+    } else {
+        data_home = get_home_directory() + "/.local/share";
+    }
+    return data_home + "/shepherd/memory.db";
+}
+
 std::string Config::get_config_path() const {
     if (!custom_config_path_.empty()) {
         return custom_config_path_;
     }
-    return get_home_directory() + "/.shepherd/config.json";
+    return get_default_config_path();
 }
 
 std::string Config::get_default_model_path() const {
@@ -218,6 +166,8 @@ std::string Config::get_default_model_path() const {
 
 void Config::load() {
     std::string config_path = get_config_path();
+
+    LOG_DEBUG("Loading config from: " + config_path);
 
     if (!std::filesystem::exists(config_path)) {
         LOG_INFO("Config file not found, using defaults: " + config_path);
@@ -231,6 +181,7 @@ void Config::load() {
         }
 
         file >> json;
+        LOG_DEBUG("Config file loaded, checking for mcp_servers key...");
 
         // Load values with fallbacks to defaults
         if (json.contains("backend")) {
@@ -265,6 +216,9 @@ void Config::load() {
         if (json.contains("mcp_servers")) {
             // Store MCP servers as JSON string for MCPManager to parse
             mcp_config = json["mcp_servers"].dump();
+            LOG_DEBUG("Loaded MCP config: " + mcp_config);
+        } else {
+            LOG_DEBUG("No mcp_servers found in config file");
         }
 
         // Load web search configuration (optional)
@@ -344,26 +298,32 @@ void Config::save() const {
 
     try {
         nlohmann::json save_json = {
-            {"backend", backend},
-            {"model", model},
-            {"model_path", model_path},
-            {"context_size", context_size},
-            {"key", key}
+            {"warmup", warmup},
+            {"calibration", calibration},
+            {"streaming", streaming},
+            {"truncate_limit", truncate_limit},
+            {"max_db_size", max_db_size_str}
         };
 
-        // Add optional api_base if set
-        if (!api_base.empty()) {
-            save_json["api_base"] = api_base;
+        // Optional fields
+        if (!system_prompt.empty()) {
+            save_json["system"] = system_prompt;
         }
-
-        // Add tool result truncation limit
-        save_json["truncate_limit"] = truncate_limit;
-
-        // Add RAG database size limit (as human-friendly string)
-        save_json["max_db_size"] = max_db_size_str;
-
-        // Add streaming flag
-        save_json["streaming"] = streaming;
+        if (!mcp_config.empty()) {
+            save_json["mcp_servers"] = nlohmann::json::parse(mcp_config);
+        }
+        if (!memory_database.empty()) {
+            save_json["memory_database"] = memory_database;
+        }
+        if (!web_search_provider.empty()) {
+            save_json["web_search_provider"] = web_search_provider;
+        }
+        if (!web_search_api_key.empty()) {
+            save_json["web_search_api_key"] = web_search_api_key;
+        }
+        if (!web_search_instance_url.empty()) {
+            save_json["web_search_instance_url"] = web_search_instance_url;
+        }
 
         std::ofstream file(config_path);
         if (!file.is_open()) {
@@ -422,48 +382,10 @@ std::vector<std::string> Config::get_available_backends() {
 }
 
 void Config::validate() const {
-    // Validate backend
-    if (!is_backend_available(backend)) {
-        auto available = get_available_backends();
-        std::string available_str;
-        for (size_t i = 0; i < available.size(); ++i) {
-            if (i > 0) available_str += ", ";
-            available_str += available[i];
-        }
-        throw ConfigError("Invalid backend '" + backend + "'. Available on this platform: " + available_str);
-    }
-
-    // Validate model for local backends
-    if (backend == "llamacpp" || backend == "tensorrt") {
-        if (model.empty()) {
-            throw ConfigError("Model name is required for backend: " + backend);
-        }
-
-        // Check if model file exists (either as full path or relative to model_path)
-        std::filesystem::path model_file;
-        if (model[0] == '/' || model[0] == '~') {
-            // Absolute path
-            model_file = model;
-        } else {
-            // Relative to model_path
-            model_file = std::filesystem::path(model_path) / model;
-        }
-
-        if (!std::filesystem::exists(model_file)) {
-            throw ConfigError("Model file not found: " + model_file.string());
-        }
-    }
-
-    // Validate API key for cloud backends
-    if (backend == "openai" || backend == "anthropic") {
-        if (key.empty()) {
-            throw ConfigError("API key is required for backend: " + backend);
-        }
-    }
-
-    // Validate context size
-    if (context_size > 0 && context_size < 512) {
-        throw ConfigError("Context size must be at least 512 tokens if specified");
+    // Validate global settings only
+    // Memory database size
+    if (max_db_size < 1024 * 1024) {  // Minimum 1MB
+        throw ConfigError("max_db_size must be at least 1MB");
     }
 
     LOG_DEBUG("Configuration validation passed");

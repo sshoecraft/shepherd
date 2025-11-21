@@ -3,6 +3,7 @@
 #include "tools/tools.h"
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
 #include "mcp/mcp.h"
+#include "provider.h"
 #include "api_tools/api_tools.h"
 #include "rag.h"
 #include "server/server.h"
@@ -78,6 +79,8 @@ static void print_usage(int, char** argv) {
 	printf("	%s [OPTIONS]\n", argv[0]);
 	printf("	%s edit-system				Edit system prompt in $EDITOR\n", argv[0]);
 	printf("	%s list-tools				List all available tools\n", argv[0]);
+	printf("	%s provider <add|list|show|remove|use> [args...]\n", argv[0]);
+	printf("	%s config <show|set> [args...]\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s api <add|remove|list> [args...]\n", argv[0]);
 	printf("\nOptions:\n");
@@ -85,6 +88,7 @@ static void print_usage(int, char** argv) {
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
 	printf("	-l, --log-file	   Log to file instead of console\n");
 	printf("	-m, --model		   Model name or file (overrides config)\n");
+	printf("	-p, --provider	   Provider name to use (from provider list)\n");
 	printf("	--model_path	   Model directory path (overrides config, e.g., ~/models)\n");
 	printf("	--backend		   Backend (llamacpp, openai, anthropic, gemini, grok, ollama)\n");
 	printf("	--api-key		   API key for cloud backends\n");
@@ -178,6 +182,192 @@ static void show_config(const Config& config) {
 }
 #endif
 
+static int handle_config_subcommand(int argc, char** argv) {
+	Config cfg;
+	cfg.load();
+
+	if (argc < 3) {
+		std::cout << "Usage: shepherd config <show|set|edit>" << std::endl;
+		return 1;
+	}
+
+	std::string subcmd = argv[2];
+
+	if (subcmd == "show") {
+		std::cout << "=== Shepherd Configuration ===" << std::endl;
+		std::cout << "Warmup: " << (cfg.warmup ? "enabled" : "disabled") << std::endl;
+		std::cout << "Calibration: " << (cfg.calibration ? "enabled" : "disabled") << std::endl;
+		std::cout << "Streaming: " << (cfg.streaming ? "enabled" : "disabled") << std::endl;
+		std::cout << "Truncate limit: " << cfg.truncate_limit << std::endl;
+		std::cout << "Max DB size: " << cfg.max_db_size_str << std::endl;
+		if (!cfg.web_search_provider.empty()) {
+			std::cout << "Web search provider: " << cfg.web_search_provider << std::endl;
+		}
+		if (!cfg.memory_database.empty()) {
+			std::cout << "Memory database: " << cfg.memory_database << std::endl;
+		}
+		return 0;
+	}
+
+	if (subcmd == "set" && argc >= 5) {
+		std::string key = argv[3];
+		std::string value = argv[4];
+
+		if (key == "warmup") {
+			cfg.warmup = (value == "true" || value == "1" || value == "on");
+		} else if (key == "calibration") {
+			cfg.calibration = (value == "true" || value == "1" || value == "on");
+		} else if (key == "streaming") {
+			cfg.streaming = (value == "true" || value == "1" || value == "on");
+		} else if (key == "truncate_limit") {
+			cfg.truncate_limit = std::stoi(value);
+		} else if (key == "max_db_size") {
+			cfg.set_max_db_size(value);
+		} else if (key == "web_search_provider") {
+			cfg.web_search_provider = value;
+		} else {
+			std::cerr << "Unknown config key: " << key << std::endl;
+			return 1;
+		}
+
+		cfg.save();
+		std::cout << "Config updated: " << key << " = " << value << std::endl;
+		return 0;
+	}
+
+	std::cerr << "Unknown config subcommand: " << subcmd << std::endl;
+	std::cerr << "Available: show, set" << std::endl;
+	return 1;
+}
+
+static int handle_provider_subcommand(int argc, char** argv) {
+	Provider provider_manager;
+
+	if (argc < 3) {
+		std::cout << "Usage: shepherd provider <add|list|show|edit|set|remove|use> [args...]" << std::endl;
+		return 1;
+	}
+
+	std::string subcmd = argv[2];
+
+	if (subcmd == "list") {
+		auto providers = provider_manager.list_providers();
+		if (providers.empty()) {
+			std::cout << "No providers configured" << std::endl;
+		} else {
+			std::string current = provider_manager.get_current_provider();
+			std::cout << "Available providers:" << std::endl;
+			for (const auto& name : providers) {
+				if (name == current) {
+					std::cout << "  * " << name << " (current)" << std::endl;
+				} else {
+					std::cout << "    " << name << std::endl;
+				}
+			}
+		}
+		return 0;
+	}
+
+	if (subcmd == "add") {
+		if (argc < 4) {
+			std::cerr << "Usage: shepherd provider add <type> --name <name> [--model <model>] [options...]" << std::endl;
+			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama" << std::endl;
+			return 1;
+		}
+
+		// Command-line mode: shepherd provider add <type> --name <name> ...
+		std::string type = argv[3];
+		std::vector<std::string> args;
+		for (int i = 4; i < argc; i++) {
+			args.push_back(argv[i]);
+		}
+
+		auto new_config = provider_manager.parse_provider_args(type, args);
+
+		if (new_config->name.empty()) {
+			std::cerr << "Error: Provider name is required (use --name <name>)" << std::endl;
+			return 1;
+		}
+
+		provider_manager.save_provider(*new_config);
+		std::cout << "Provider '" << new_config->name << "' added successfully" << std::endl;
+		return 0;
+	}
+
+	if (subcmd == "show") {
+		std::string name = (argc >= 4) ? argv[3] : provider_manager.get_current_provider();
+		if (name.empty()) {
+			std::cout << "No provider specified or configured" << std::endl;
+			return 1;
+		}
+
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found" << std::endl;
+			return 1;
+		}
+
+		std::cout << "Provider: " << prov->name << std::endl;
+		std::cout << "  Type: " << prov->type << std::endl;
+
+		// Type-specific display
+		if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+			std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << std::endl;
+			if (!api->base_url.empty()) {
+				std::cout << "  Base URL: " << api->base_url << std::endl;
+			}
+		}
+		else if (auto* llama = dynamic_cast<LlamaProviderConfig*>(prov)) {
+			std::cout << "  Model Path: " << llama->model_path << std::endl;
+			std::cout << "  TP: " << llama->tp << ", PP: " << llama->pp << std::endl;
+			std::cout << "  GPU Layers: " << llama->gpu_layers << std::endl;
+		}
+
+		std::cout << "  Model: " << prov->model << std::endl;
+		return 0;
+	}
+
+	if (subcmd == "edit" && argc >= 4) {
+		std::string name = argv[3];
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found" << std::endl;
+			return 1;
+		}
+
+		if (provider_manager.interactive_edit(*prov)) {
+			provider_manager.save_provider(*prov);
+			std::cout << "Provider '" << prov->name << "' updated" << std::endl;
+		} else {
+			std::cout << "Edit cancelled" << std::endl;
+		}
+		return 0;
+	}
+
+	if (subcmd == "remove" && argc >= 4) {
+		std::string name = argv[3];
+		provider_manager.remove_provider(name);
+		std::cout << "Provider '" << name << "' removed" << std::endl;
+		return 0;
+	}
+
+	if (subcmd == "use" && argc >= 4) {
+		std::string name = argv[3];
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found" << std::endl;
+			return 1;
+		}
+		provider_manager.set_current_provider(name);
+		std::cout << "Current provider set to: " << name << std::endl;
+		return 0;
+	}
+
+	std::cerr << "Unknown provider subcommand: " << subcmd << std::endl;
+	std::cerr << "Available: list, add, show, edit, set, remove, use" << std::endl;
+	return 1;
+}
+
 static int handle_mcp_command(int argc, char** argv) {
 	if (argc < 3) {
 		std::cerr << "Usage: shepherd mcp <add|remove|list> [args...]" << std::endl;
@@ -185,7 +375,7 @@ static int handle_mcp_command(int argc, char** argv) {
 	}
 
 	std::string subcommand = argv[2];
-	std::string config_path = std::string(getenv("HOME")) + "/.shepherd/config.json";
+	std::string config_path = Config::get_default_config_path();
 
 	if (subcommand == "list") {
 		// Suppress logs during health check
@@ -260,7 +450,7 @@ static int handle_api_command(int argc, char** argv) {
 	}
 
 	std::string subcommand = argv[2];
-	std::string config_path = std::string(getenv("HOME")) + "/.shepherd/config.json";
+	std::string config_path = Config::get_default_config_path();
 
 	if (subcommand == "list") {
 		APIToolConfig::list_tools(config_path, false);
@@ -448,7 +638,7 @@ static int handle_edit_system_command(int argc, char** argv) {
 	unlink(temp_path.c_str());
 
 	// Update config.json
-	std::string config_path = Config::get_home_directory() + "/.shepherd/config.json";
+	std::string config_path = Config::get_default_config_path();
 
 	try {
 		// Read existing config
@@ -730,6 +920,16 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
+	// Handle provider subcommand
+	if (argc >= 2 && std::string(argv[1]) == "provider") {
+		return handle_provider_subcommand(argc, argv);
+	}
+
+	// Handle config subcommand
+	if (argc >= 2 && std::string(argv[1]) == "config") {
+		return handle_config_subcommand(argc, argv);
+	}
+
 	// Handle MCP subcommand
 	if (argc >= 2 && std::string(argv[1]) == "mcp") {
 		return handle_mcp_command(argc, argv);
@@ -749,6 +949,7 @@ int main(int argc, char** argv) {
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	std::string log_file;
 	std::string config_file_path;
+	std::string provider_override;
 	std::string model_override;
 	std::string model_path_override;
 	std::string backend_override;
@@ -770,6 +971,7 @@ int main(int argc, char** argv) {
 		{"debug", optional_argument, 0, 'd'},
 		{"log-file", required_argument, 0, 'l'},
 		{"model", required_argument, 0, 'm'},
+		{"provider", required_argument, 0, 'p'},
 		{"model_path", required_argument, 0, 1018},
 		{"backend", required_argument, 0, 1002},
 		{"api-key", required_argument, 0, 1003},
@@ -800,7 +1002,7 @@ int main(int argc, char** argv) {
 
 	int opt;
 	int option_index = 0;
-	while ((opt = getopt_long(argc, argv, "c:dl:m:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:dl:m:p:vh", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'c':
 				config_file_path = optarg;
@@ -819,6 +1021,9 @@ int main(int argc, char** argv) {
 				break;
 			case 'm':
 				model_override = optarg;
+				break;
+			case 'p':
+				provider_override = optarg;
 				break;
 			case 1018: // --model_path
 				model_path_override = optarg;
@@ -996,7 +1201,7 @@ int main(int argc, char** argv) {
 			config->validate();
 		} catch (const ConfigError& e) {
 			fprintf(stderr, "Configuration error: %s\n", e.what());
-			fprintf(stderr, "Edit ~/.shepherd/config->json or use -h for help\n");
+			fprintf(stderr, "Edit ~/.config/shepherd/config.json or use -h for help\n");
 			return 1;
 		}
 	} else {
@@ -1084,11 +1289,46 @@ int main(int argc, char** argv) {
 			}
 		}
 
-		// Create the backend
-		auto backend = BackendFactory::create_backend(config->backend, context_size);
+		// Create the backend from provider system or legacy config
+		std::unique_ptr<Backend> backend;
+
+		// Check if using command-line overrides (legacy mode)
+		if (!backend_override.empty() || !model_override.empty() || !api_key_override.empty()) {
+			// Legacy mode: create from command-line args
+			LOG_INFO("Using command-line overrides (legacy mode)");
+			backend = BackendFactory::create_backend(config->backend, context_size);
+		} else {
+			// Provider mode: load providers and select by priority or name
+			Provider provider_mgr;
+
+			std::optional<std::string> provider_name;
+
+			// If --provider specified, use that
+			if (!provider_override.empty()) {
+				provider_name = provider_override;
+				LOG_INFO("Using provider from command line: " + provider_override);
+			} else {
+				// Otherwise select highest priority available provider
+				provider_name = provider_mgr.get_highest_priority_provider();
+			}
+
+			if (!provider_name) {
+				fprintf(stderr, "No providers configured. Use 'shepherd provider add' to add a provider.\n");
+				return 1;
+			}
+
+			auto provider_config = provider_mgr.get_provider(*provider_name);
+			if (!provider_config) {
+				fprintf(stderr, "Failed to load provider: %s\n", provider_name->c_str());
+				return 1;
+			}
+
+			LOG_INFO("Using provider: " + *provider_name + " (priority: " + std::to_string(provider_config->priority) + ")");
+			backend = BackendFactory::create_from_provider(provider_config, context_size);
+		}
 
 		if (!backend) {
-			LOG_ERROR("Failed to create backend: " + config->backend);
+			LOG_ERROR("Failed to create backend");
 			return 1;
 		}
 
@@ -1115,9 +1355,9 @@ int main(int argc, char** argv) {
 			} else {
 				// Default
 				try {
-					db_path = Config::get_home_directory() + "/.shepherd/memory.db";
+					db_path = Config::get_default_memory_db_path();
 				} catch (const ConfigError& e) {
-					LOG_ERROR("Failed to determine home directory: " + std::string(e.what()));
+					LOG_ERROR("Failed to determine memory database path: " + std::string(e.what()));
 					return 1;
 				}
 			}

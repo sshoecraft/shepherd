@@ -71,6 +71,19 @@ public:
                             StreamCallback callback,
                             void* user_data = nullptr);
 
+    /// @brief Perform HTTP POST request with streaming response (cancellable via escape key)
+    /// @param url Full URL to request
+    /// @param body Request body (typically JSON)
+    /// @param headers Optional custom headers
+    /// @param callback Callback function for each chunk
+    /// @param user_data User data passed to callback
+    /// @return Response object (body will be empty as it's streamed)
+    HttpResponse post_stream_cancellable(const std::string& url,
+                                         const std::string& body,
+                                         const std::map<std::string, std::string>& headers,
+                                         StreamCallback callback,
+                                         void* user_data = nullptr);
+
     /// @brief Set request timeout in seconds
     /// @param timeout_seconds Timeout in seconds (0 = no timeout)
     void set_timeout(long timeout_seconds);
@@ -90,6 +103,7 @@ public:
 private:
 #ifdef ENABLE_API_BACKENDS
     CURL* curl_ = nullptr;
+    CURLM* multi_handle_ = nullptr;
     long timeout_seconds_ = 0; // No timeout by default
     bool ssl_verify_ = true;
     bool verbose_ = false;

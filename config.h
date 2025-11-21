@@ -30,6 +30,12 @@ public:
     // Get user's home directory (tries getpwuid first, then HOME env var)
     static std::string get_home_directory();
 
+    // Get default config path (XDG-compliant)
+    static std::string get_default_config_path();
+
+    // Get default memory database path (XDG-compliant)
+    static std::string get_default_memory_db_path();
+
 
     // Set custom config file path (for command-line override)
     void set_config_path(const std::string& config_path) { custom_config_path_ = config_path; }
@@ -45,13 +51,6 @@ public:
     std::string warmup_message;
     bool warmup;
     bool calibration;
-    std::string backend;
-    std::string model;
-    std::string model_path;
-    size_t context_size;
-    std::string key;
-    std::string api_base;
-    std::string models_file;
     std::string system_prompt;
     std::string mcp_config;
     std::string memory_database;
@@ -62,7 +61,16 @@ public:
     std::string web_search_instance_url;
     int truncate_limit;
     bool streaming;
-    nlohmann::json json;  // Parsed config JSON for backends
+    nlohmann::json json;  // Parsed config JSON for backend-specific settings
+
+    // Legacy/runtime fields (not saved to config, only used for command-line overrides)
+    std::string backend;
+    std::string model;
+    std::string model_path;
+    size_t context_size;
+    std::string key;
+    std::string api_base;
+    std::string models_file;
 
 private:
     // Internal helpers

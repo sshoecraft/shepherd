@@ -113,6 +113,16 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
             return resp;
         }
 
+        // Check if request was cancelled by user
+        if (resp.error == "Request cancelled by user") {
+            LOG_INFO("Request cancelled by user");
+            // Don't disable streaming - cancellation is not a failure
+            // Return a special cancelled response
+            resp.code = Response::ERROR;
+            resp.finish_reason = "cancelled";
+            return resp;
+        }
+
         // Streaming failed - disable it and fall through to non-streaming
         LOG_WARN("Streaming failed, disabling for future messages: " + resp.error);
         streaming_enabled = false;

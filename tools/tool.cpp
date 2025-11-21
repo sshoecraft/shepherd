@@ -80,9 +80,9 @@ std::string ToolRegistry::get_tools_as_system_prompt() const {
         }
     }
 
-    // Add memory tools first
+    // Add memory tools first (only enabled ones)
     for (const auto& tool_name : memory_tools) {
-        if (tool_descriptions.find(tool_name) != tool_descriptions.end()) {
+        if (tool_descriptions.find(tool_name) != tool_descriptions.end() && enabled(tool_name)) {
             Tool* tool = get_tool(tool_name);
             if (tool) {
                 prompt += "- " + tool_name + ": " + tool_descriptions[tool_name] + " (parameters: " + tool->parameters() + ")\n";
@@ -90,8 +90,11 @@ std::string ToolRegistry::get_tools_as_system_prompt() const {
         }
     }
 
-    // Add other tools
+    // Add other tools (only enabled ones)
     for (const auto& tool_name : other_tools) {
+        if (!enabled(tool_name)) {
+            continue;  // Skip disabled tools
+        }
         Tool* tool = get_tool(tool_name);
         if (tool) {
             prompt += "- " + tool_name + ": " + tool_descriptions[tool_name] + " (parameters: " + tool->parameters() + ")\n";
@@ -111,10 +114,15 @@ std::string ToolRegistry::get_tools_as_system_prompt() const {
 ToolResult execute_tool(const std::string& tool_name,
                        const std::map<std::string, std::any>& parameters) {
     // Get tool from registry
-    Tool* tool = ToolRegistry::instance().get_tool(tool_name);
+    auto& registry = ToolRegistry::instance();
+    Tool* tool = registry.get_tool(tool_name);
 
     if (!tool) {
         return ToolResult(false, "", "Tool not found: " + tool_name);
+    }
+
+    if (!registry.enabled(tool_name)) {
+        return ToolResult(false, "", "Tool is disabled: " + tool_name);
     }
 
     try {
@@ -227,4 +235,29 @@ namespace tool_utils {
         }
         return default_value;
     }
+}
+
+void ToolRegistry::enable_tool(const std::string& name) {
+    std::string lowercase_name = name;
+    std::transform(lowercase_name.begin(), lowercase_name.end(), lowercase_name.begin(), ::tolower);
+    tool_enabled[lowercase_name] = true;
+}
+
+void ToolRegistry::disable_tool(const std::string& name) {
+    std::string lowercase_name = name;
+    std::transform(lowercase_name.begin(), lowercase_name.end(), lowercase_name.begin(), ::tolower);
+    tool_enabled[lowercase_name] = false;
+}
+
+bool ToolRegistry::enabled(const std::string& name) const {
+    std::string lowercase_name = name;
+    std::transform(lowercase_name.begin(), lowercase_name.end(), lowercase_name.begin(), ::tolower);
+
+    auto it = tool_enabled.find(lowercase_name);
+    if (it != tool_enabled.end()) {
+        return it->second;
+    }
+
+    // Default to true if not found
+    return true;
 }

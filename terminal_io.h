@@ -38,6 +38,7 @@ public:
     bool show_thinking;
     std::string buffered_tool_call;     // Tool call content if detected
     std::string buffered_thinking;      // Thinking content (if show_thinking=true)
+    bool last_char_was_newline;         // Track if last output char was newline
 
     // Constructor/Destructor
     TerminalIO();
@@ -58,6 +59,11 @@ public:
 
     // Reset output filtering state between requests (deprecated - use begin_response/end_response)
     void reset();
+
+    // Terminal control for escape key detection
+    void set_raw_mode();
+    void restore_terminal();
+    bool check_escape_pressed();
 
 private:
     // Input queue
@@ -86,7 +92,6 @@ private:
     bool suppress_output;
     std::string tag_buffer;
     std::string current_tag;
-    bool last_char_was_newline;  // Track if we're at start of a new line
 
     // Private methods
     std::string get_input_line(const char* prompt);
@@ -97,11 +102,6 @@ private:
     // Output filtering helpers
     bool matches_any(const std::string& buffer, const std::vector<std::string>& markers, std::string* matched = nullptr) const;
     bool could_match_any(const std::string& buffer, const std::vector<std::string>& markers) const;
-
-    // Terminal control (unused for now)
-    void set_raw_mode();
-    void restore_terminal();
-    bool check_escape_pressed();
 };
 
 // Global instance

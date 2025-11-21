@@ -60,6 +60,7 @@ void LlamaCppBackend::parse_backend_config() {
         if (config->json.contains("penalty_present")) penalty_present = config->json["penalty_present"].get<float>();
         if (config->json.contains("penalty_last_n")) penalty_last_n = config->json["penalty_last_n"].get<int>();
         if (config->json.contains("gpu_layers")) gpu_layers = config->json["gpu_layers"].get<int>();
+        if (config->json.contains("context_size")) context_size = config->json["context_size"].get<size_t>();
 
         // Accept both full names and short names for tensor/pipeline parallel
         if (config->json.contains("tensor_parallel")) tensor_parallel = config->json["tensor_parallel"].get<int>();
@@ -453,21 +454,30 @@ std::string LlamaCppBackend::generate(int max_tokens) {
             );
 
             if (!params.preserved_tokens.empty()) {
-                tool_call_markers = params.preserved_tokens;
-                LOG_INFO("Extracted " + std::to_string(tool_call_markers.size()) + " tool call markers from template:");
-                for (const auto& marker : tool_call_markers) {
-                    LOG_INFO("  - " + marker);
-                }
+                LOG_INFO("Extracted " + std::to_string(params.preserved_tokens.size()) + " preserved tokens from template:");
 
-                // Populate model_config with tool markers and infer end markers
-                model_config.tool_call_start_markers = tool_call_markers;
-                // Infer end markers from start markers (add closing slash)
-                for (const auto& start_marker : tool_call_markers) {
-                    if (start_marker.front() == '<' && start_marker.back() == '>') {
-                        std::string end_marker = "</" + start_marker.substr(1);
-                        model_config.tool_call_end_markers.push_back(end_marker);
+                // Separate start and end markers
+                std::vector<std::string> start_markers;
+                std::vector<std::string> end_markers;
+
+                for (const auto& marker : params.preserved_tokens) {
+                    LOG_INFO("  - " + marker);
+
+                    if (marker.size() >= 3 && marker[0] == '<' && marker[1] == '/') {
+                        // This is a closing tag
+                        end_markers.push_back(marker);
+                    } else if (marker.size() >= 2 && marker[0] == '<') {
+                        // This is an opening tag or self-contained tag
+                        start_markers.push_back(marker);
                     }
                 }
+
+                tool_call_markers = start_markers;
+                model_config.tool_call_start_markers = start_markers;
+                model_config.tool_call_end_markers = end_markers;
+
+                LOG_INFO("Separated into " + std::to_string(start_markers.size()) + " start markers and " +
+                        std::to_string(end_markers.size()) + " end markers");
             } else {
                 LOG_INFO("No preserved_tokens from template - checking vocabulary");
 
@@ -499,6 +509,15 @@ std::string LlamaCppBackend::generate(int max_tokens) {
         } catch (const std::exception& e) {
             LOG_INFO("Exception during tool marker extraction: " + std::string(e.what()));
             have_tool_markers = true;
+        }
+
+        // If no tool markers were found, add common fallback markers
+        if (tool_call_markers.empty()) {
+            LOG_INFO("No tool markers found from template, adding fallback markers");
+            tool_call_markers.push_back("<tool_call");
+            tool_call_markers.push_back("<function_call");
+            model_config.tool_call_start_markers = tool_call_markers;
+            model_config.tool_call_end_markers = {"</tool_call>", "</function_call>"};
         }
     }
 
@@ -575,9 +594,9 @@ std::string LlamaCppBackend::generate(int max_tokens) {
         }
     }
 
-    // Suppress streaming when tools are available OR in server mode
-    // Server mode should NEVER stream output (it goes to server.log)
-    bool suppress_stream = g_server_mode || !available_tools.empty();
+    // Suppress streaming in server mode (output goes to server.log)
+    // Tools are OK with streaming - the terminal filter will hide <tool_call> tags
+    bool suppress_stream = g_server_mode;
     std::string raw_response = run_inference("", max_tokens, suppress_stream);  // Empty prompt since everything is cached
     LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
     LOG_DEBUG("Raw response content: " + raw_response);
@@ -737,6 +756,19 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     std::string response;
     int n_generated = 0;
 
+    // Initialize terminal filtering for this response
+    extern TerminalIO tio;
+    // Update markers in case model was just loaded (they're extracted from template during init_model)
+    if (tio.markers.tool_call_start.empty() && !tool_call_markers.empty()) {
+        tio.markers.tool_call_start = tool_call_markers;
+        tio.markers.tool_call_end = model_config.tool_call_end_markers;
+    }
+    tio.begin_response();
+
+    // Enable raw mode for escape key detection during generation
+    tio.set_raw_mode();
+    bool cancelled_by_escape = false;
+
     // Calculate max generation tokens: context_size - system - current_user
     // These token counts include ALL template overhead (saved when messages were decoded)
     int available_for_generation = static_cast<int>(context_size) - system_formatted_tokens - current_user_formatted_tokens;
@@ -757,6 +789,13 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Check for cancellation (from SIGUSR1 signal)
         if (g_generation_cancelled) {
             LOG_INFO("Generation cancelled by signal");
+            break;
+        }
+
+        // Check for escape key press
+        if (tio.check_escape_pressed()) {
+            LOG_INFO("Generation cancelled by escape key");
+            cancelled_by_escape = true;
             break;
         }
 
@@ -821,9 +860,13 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     if (n_generated > 0) {
         int context_used = get_context_token_count();
         int context_max = context_size;
-        std::cerr << "\033[90m[Decode: " << n_generated << " tokens, "
+
+        // Ensure stats appear on their own line (only add newline if needed)
+        extern TerminalIO tio;
+        std::cerr << (tio.last_char_was_newline ? "" : "\n")
+                  << "\033[90m[Decode: " << n_generated << " tokens, "
                   << std::fixed << std::setprecision(1) << tokens_per_second << " t/s, "
-                  << "context: " << context_used << "/" << context_max << "]\033[0m" << std::endl;
+                  << "context: " << context_used << "/" << context_max << "]\033[0m\n";
     }
 
     LOG_INFO("Generation (decode): " + std::to_string(n_generated) + " tokens in " +
@@ -837,6 +880,17 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     if (last_generation_hit_length_limit) {
         LOG_DEBUG("Generation stopped due to max_tokens limit (" + std::to_string(max_gen_tokens) + " tokens)");
     }
+
+    // Set cancellation flag if escape was pressed
+    if (cancelled_by_escape) {
+        g_generation_cancelled = true;
+    }
+
+    // Restore terminal to normal mode
+    tio.restore_terminal();
+
+    // Finalize terminal filtering for this response
+    tio.end_response();
 
     return response;
 #else
@@ -1776,7 +1830,9 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
 
         // Determine finish reason
         std::string finish_reason = "stop";
-        if (!tool_calls.empty()) {
+        if (g_generation_cancelled) {
+            finish_reason = "cancelled";
+        } else if (!tool_calls.empty()) {
             finish_reason = "tool_calls";
         } else if (last_generation_hit_length_limit) {
             finish_reason = "length";
@@ -1788,6 +1844,7 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
         resp.prompt_tokens = last_prompt_tokens;
         resp.completion_tokens = last_completion_tokens;
         resp.finish_reason = finish_reason;
+        resp.was_streamed = !g_server_mode;  // Streamed unless in server mode
     } else {
         // System message - no generation, just success
         resp.finish_reason = "system";

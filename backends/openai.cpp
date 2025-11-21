@@ -954,6 +954,12 @@ Response OpenAIBackend::add_message_stream(Session& session,
                             accumulated_resp.prompt_tokens = usage.value("prompt_tokens", 0);
                             accumulated_resp.completion_tokens = usage.value("completion_tokens", 0);
                         }
+                        // Fallback: parse llama.cpp timings format if usage not present
+                        else if (delta_json.contains("timings")) {
+                            const auto& timings = delta_json["timings"];
+                            accumulated_resp.prompt_tokens = timings.value("prompt_n", 0);
+                            accumulated_resp.completion_tokens = timings.value("predicted_n", 0);
+                        }
 
                     } catch (const std::exception& e) {
                         LOG_WARN("Failed to parse SSE data: " + std::string(e.what()));
@@ -967,9 +973,9 @@ Response OpenAIBackend::add_message_stream(Session& session,
             return true;
         };
 
-        // Make streaming HTTP call
-        HttpResponse http_response = http_client->post_stream(endpoint, request.dump(), headers,
-                                                             stream_handler, nullptr);
+        // Make streaming HTTP call (cancellable via escape key)
+        HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                           stream_handler, nullptr);
 
         // Check for HTTP errors
         if (!http_response.is_success()) {

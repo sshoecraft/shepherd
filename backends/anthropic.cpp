@@ -635,9 +635,9 @@ Response AnthropicBackend::add_message_stream(Session& session,
             return true;
         };
 
-        // Make streaming HTTP call
-        HttpResponse http_response = http_client->post_stream(endpoint, request.dump(), headers,
-                                                             stream_handler, nullptr);
+        // Make streaming HTTP call (cancellable via escape key)
+        HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                           stream_handler, nullptr);
 
         // Check for HTTP errors
         if (!http_response.is_success()) {

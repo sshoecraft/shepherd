@@ -20,6 +20,63 @@
 #include "terminal_io.h"
 
 
+// Helper function to convert ToolRegistry tools to Session::Tool format
+static std::vector<Session::Tool> convert_registry_to_session_tools(ToolRegistry& registry) {
+    std::vector<Session::Tool> session_tools;
+    for (const auto& tool_name : registry.list_tools()) {
+        Tool* tool = registry.get_tool(tool_name);
+        if (tool) {
+            Session::Tool session_tool;
+            session_tool.name = tool->name();
+            session_tool.description = tool->description();
+
+            // Try to get structured schema first
+            auto param_defs = tool->get_parameters_schema();
+            if (!param_defs.empty()) {
+                // Build JSON schema from ParameterDef structs
+                nlohmann::json schema;
+                schema["type"] = "object";
+                schema["properties"] = nlohmann::json::object();
+                nlohmann::json required_fields = nlohmann::json::array();
+
+                for (const auto& param : param_defs) {
+                    nlohmann::json prop;
+                    prop["type"] = param.type;
+                    if (!param.description.empty()) {
+                        prop["description"] = param.description;
+                    }
+                    schema["properties"][param.name] = prop;
+
+                    if (param.required) {
+                        required_fields.push_back(param.name);
+                    }
+                }
+
+                if (!required_fields.empty()) {
+                    schema["required"] = required_fields;
+                }
+
+                session_tool.parameters = schema;
+            } else {
+                // Fallback: try parsing legacy parameters()
+                try {
+                    session_tool.parameters = nlohmann::json::parse(tool->parameters());
+                } catch (const std::exception& e) {
+                    // Create basic empty schema
+                    session_tool.parameters = {
+                        {"type", "object"},
+                        {"properties", nlohmann::json::object()},
+                        {"required", nlohmann::json::array()}
+                    };
+                }
+            }
+
+            session_tools.push_back(session_tool);
+        }
+    }
+    return session_tools;
+}
+
 // LlamaCppBackend implementation
 LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
     : Backend(max_context_tokens),
@@ -414,7 +471,7 @@ int LlamaCppBackend::get_context_token_count() const {
 #endif
 }
 
-std::string LlamaCppBackend::generate(int max_tokens) {
+std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
     LOG_DEBUG("=== GENERATE START ===");
     if (!is_ready()) {
         throw std::runtime_error("LlamaCpp backend not initialized");
@@ -563,8 +620,8 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     LOG_DEBUG("Running generation (messages already cached)");
 
     // Before generation, we need to add the generation prompt to KV cache
-    // Use model-specific tag from config (no hardcoded model family checks!)
-    std::string generation_prompt = model_config.assistant_start_tag;
+    // Use chat template to get the generation prompt
+    std::string generation_prompt = chat_template->get_generation_prompt();
 
     // Declare these outside the if block so they're accessible later
     llama_context* ctx = static_cast<llama_context*>(model_ctx);
@@ -597,12 +654,14 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     // Suppress streaming in server mode (output goes to server.log)
     // Tools are OK with streaming - the terminal filter will hide <tool_call> tags
     bool suppress_stream = g_server_mode;
-    std::string raw_response = run_inference("", max_tokens, suppress_stream);  // Empty prompt since everything is cached
+    std::string raw_response = run_inference("", max_tokens, suppress_stream, callback);  // Empty prompt since everything is cached
     LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
-    LOG_DEBUG("Raw response content: " + raw_response);
+    // Log first 500 chars to avoid terminal truncation issues
+    std::string debug_content = raw_response.length() > 500 ? raw_response.substr(0, 500) + "..." : raw_response;
+    LOG_DEBUG("Raw response content: " + debug_content);
 
-    // Write full response to debug file for inspection
-    if (getenv("SHEPHERD_DEBUG_RESPONSES")) {
+    // Always write full response to debug file for inspection
+    {
         std::ofstream debug_file("/tmp/shepherd_response_debug.txt", std::ios::app);
         debug_file << "=== Response at " << std::time(nullptr) << " ===\n";
         debug_file << raw_response << "\n";
@@ -614,12 +673,13 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     // The generation prompt added assistant_start_tag, and run_inference() generated tokens,
     // but we never added the assistant_end_tag closing tag! This causes malformed context on next generate()
     int n_closing = 0;
-    if (!model_config.assistant_end_tag.empty()) {
+    std::string assistant_end_tag = chat_template->get_assistant_end_tag();
+    if (!assistant_end_tag.empty()) {
         // Tokenize and add the closing tag to KV cache
         const llama_vocab* vocab = llama_model_get_vocab(mdl);
         std::vector<llama_token> closing_tokens(16);
-        n_closing = llama_tokenize(vocab, model_config.assistant_end_tag.c_str(),
-                                    model_config.assistant_end_tag.length(),
+        n_closing = llama_tokenize(vocab, assistant_end_tag.c_str(),
+                                    assistant_end_tag.length(),
                                     closing_tokens.data(), closing_tokens.size(), false, true);
 
         if (n_closing > 0) {
@@ -628,7 +688,7 @@ std::string LlamaCppBackend::generate(int max_tokens) {
             if (llama_decode(ctx, closing_batch) != 0) {
                 LOG_WARN("Failed to decode closing tag into KV cache");
             } else {
-                LOG_DEBUG("Added closing tag to KV cache: " + model_config.assistant_end_tag);
+                LOG_DEBUG("Added closing tag to KV cache: " + assistant_end_tag);
             }
         }
     }
@@ -653,7 +713,7 @@ std::string LlamaCppBackend::generate(int max_tokens) {
     return raw_response;
 }
 
-std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming) {
+std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming, StreamCallback callback) {
 #ifdef ENABLE_LLAMACPP
     // Reset cancellation flag at start of generation
     g_generation_cancelled = false;
@@ -802,6 +862,13 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Sample next token
         llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
 
+        int32_t n_vocab = llama_vocab_n_tokens(vocab);
+        LOG_DEBUG("Sampled token: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")");
+        if (next_token < 0 || next_token >= n_vocab) {
+            LOG_ERROR("Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")");
+            break;
+        }
+
         // Check for end of generation using llama.cpp's native EOG detection
         // This handles all model-specific end tokens automatically
         if (llama_vocab_is_eog(vocab, next_token)) {
@@ -815,12 +882,25 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Convert token to text (filter special tokens with false parameter)
         char token_str[256];
         int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, false);
+        LOG_DEBUG("Token " + std::to_string(next_token) + " -> len=" + std::to_string(token_len));
 
         if (token_len > 0) {
             // Accumulate for final response
             response.append(token_str, token_len);
 
-            // Stream output only if not suppressed (suppressed for tool calls)
+            // Call streaming callback if provided (for API server streaming)
+            if (callback) {
+                Response partial_resp;
+                partial_resp.content = response;
+                partial_resp.success = true;
+                std::string delta(token_str, token_len);
+                if (!callback(delta, response, partial_resp)) {
+                    // Callback returned false - stop generation
+                    break;
+                }
+            }
+
+            // Stream output to terminal only if not suppressed (suppressed for tool calls)
             if (!suppress_streaming) {
                 tio.write(token_str, token_len);
             }
@@ -963,60 +1043,21 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
 
 std::string LlamaCppBackend::render_message(const Message& msg, bool add_generation_prompt) {
 #ifdef ENABLE_LLAMACPP
-    if (!template_node) {
-        LOG_ERROR("No template node available, falling back to simple format");
+    if (!chat_template) {
+        LOG_ERROR("No chat template available, falling back to simple format");
         return msg.get_role() + ": " + msg.content + "\n\n";
     }
 
-    // Get the actual template node from the void pointer
-    auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
+    // Use the chat template to format the message
+    std::string formatted = chat_template->format_message(msg);
 
-    // Create minja context
-    auto context = minja::Context::builtins();
-
-    // Provide strftime_now function for current date
-    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
-        if (args.args.empty()) return minja::Value("");
-        std::string format = args.args[0].get<std::string>();
-
-        time_t now = time(nullptr);
-        struct tm* tm_info = localtime(&now);
-        char buffer[128];
-        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
-        return minja::Value(std::string(buffer));
-    });
-    context->set("strftime_now", strftime_now);
-
-    // Set date_string directly (like llama.cpp does)
-    time_t now = time(nullptr);
-    struct tm* tm_info = localtime(&now);
-    char date_buffer[128];
-    strftime(date_buffer, sizeof(date_buffer), "%d %b %Y", tm_info);
-    context->set("date_string", minja::Value(std::string(date_buffer)));
-
-    // Convert single message to minja array with just one element
-    auto messages = minja::Value::array();
-    auto msg_obj = minja::Value::object();
-    msg_obj.set("role", minja::Value(msg.get_role()));
-    msg_obj.set("content", minja::Value(msg.content));
-
-    // Add tool metadata if present
-    if (!msg.tool_name.empty()) {
-        msg_obj.set("name", minja::Value(msg.tool_name));
-    }
-    if (!msg.tool_call_id.empty()) {
-        msg_obj.set("tool_call_id", minja::Value(msg.tool_call_id));
+    // Add generation prompt if requested
+    if (add_generation_prompt && msg.get_role() == "user") {
+        formatted += chat_template->get_generation_prompt();
     }
 
-    messages.push_back(msg_obj);
-
-    context->set("bos_token", minja::Value("<|begin_of_text|>"));
-    context->set("messages", messages);
-    context->set("add_generation_prompt", minja::Value(add_generation_prompt));
-
-    std::string rendered = (*template_ptr)->render(context);
-    LOG_DEBUG("Rendered message (" + std::to_string(rendered.length()) + " chars, role=" + msg.get_role() + ")");
-    return rendered;
+    LOG_DEBUG("Rendered message (" + std::to_string(formatted.length()) + " chars, role=" + msg.get_role() + ")");
+    return formatted;
 #else
     // Fallback when llama.cpp not available
     return msg.get_role() + ": " + msg.content + "\n\n";
@@ -1231,42 +1272,13 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
 
         LOG_DEBUG("Adding system message to KV cache");
 
-        // Format system message with tools
-        // If session.tools is populated (API mode), build tool descriptions from it
-        // Otherwise use ToolRegistry (CLI mode)
-        auto& registry = ToolRegistry::instance();
-        bool has_session_tools = !session.tools.empty();
+        // Format system message with tools using chat template
+        // If session.tools is populated (API mode), use those; otherwise convert from ToolRegistry (CLI mode)
+        std::vector<Session::Tool> tools = session.tools.empty() ?
+            convert_registry_to_session_tools(ToolRegistry::instance()) : session.tools;
 
-        std::string formatted_system;
-        if (has_session_tools) {
-            // Build tool descriptions from session.tools for API mode
-            std::vector<std::pair<std::string, std::string>> tool_descriptions;
-            for (const auto& tool : session.tools) {
-                tool_descriptions.push_back({tool.name, tool.description});
-            }
-
-            // Format system message with inline tool descriptions
-            formatted_system = session.system_message.empty() ?
-                "You are a helpful AI assistant." : session.system_message;
-
-            if (!tool_descriptions.empty()) {
-                formatted_system += "\n\n# Tools\n\nYou have access to the following tools:\n\n";
-                for (const auto& [name, desc] : tool_descriptions) {
-                    formatted_system += "- " + name + ": " + desc + "\n";
-                }
-                formatted_system += "\nTo use a tool, output XML in this format:\n";
-                formatted_system += "<tool_call>\n<name>tool_name</name>\n<parameters>{\"param\":\"value\"}</parameters>\n</tool_call>";
-            }
-            LOG_DEBUG("Formatted system prompt with " + std::to_string(session.tools.size()) + " tools from session");
-        } else {
-            // Use ToolRegistry for CLI mode
-            formatted_system = Models::format_system_message(
-                model_config,
-                session.system_message,
-                registry,
-                template_node
-            );
-        }
+        std::string formatted_system = chat_template->format_system_message(session.system_message, tools);
+        LOG_DEBUG("Formatted system prompt with " + std::to_string(tools.size()) + " tools");
 
         // Create system message
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
@@ -1360,8 +1372,8 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
     LOG_DEBUG("Server mode generation - system_tokens=" + std::to_string(system_formatted_tokens) +
               ", user_tokens=" + std::to_string(current_user_formatted_tokens));
 
-    // Generate response
-    std::string result = generate(max_tokens);
+    // Generate response (pass streaming callback if provided)
+    std::string result = generate(max_tokens, callback);
 
     // Wrap in Response
     Response success_resp;
@@ -1473,10 +1485,14 @@ void LlamaCppBackend::initialize(Session& session) {
         }
 
         if (num_gpus_for_splitting != 0) {
-            // Multi-GPU with ROW split mode (tensor parallelism + layer splitting)
-            // ROW mode is more aggressive and splits both layers AND tensors across GPUs
-            // This is essential for very large models (>100B parameters)
-            model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
+            // Multi-GPU support: choose split mode based on TP vs PP
+            // LAYER mode = pipeline parallelism (splits layers, no P2P needed)
+            // ROW mode = tensor parallelism (splits tensors, requires P2P)
+            if (tensor_parallel > 1) {
+                model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
+            } else {
+                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+            }
             model_params.main_gpu = 0;
 
             // Configure tensor_split array to distribute model across GPUs
@@ -1514,11 +1530,53 @@ void LlamaCppBackend::initialize(Session& session) {
                 LOG_INFO("Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with ROW split mode (consider using --pp for clarity)");
             }
         } else {
-            // Single GPU only, no splitting
-            model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
-            model_params.main_gpu = 0;
-            model_params.tensor_split = nullptr;
-            LOG_INFO("Single GPU mode (no splitting)");
+            // No explicit TP/PP specified - auto-detect GPUs
+            size_t dev_count = ggml_backend_dev_count();
+            int cuda_gpu_count = 0;
+            for (size_t i = 0; i < dev_count; i++) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                if (dev) {
+                    const char* dev_name = ggml_backend_dev_name(dev);
+                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                        cuda_gpu_count++;
+                    }
+                }
+            }
+
+            if (cuda_gpu_count > 1) {
+                // Multiple GPUs detected - auto-split layers across them
+                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+                model_params.main_gpu = 0;
+
+                // Configure tensor_split array for equal distribution
+                tensor_split.resize(128, 0.0f);
+                for (int i = 0; i < cuda_gpu_count && i < 128; i++) {
+                    tensor_split[i] = 1.0f;
+                }
+                model_params.tensor_split = tensor_split.data();
+
+                // Configure devices array
+                gpu_devices.clear();
+                for (size_t i = 0; i < dev_count && (int)gpu_devices.size() < cuda_gpu_count; i++) {
+                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                    if (dev) {
+                        const char* dev_name = ggml_backend_dev_name(dev);
+                        if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                            gpu_devices.push_back(static_cast<void*>(dev));
+                        }
+                    }
+                }
+                gpu_devices.push_back(nullptr);
+                model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices.data());
+
+                LOG_INFO("Auto-detected " + std::to_string(cuda_gpu_count) + " GPUs, using layer split mode");
+            } else {
+                // Single GPU only, no splitting
+                model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
+                model_params.main_gpu = 0;
+                model_params.tensor_split = nullptr;
+                LOG_INFO("Single GPU mode (no splitting)");
+            }
         }
 
         LOG_INFO("GPU detected, offloading layers to GPU (n_gpu_layers=" + std::to_string(model_params.n_gpu_layers) + ")");
@@ -1656,6 +1714,10 @@ void LlamaCppBackend::initialize(Session& session) {
              ", uses_eom_token=" + (model_config.uses_eom_token ? "true" : "false") +
              ", uses_python_tag=" + (model_config.uses_python_tag ? "true" : "false"));
 
+    // Create chat template instance
+    chat_template = ChatTemplates::ChatTemplateFactory::create(chat_template_text, model_config, template_node);
+    LOG_INFO("Created chat template for family: " + std::to_string(static_cast<int>(model_config.family)));
+
     // Try to load sampling parameters from generation_config.json
     // Priority: config file values > generation_config.json > hardcoded defaults
     std::filesystem::path model_file_path(model_path);
@@ -1677,13 +1739,11 @@ void LlamaCppBackend::initialize(Session& session) {
 
     // Add system message in cli mode
 	if (!g_server_mode) {
-        // Format system message with tools
-        std::string formatted_system = Models::format_system_message(
-            model_config,
-            session.system_message,
-            ToolRegistry::instance(),
-            template_node
-        );
+        // Convert ToolRegistry to Session::Tool format
+        std::vector<Session::Tool> tools = convert_registry_to_session_tools(ToolRegistry::instance());
+
+        // Format system message with tools using chat template
+        std::string formatted_system = chat_template->format_system_message(session.system_message, tools);
 
         // Use add_message to properly decode and add system message
         // This ensures it's in KV cache before being added to session.messages
@@ -1725,12 +1785,10 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     int message_tokens = prompt_tokens;
     if (message_tokens == 0) {
         if (type == Message::SYSTEM && !session.tools.empty()) {
-            std::string formatted_content = Models::format_system_message(
-                model_config,
-                content,
-                ToolRegistry::instance(),
-                template_node
-            );
+            // Convert tools and format system message using chat template
+            std::vector<Session::Tool> tools = session.tools.empty() ?
+                convert_registry_to_session_tools(ToolRegistry::instance()) : session.tools;
+            std::string formatted_content = chat_template->format_system_message(content, tools);
             message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
         } else {
             message_tokens = count_message_tokens(type, content, tool_name, tool_id);

@@ -177,13 +177,19 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 			// Command-line mode: /provider add <type> --name <name> ...
 			std::string type = args[1];
 			std::vector<std::string> cmd_args(args.begin() + 2, args.end());
-			auto new_config = provider_manager.parse_provider_args(type, cmd_args);
 
-			if (new_config->name.empty()) {
-				std::cout << "Error: Provider name is required (use --name <name>)\n";
-			} else {
-				provider_manager.save_provider(*new_config);
-				std::cout << "Provider '" << new_config->name << "' added successfully\n";
+			try {
+				auto new_config = provider_manager.parse_provider_args(type, cmd_args);
+
+				if (new_config->name.empty()) {
+					std::cout << "Error: Provider name is required (use --name <name>)\n";
+				} else {
+					provider_manager.save_provider(*new_config);
+					std::cout << "Provider '" << new_config->name << "' added successfully\n";
+				}
+			} catch (const std::exception& e) {
+				std::cout << "Error: " << e.what() << "\n";
+				std::cout << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
 			}
 			return true;
 		}

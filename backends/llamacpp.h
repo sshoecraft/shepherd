@@ -3,6 +3,7 @@
 #include "shepherd.h"
 #include "backend.h"
 #include "models.h"
+#include "chat_template.h"
 #include "llama.cpp/vendor/minja/minja.hpp"
 #include <regex>
 
@@ -69,14 +70,15 @@ protected:
 private:
     // Internal methods (not part of public interface)
     bool initialize_old(const std::string& model_path, const std::string& api_key = "", const std::string& template_path = "");
-    std::string generate(int max_tokens = 0);
+    std::string generate(int max_tokens = 0, StreamCallback callback = nullptr);
 
     /// @brief Run inference using llama.cpp
     /// @param prompt_text The text to generate from
     /// @param max_tokens Maximum tokens to generate
     /// @param suppress_streaming Don't stream output (for tool calls)
+    /// @param callback Optional streaming callback for token-by-token output
     /// @return Generated text response
-    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false);
+    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, StreamCallback callback = nullptr);
 
     /// @brief Parse JSON arguments from tool call
     std::map<std::string, std::any> parse_json_to_args(const std::string& json);
@@ -132,8 +134,11 @@ private:
     // Chat templates for tool handling - use void* to avoid complex forward declarations
     void* chat_templates = nullptr;
 
-    // Parsed minja template node for message rendering
+    // Parsed minja template node for message rendering (kept for MinjaTemplate)
     void* template_node = nullptr; // std::shared_ptr<minja::TemplateNode>*
+
+    // Chat template instance
+    std::unique_ptr<ChatTemplates::ChatTemplate> chat_template;
 
     // Tool call markers extracted from chat template (e.g., "<|python_tag|>")
     std::vector<std::string> tool_call_markers;

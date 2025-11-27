@@ -4,6 +4,7 @@
 #include "../backends/backend.h"
 #include "../tools/tool_parser.h"
 #include "../http_client.h"
+#include "../config.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -15,8 +16,131 @@
 
 using json = nlohmann::json;
 
+// External config
+extern std::unique_ptr<Config> config;
+
 // Global mutex to serialize backend requests (single-threaded processing)
 static std::mutex backend_mutex;
+
+// Sanitize string to valid UTF-8 by replacing invalid sequences with replacement char
+static std::string sanitize_utf8(const std::string& input) {
+    std::string output;
+    output.reserve(input.size());
+
+    for (size_t i = 0; i < input.size(); ) {
+        unsigned char c = input[i];
+
+        if (c < 0x80) {
+            // ASCII
+            output += c;
+            i++;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < input.size() &&
+                   (input[i+1] & 0xC0) == 0x80) {
+            // 2-byte sequence
+            output += input[i];
+            output += input[i+1];
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < input.size() &&
+                   (input[i+1] & 0xC0) == 0x80 &&
+                   (input[i+2] & 0xC0) == 0x80) {
+            // 3-byte sequence
+            output += input[i];
+            output += input[i+1];
+            output += input[i+2];
+            i += 3;
+        } else if ((c & 0xF8) == 0xF0 && i + 3 < input.size() &&
+                   (input[i+1] & 0xC0) == 0x80 &&
+                   (input[i+2] & 0xC0) == 0x80 &&
+                   (input[i+3] & 0xC0) == 0x80) {
+            // 4-byte sequence
+            output += input[i];
+            output += input[i+1];
+            output += input[i+2];
+            output += input[i+3];
+            i += 4;
+        } else {
+            // Invalid UTF-8, replace with replacement character
+            output += "\xEF\xBF\xBD";
+            i++;
+        }
+    }
+    return output;
+}
+
+// Strip thinking blocks from content and optionally extract reasoning
+// Returns: {content without thinking, reasoning content}
+static std::pair<std::string, std::string> strip_thinking_blocks(
+    const std::string& content,
+    const std::vector<std::string>& start_markers,
+    const std::vector<std::string>& end_markers) {
+
+    if (start_markers.empty() || end_markers.empty()) {
+        return {content, ""};
+    }
+
+    std::string result = content;
+    std::string reasoning;
+
+    // Try each start marker
+    for (const auto& start_marker : start_markers) {
+        size_t start_pos = 0;
+        while ((start_pos = result.find(start_marker, start_pos)) != std::string::npos) {
+            // Find matching end marker
+            size_t end_pos = std::string::npos;
+            for (const auto& end_marker : end_markers) {
+                size_t pos = result.find(end_marker, start_pos + start_marker.length());
+                if (pos != std::string::npos && (end_pos == std::string::npos || pos < end_pos)) {
+                    end_pos = pos;
+                }
+            }
+
+            if (end_pos != std::string::npos) {
+                // Extract reasoning content (without tags)
+                size_t content_start = start_pos + start_marker.length();
+                std::string think_content = result.substr(content_start, end_pos - content_start);
+
+                // Trim whitespace from reasoning
+                size_t first = think_content.find_first_not_of(" \t\n\r");
+                size_t last = think_content.find_last_not_of(" \t\n\r");
+                if (first != std::string::npos && last != std::string::npos) {
+                    think_content = think_content.substr(first, last - first + 1);
+                }
+
+                if (!reasoning.empty()) {
+                    reasoning += "\n\n";
+                }
+                reasoning += think_content;
+
+                // Find end of end marker
+                size_t remove_end = end_pos;
+                for (const auto& end_marker : end_markers) {
+                    if (result.compare(end_pos, end_marker.length(), end_marker) == 0) {
+                        remove_end = end_pos + end_marker.length();
+                        break;
+                    }
+                }
+
+                // Remove the thinking block from result
+                result.erase(start_pos, remove_end - start_pos);
+                // Don't increment start_pos since we erased content
+            } else {
+                // No end marker found, skip this occurrence
+                start_pos += start_marker.length();
+            }
+        }
+    }
+
+    // Trim leading/trailing whitespace from result
+    size_t first = result.find_first_not_of(" \t\n\r");
+    size_t last = result.find_last_not_of(" \t\n\r");
+    if (first != std::string::npos && last != std::string::npos) {
+        result = result.substr(first, last - first + 1);
+    } else if (first == std::string::npos) {
+        result = "";
+    }
+
+    return {result, reasoning};
+}
 
 // Generate random ID for chat completion
 static std::string generate_id() {
@@ -231,26 +355,96 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 res.set_header("Cache-Control", "no-cache");
                 res.set_header("X-Accel-Buffering", "no");
 
+                // Get thinking markers for streaming filter
+                auto thinking_start = backend->get_thinking_start_markers();
+                auto thinking_end = backend->get_thinking_end_markers();
+                bool filter_thinking = !config->thinking && !thinking_start.empty();
+
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [backend, session, max_tokens, request_id, model_name](size_t offset, httplib::DataSink& sink) mutable {
+                    [backend, session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking](size_t offset, httplib::DataSink& sink) mutable {
+                        // State for thinking block filtering during streaming
+                        bool in_thinking = false;
+                        std::string pending_buffer;
+
                         auto stream_callback = [&](const std::string& delta,
                                                    const std::string& accumulated,
                                                    const Response& partial_response) -> bool {
-                            json delta_chunk = {
-                                {"id", request_id},
-                                {"object", "chat.completion.chunk"},
-                                {"created", std::time(nullptr)},
-                                {"model", model_name},
-                                {"choices", json::array({{
-                                    {"index", 0},
-                                    {"delta", {{"content", delta}}},
-                                    {"finish_reason", nullptr}
-                                }})}
-                            };
-                            std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
-                            return sink.write(chunk_data.c_str(), chunk_data.size());
+                            std::string output_delta = delta;
+
+                            // Filter thinking blocks if needed
+                            if (filter_thinking) {
+                                pending_buffer += delta;
+
+                                // Check for thinking start markers
+                                if (!in_thinking) {
+                                    for (const auto& marker : thinking_start) {
+                                        size_t pos = pending_buffer.find(marker);
+                                        if (pos != std::string::npos) {
+                                            // Output content before the marker
+                                            output_delta = pending_buffer.substr(0, pos);
+                                            pending_buffer = pending_buffer.substr(pos + marker.length());
+                                            in_thinking = true;
+                                            break;
+                                        }
+                                    }
+                                    // Check if we might be in the middle of a marker
+                                    if (!in_thinking) {
+                                        bool could_be_partial = false;
+                                        for (const auto& marker : thinking_start) {
+                                            for (size_t len = 1; len < marker.length() && len <= pending_buffer.length(); ++len) {
+                                                if (pending_buffer.compare(pending_buffer.length() - len, len, marker, 0, len) == 0) {
+                                                    could_be_partial = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (could_be_partial) break;
+                                        }
+                                        if (could_be_partial) {
+                                            // Hold back potential partial marker
+                                            output_delta = "";
+                                        } else {
+                                            output_delta = pending_buffer;
+                                            pending_buffer.clear();
+                                        }
+                                    }
+                                }
+
+                                // Check for thinking end markers
+                                if (in_thinking) {
+                                    for (const auto& marker : thinking_end) {
+                                        size_t pos = pending_buffer.find(marker);
+                                        if (pos != std::string::npos) {
+                                            pending_buffer = pending_buffer.substr(pos + marker.length());
+                                            in_thinking = false;
+                                            output_delta = "";
+                                            break;
+                                        }
+                                    }
+                                    if (in_thinking) {
+                                        output_delta = "";  // Suppress content inside thinking block
+                                    }
+                                }
+                            }
+
+                            // Only send chunk if there's content
+                            if (!output_delta.empty()) {
+                                json delta_chunk = {
+                                    {"id", request_id},
+                                    {"object", "chat.completion.chunk"},
+                                    {"created", std::time(nullptr)},
+                                    {"model", model_name},
+                                    {"choices", json::array({{
+                                        {"index", 0},
+                                        {"delta", {{"content", sanitize_utf8(output_delta)}}},
+                                        {"finish_reason", nullptr}
+                                    }})}
+                                };
+                                std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
+                                return sink.write(chunk_data.c_str(), chunk_data.size());
+                            }
+                            return true;  // Continue even if we didn't output anything
                         };
 
                         // Generate tokens with streaming callback
@@ -306,8 +500,21 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 return;
             }
 
-            // Check for tool calls
-            auto tool_call_opt = extract_tool_call(resp, backend);
+            // Strip thinking blocks if thinking mode is disabled
+            std::string response_content = resp.content;
+            std::string reasoning_content;
+            if (!config->thinking) {
+                auto thinking_start = backend->get_thinking_start_markers();
+                auto thinking_end = backend->get_thinking_end_markers();
+                auto [content, reasoning] = strip_thinking_blocks(response_content, thinking_start, thinking_end);
+                response_content = content;
+                reasoning_content = reasoning;
+            }
+
+            // Check for tool calls (use stripped content)
+            Response stripped_resp = resp;
+            stripped_resp.content = response_content;
+            auto tool_call_opt = extract_tool_call(stripped_resp, backend);
 
             // Build OpenAI-compatible response
             json choice = {
@@ -319,9 +526,14 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 {"finish_reason", "stop"}
             };
 
+            // Add reasoning_content if we have it (like llama-server does)
+            if (!reasoning_content.empty()) {
+                choice["message"]["reasoning_content"] = sanitize_utf8(reasoning_content);
+            }
+
             if (tool_call_opt.has_value()) {
                 auto tool_call = tool_call_opt.value();
-                choice["message"]["content"] = "";
+                choice["message"]["content"] = sanitize_utf8(tool_call.content);
                 choice["finish_reason"] = "tool_calls";
 
                 json tc;
@@ -355,7 +567,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 choice["message"]["tool_calls"] = json::array({tc});
             } else {
                 // No tool call - regular response
-                choice["message"]["content"] = resp.content;
+                choice["message"]["content"] = sanitize_utf8(response_content);
                 choice["finish_reason"] = resp.finish_reason.empty() ? "stop" : resp.finish_reason;
             }
 

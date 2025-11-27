@@ -187,7 +187,7 @@ static int handle_config_subcommand(int argc, char** argv) {
 	cfg.load();
 
 	if (argc < 3) {
-		std::cout << "Usage: shepherd config <show|set|edit>" << std::endl;
+		std::cout << "Usage: shepherd config <show|set>" << std::endl;
 		return 1;
 	}
 
@@ -195,17 +195,16 @@ static int handle_config_subcommand(int argc, char** argv) {
 
 	if (subcmd == "show") {
 		std::cout << "=== Shepherd Configuration ===" << std::endl;
-		std::cout << "Warmup: " << (cfg.warmup ? "enabled" : "disabled") << std::endl;
-		std::cout << "Calibration: " << (cfg.calibration ? "enabled" : "disabled") << std::endl;
-		std::cout << "Streaming: " << (cfg.streaming ? "enabled" : "disabled") << std::endl;
-		std::cout << "Truncate limit: " << cfg.truncate_limit << std::endl;
-		std::cout << "Max DB size: " << cfg.max_db_size_str << std::endl;
-		if (!cfg.web_search_provider.empty()) {
-			std::cout << "Web search provider: " << cfg.web_search_provider << std::endl;
-		}
-		if (!cfg.memory_database.empty()) {
-			std::cout << "Memory database: " << cfg.memory_database << std::endl;
-		}
+		std::cout << "warmup = " << (cfg.warmup ? "true" : "false") << std::endl;
+		std::cout << "calibration = " << (cfg.calibration ? "true" : "false") << std::endl;
+		std::cout << "streaming = " << (cfg.streaming ? "true" : "false") << std::endl;
+		std::cout << "thinking = " << (cfg.thinking ? "true" : "false") << std::endl;
+		std::cout << "truncate_limit = " << cfg.truncate_limit << std::endl;
+		std::cout << "max_db_size = " << cfg.max_db_size_str << std::endl;
+		std::cout << "web_search_provider = " << (cfg.web_search_provider.empty() ? "" : cfg.web_search_provider) << std::endl;
+		std::cout << "web_search_api_key = " << (cfg.web_search_api_key.empty() ? "" : "(set)") << std::endl;
+		std::cout << "web_search_instance_url = " << (cfg.web_search_instance_url.empty() ? "" : cfg.web_search_instance_url) << std::endl;
+		std::cout << "memory_database = " << (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) << std::endl;
 		return 0;
 	}
 
@@ -219,12 +218,20 @@ static int handle_config_subcommand(int argc, char** argv) {
 			cfg.calibration = (value == "true" || value == "1" || value == "on");
 		} else if (key == "streaming") {
 			cfg.streaming = (value == "true" || value == "1" || value == "on");
+		} else if (key == "thinking") {
+			cfg.thinking = (value == "true" || value == "1" || value == "on");
 		} else if (key == "truncate_limit") {
 			cfg.truncate_limit = std::stoi(value);
 		} else if (key == "max_db_size") {
 			cfg.set_max_db_size(value);
 		} else if (key == "web_search_provider") {
 			cfg.web_search_provider = value;
+		} else if (key == "web_search_api_key") {
+			cfg.web_search_api_key = value;
+		} else if (key == "web_search_instance_url") {
+			cfg.web_search_instance_url = value;
+		} else if (key == "memory_database") {
+			cfg.memory_database = value;
 		} else {
 			std::cerr << "Unknown config key: " << key << std::endl;
 			return 1;
@@ -282,16 +289,22 @@ static int handle_provider_subcommand(int argc, char** argv) {
 			args.push_back(argv[i]);
 		}
 
-		auto new_config = provider_manager.parse_provider_args(type, args);
+		try {
+			auto new_config = provider_manager.parse_provider_args(type, args);
 
-		if (new_config->name.empty()) {
-			std::cerr << "Error: Provider name is required (use --name <name>)" << std::endl;
+			if (new_config->name.empty()) {
+				std::cerr << "Error: Provider name is required (use --name <name>)" << std::endl;
+				return 1;
+			}
+
+			provider_manager.save_provider(*new_config);
+			std::cout << "Provider '" << new_config->name << "' added successfully" << std::endl;
+			return 0;
+		} catch (const std::exception& e) {
+			std::cerr << "Error: " << e.what() << std::endl;
+			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama" << std::endl;
 			return 1;
 		}
-
-		provider_manager.save_provider(*new_config);
-		std::cout << "Provider '" << new_config->name << "' added successfully" << std::endl;
-		return 0;
 	}
 
 	if (subcmd == "show") {
@@ -945,6 +958,7 @@ int main(int argc, char** argv) {
 	bool no_tools = false;
 	bool warmup_enable = false;
 	bool calibration_enable = false;
+	bool thinking_override = false;
 	int truncate_limit = 0;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	std::string log_file;
@@ -1100,6 +1114,7 @@ int main(int argc, char** argv) {
 				break;
 			case 1031: // --thinking
 				g_show_thinking = true;
+				thinking_override = true;
 				break;
 			case 1032: // --colors
 				color_override = 1;
@@ -1183,6 +1198,12 @@ int main(int argc, char** argv) {
 	}
 	if (calibration_enable) {
 		config->calibration = true;
+	}
+	// Set g_show_thinking from config, then apply command-line override
+	g_show_thinking = config->thinking;
+	if (thinking_override) {
+		config->thinking = true;
+		g_show_thinking = true;
 	}
 	if (gpu_layers_override != -999) {  // -999 means not specified
 		config->json["gpu_layers"] = gpu_layers_override;
@@ -1324,6 +1345,8 @@ int main(int argc, char** argv) {
 			}
 
 			LOG_INFO("Using provider: " + *provider_name + " (priority: " + std::to_string(provider_config->priority) + ")");
+			// Always show provider info on startup (even when INFO logs are suppressed)
+			std::cout << "Provider: " << *provider_name << std::endl;
 			backend = BackendFactory::create_from_provider(provider_config, context_size);
 		}
 

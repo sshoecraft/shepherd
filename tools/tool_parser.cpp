@@ -74,6 +74,14 @@ bool has_tool_call(const std::string& response,
     return false;
 }
 
+// Helper to trim whitespace from both ends of a string
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\n\r");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\n\r");
+    return s.substr(start, end - start + 1);
+}
+
 std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
     // Parse XML-style tool calls (Qwen/Unsloth format):
     // Standard: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
@@ -84,6 +92,22 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
 
     LOG_DEBUG("XML tool call search: tool_call_start=" + std::to_string(tool_call_start) +
               ", function_start=" + std::to_string(function_start));
+
+    // Determine where the tool call markup starts (for extracting content before it)
+    size_t markup_start = std::string::npos;
+    if (tool_call_start != std::string::npos && function_start != std::string::npos) {
+        markup_start = std::min(tool_call_start, function_start);
+    } else if (tool_call_start != std::string::npos) {
+        markup_start = tool_call_start;
+    } else if (function_start != std::string::npos) {
+        markup_start = function_start;
+    }
+
+    // Extract content before the tool call
+    std::string content_before;
+    if (markup_start != std::string::npos && markup_start > 0) {
+        content_before = trim(response.substr(0, markup_start));
+    }
 
     // Prioritize whichever tag appears first in the response
     // This handles cases where model generates valid <function=...> but then hallucinates garbage with <tool_call>
@@ -145,12 +169,14 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                 tc.parameters = tool_params;
                 tc.raw_json = params_json.dump();
                 tc.tool_call_id = "";  // GLM models don't provide call IDs
+                tc.content = content_before;
                 return tc;
             }
 
             // Fall back to old <function= format
             auto result = parse_xml_function_block(tool_call_content);
             if (result.has_value()) {
+                result->content = content_before;
                 return result;
             }
             LOG_DEBUG("Failed to parse <tool_call> content, trying <function= fallback");
@@ -172,7 +198,11 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
         std::string function_content = response.substr(function_start, function_end - function_start + 11);
         LOG_DEBUG("Found function block without <tool_call> wrapper (lenient parsing)");
 
-        return parse_xml_function_block(function_content);
+        auto result = parse_xml_function_block(function_content);
+        if (result.has_value()) {
+            result->content = content_before;
+        }
+        return result;
     }
 
     return std::nullopt;
@@ -236,6 +266,13 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
     LOG_DEBUG("Found potential JSON tool call in response");
 
     try {
+        // Find where the JSON starts to extract content before it
+        size_t json_start = response.find('{');
+        std::string content_before;
+        if (json_start != std::string::npos && json_start > 0) {
+            content_before = trim(response.substr(0, json_start));
+        }
+
         // Extract the JSON part
         std::string json_str = extract_json(response);
         if (json_str.empty()) {
@@ -289,7 +326,7 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         }
 
         LOG_DEBUG("Successfully parsed JSON tool call: " + tool_name);
-        return ToolCall(tool_name, tool_params, json_str, tool_call_id);
+        return ToolCall(tool_name, tool_params, json_str, tool_call_id, content_before);
 
     } catch (const nlohmann::json::exception& e) {
         LOG_DEBUG("Failed to parse tool call JSON: " + std::string(e.what()));

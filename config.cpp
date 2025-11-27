@@ -42,7 +42,7 @@ void Config::set_defaults() {
     system_prompt = "";  // Optional custom system prompt
 
     // RAG database defaults
-    memory_database = "";  // Empty = use default ~/.shepherd/memory.db
+    memory_database = "";  // Empty = use default from get_default_memory_db_path()
     max_db_size_str = "10G";
     max_db_size = parse_size_string(max_db_size_str);
 
@@ -56,6 +56,9 @@ void Config::set_defaults() {
 
 	// Streaming enabled by default
 	streaming = true;
+
+	// Thinking/reasoning blocks hidden by default
+	thinking = false;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -252,6 +255,11 @@ void Config::load() {
             calibration = json["calibration"].get<bool>();
         }
 
+        // Load thinking setting (show/hide reasoning blocks)
+        if (json.contains("thinking")) {
+            thinking = json["thinking"].get<bool>();
+        }
+
         // Load RAG memory database path (optional)
         if (json.contains("memory_database")) {
             memory_database = json["memory_database"];
@@ -301,6 +309,7 @@ void Config::save() const {
             {"warmup", warmup},
             {"calibration", calibration},
             {"streaming", streaming},
+            {"thinking", thinking},
             {"truncate_limit", truncate_limit},
             {"max_db_size", max_db_size_str}
         };

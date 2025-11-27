@@ -61,6 +61,7 @@ public:
     std::string web_search_instance_url;
     int truncate_limit;
     bool streaming;
+    bool thinking;        // Show thinking/reasoning blocks in output
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
     // Legacy/runtime fields (not saved to config, only used for command-line overrides)

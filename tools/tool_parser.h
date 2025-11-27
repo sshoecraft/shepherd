@@ -14,10 +14,11 @@ struct ToolCall {
     std::map<std::string, std::any> parameters;
     std::string raw_json;  // Original JSON string for debugging
     std::string tool_call_id;  // Optional tool call ID (used by API backends like OpenAI)
+    std::string content;  // Text content before the tool call (e.g., "Let me look that up for you")
 
     ToolCall() = default;
-    ToolCall(const std::string& n, const std::map<std::string, std::any>& p, const std::string& json = "", const std::string& id = "")
-        : name(n), parameters(p), raw_json(json), tool_call_id(id) {}
+    ToolCall(const std::string& n, const std::map<std::string, std::any>& p, const std::string& json = "", const std::string& id = "", const std::string& c = "")
+        : name(n), parameters(p), raw_json(json), tool_call_id(id), content(c) {}
 };
 
 /// @brief Parse a tool call from LLM response

@@ -100,7 +100,9 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
             }
 
             // Check if this is a thinking model (model_lower already defined above)
-            bool is_thinking = (model_lower.find("thinking") != std::string::npos);
+            // MindLink models are Qwen3 derivatives that use thinking mode
+            bool is_thinking = (model_lower.find("thinking") != std::string::npos) ||
+                               (model_lower.find("mindlink") != std::string::npos);
             if (is_thinking) {
                 LOG_INFO("Detected Thinking model variant");
             }
@@ -165,7 +167,9 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
         if (version.empty()) {
             version = "3";
         }
-        bool is_thinking = (model_lower.find("thinking") != std::string::npos);
+        // MindLink models are Qwen3 derivatives that use thinking mode
+        bool is_thinking = (model_lower.find("thinking") != std::string::npos) ||
+                           (model_lower.find("mindlink") != std::string::npos);
         if (is_thinking) {
             LOG_INFO("Detected Thinking model variant from path");
         }

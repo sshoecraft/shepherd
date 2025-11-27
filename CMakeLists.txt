@@ -81,7 +81,10 @@ if(ENABLE_TENSORRT)
 endif()
 
 if(ENABLE_LLAMACPP)
-    list(APPEND SHEPHERD_SOURCES backends/llamacpp.cpp)
+    list(APPEND SHEPHERD_SOURCES
+        backends/llamacpp.cpp
+        backends/chat_template.cpp
+    )
 endif()
 
 # Main executable

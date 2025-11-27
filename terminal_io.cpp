@@ -17,13 +17,13 @@ TerminalIO::TerminalIO()
     : interactive_mode(false)
     , colors_enabled(false)
     , show_thinking(false)
+    , last_char_was_newline(true)  // Start as if on new line
     , replxx(nullptr)
     , term_raw_mode(false)
     , filter_state(NORMAL)
     , in_tool_call(false)
     , in_thinking(false)
-    , suppress_output(false)
-    , last_char_was_newline(true) {  // Start as if on new line
+    , suppress_output(false) {
 }
 
 TerminalIO::~TerminalIO() {

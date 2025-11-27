@@ -7,9 +7,9 @@ Allows testing different configurations (backends, models, context sizes, etc.)
 to compare their performance on the same benchmark tasks.
 
 Usage:
-    ./test_performance.py --config my_config.json
-    ./test_performance.py --config llamacpp.json --verbose
-    ./test_performance.py --benchmark mmlu --count 20
+    ./test_model.py --provider my_provider
+    ./test_model.py --provider llamacpp --verbose
+    ./test_model.py --benchmark mmlu --count 20
 """
 
 import subprocess
@@ -258,7 +258,7 @@ def load_swebench_tasks(count=None, difficulty=None, repos=None, split='test'):
 
 @dataclass
 class BenchmarkResult:
-    config_file: str
+    provider: str
     benchmark_type: str
     total_questions: int
     correct: int
@@ -276,8 +276,8 @@ class BenchmarkResult:
 class ShepherdProcess:
     """Manages a shepherd subprocess with stdin/stdout communication"""
 
-    def __init__(self, config_file: str = None, verbose: bool = False):
-        self.config_file = config_file  # Only use if explicitly provided
+    def __init__(self, provider: str = None, verbose: bool = False):
+        self.provider = provider  # Only use if explicitly provided
         self.verbose = verbose
         self.process = None
 
@@ -317,9 +317,9 @@ class ShepherdProcess:
             "--system-prompt", "You are taking a test - ***CRITICAL:*** DO NOT respond with any reasons or explanations of any kind - just answer the questions to the best of your ability.  Part of your grade is based on if you are able to answer the question as directed."
         ]
 
-        # Use config file which points to server
-        if self.config_file and os.path.exists(self.config_file):
-            cmd.extend(["--config", self.config_file])
+        # Use provider if specified
+        if self.provider:
+            cmd.extend(["--provider", self.provider])
 
         if self.verbose:
             print(f"  Starting: {' '.join(cmd)}")
@@ -434,8 +434,8 @@ class ShepherdProcess:
 class BenchmarkTestRunner:
     """Runs benchmark tests against shepherd"""
 
-    def __init__(self, config_file: str = None, verbose: bool = False):
-        self.config_file = config_file  # Only use if explicitly provided
+    def __init__(self, provider: str = None, verbose: bool = False):
+        self.provider = provider  # Only use if explicitly provided
         self.verbose = verbose
 
     def extract_answer(self, response: str, choices: List[str]) -> Optional[str]:
@@ -487,7 +487,7 @@ class BenchmarkTestRunner:
         print(f"Running MMLU Benchmark ({len(questions)} questions)")
         print(f"{'='*70}\n")
 
-        shepherd = ShepherdProcess(self.config_file, self.verbose)
+        shepherd = ShepherdProcess(self.provider, self.verbose)
 
         if not shepherd.start():
             print("ERROR: Failed to start shepherd")
@@ -560,7 +560,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["response_times"]) / len(results["response_times"]) if results["response_times"] else 0
 
         return BenchmarkResult(
-            config_file=self.config_file,
+            provider=self.provider,
             benchmark_type="MMLU",
             total_questions=total,
             correct=results["correct"],
@@ -580,7 +580,7 @@ class BenchmarkTestRunner:
         print(f"Running HellaSwag Benchmark ({len(questions)} questions)")
         print(f"{'='*70}\n")
 
-        shepherd = ShepherdProcess(self.config_file, self.verbose)
+        shepherd = ShepherdProcess(self.provider, self.verbose)
 
         if not shepherd.start():
             print("ERROR: Failed to start shepherd")
@@ -651,7 +651,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["response_times"]) / len(results["response_times"]) if results["response_times"] else 0
 
         return BenchmarkResult(
-            config_file=self.config_file,
+            provider=self.provider,
             benchmark_type="HellaSwag",
             total_questions=total,
             correct=results["correct"],
@@ -734,7 +734,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["task_times"]) / len(results["task_times"]) if results["task_times"] else 0
 
         return BenchmarkResult(
-            config_file=self.config_file,
+            provider=self.provider,
             benchmark_type="SWE-bench",
             total_questions=total,
             correct=results["passed"],
@@ -829,8 +829,8 @@ class BenchmarkTestRunner:
                 f"You are an expert software engineer. Fix the following issue in the {repo_name} codebase:\n\n{task['problem_statement']}\n\nUse the available tools to read files, make changes, and test your solution. Stay focused on fixing this specific issue."
             ]
 
-            if self.config_file and os.path.exists(self.config_file):
-                shepherd_base_cmd.extend(["--config", self.config_file])
+            if self.provider:
+                shepherd_base_cmd.extend(["--provider", self.provider])
 
             # Wrap with safety script
             shepherd_cmd = [SHEPHERD_SAFETY_WRAPPER, repo_dir] + shepherd_base_cmd
@@ -957,7 +957,7 @@ def print_summary(result: BenchmarkResult):
     print(f"\n{'='*70}")
     print(f"{result.benchmark_type} BENCHMARK RESULTS")
     print(f"{'='*70}")
-    print(f"Config: {result.config_file}")
+    print(f"Provider: {result.provider}")
     print(f"Total Questions: {result.total_questions}")
     print(f"Correct: {result.correct}")
     print(f"Incorrect: {result.incorrect}")
@@ -979,8 +979,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Test shepherd accuracy on AI benchmarks (MMLU, HellaSwag, SWE-bench)"
     )
-    parser.add_argument("--config", "-c",
-                       help="Shepherd config file (default: ~/.shepherd/config.json)")
+    parser.add_argument("--provider", "-p",
+                       help="Shepherd provider name")
     parser.add_argument("--benchmark", "-b",
                        choices=["mmlu", "hellaswag", "swebench", "all"],
                        default="all",
@@ -1022,11 +1022,8 @@ def main():
         print(f"ERROR: Shepherd binary not found: {SHEPHERD_BINARY}")
         sys.exit(1)
 
-    # Only use config if explicitly provided by user
-    config_file = args.config
-    if config_file and not os.path.exists(config_file):
-        print(f"ERROR: Config file not found: {config_file}")
-        sys.exit(1)
+    # Only use provider if explicitly provided by user
+    provider = args.provider
 
     # Validate subjects if specified
     if args.subjects:
@@ -1036,7 +1033,7 @@ def main():
             print(f"Use --list-subjects to see valid options")
             sys.exit(1)
 
-    runner = BenchmarkTestRunner(config_file=config_file, verbose=args.verbose)
+    runner = BenchmarkTestRunner(provider=provider, verbose=args.verbose)
 
     try:
         results = []
@@ -1071,7 +1068,7 @@ def main():
                 # Save combined report
                 combined = {
                     "timestamp": datetime.now().isoformat(),
-                    "config": config_file,
+                    "provider": provider,
                     "results": [asdict(r) for r in results]
                 }
                 with open(args.output, 'w') as f:

@@ -9,6 +9,67 @@ namespace ToolParser {
 // Forward declaration
 std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content);
 
+// Convert non-standard string delimiters to JSON double-quoted strings
+// Handles: {'key': 'value'} -> {"key": "value"}  (Python single quotes)
+//          {`key`: `value`} -> {"key": "value"}  (JavaScript backticks)
+static std::string fix_nonstandard_quotes(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+
+    bool in_double_string = false;
+    bool in_alt_string = false;  // single quote or backtick
+    char alt_char = 0;           // which alt delimiter we're in
+    bool escape_next = false;
+
+    for (size_t i = 0; i < input.size(); i++) {
+        char c = input[i];
+
+        if (escape_next) {
+            result += c;
+            escape_next = false;
+            continue;
+        }
+
+        if (c == '\\') {
+            result += c;
+            escape_next = true;
+            continue;
+        }
+
+        if (c == '"' && !in_alt_string) {
+            in_double_string = !in_double_string;
+            result += c;
+        } else if ((c == '\'' || c == '`') && !in_double_string) {
+            if (!in_alt_string) {
+                // Starting an alt-quoted string
+                in_alt_string = true;
+                alt_char = c;
+                result += '"';
+            } else if (c == alt_char) {
+                // Ending the alt-quoted string
+                in_alt_string = false;
+                alt_char = 0;
+                result += '"';
+            } else {
+                // Different alt char inside - just pass through
+                result += c;
+            }
+        } else if (in_alt_string && c == '"') {
+            // Escape double quotes inside what was an alt-quoted string
+            result += "\\\"";
+        } else {
+            result += c;
+        }
+    }
+
+    return result;
+}
+
+// Backwards compatibility alias
+static std::string fix_single_quotes(const std::string& input) {
+    return fix_nonstandard_quotes(input);
+}
+
 std::string extract_json(const std::string& response) {
     // Find the first { and track braces to find the matching }
     size_t json_start = response.find('{');
@@ -58,17 +119,30 @@ bool has_tool_call(const std::string& response,
         return false;
     }
 
-    try {
-        auto json_response = nlohmann::json::parse(json_str);
-        // Accept both "parameters" (internal format) and "arguments" (OpenAI format)
-        if (json_response.contains("name") &&
-            (json_response.contains("parameters") || json_response.contains("arguments"))) {
-            LOG_DEBUG("Found valid tool call");
-            return true;
+    // Try parsing as-is first, then with single-quote fix
+    auto try_parse = [&](const std::string& str) -> bool {
+        try {
+            auto json_response = nlohmann::json::parse(str);
+            if (json_response.contains("name") &&
+                (json_response.contains("parameters") || json_response.contains("arguments"))) {
+                LOG_DEBUG("Found valid tool call");
+                return true;
+            }
+        } catch (const nlohmann::json::exception&) {
+            return false;
         }
-    } catch (const nlohmann::json::exception& e) {
-        // Silently ignore parse errors - many false positives from text containing braces
         return false;
+    };
+
+    if (try_parse(json_str)) {
+        return true;
+    }
+
+    // Try fixing single quotes (Python-style strings)
+    std::string fixed_json = fix_single_quotes(json_str);
+    if (fixed_json != json_str && try_parse(fixed_json)) {
+        LOG_DEBUG("Found valid tool call after fixing single quotes");
+        return true;
     }
 
     return false;
@@ -171,6 +245,51 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                 tc.tool_call_id = "";  // GLM models don't provide call IDs
                 tc.content = content_before;
                 return tc;
+            }
+
+            // Try JSON inside <tool_call> tags (ChatML format)
+            // Format: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+            std::string inner_content = response.substr(tool_call_start + 11, tool_call_end - tool_call_start - 11);
+            std::string json_str = extract_json(inner_content);
+            if (!json_str.empty()) {
+                try {
+                    auto json_response = nlohmann::json::parse(json_str);
+                    if (json_response.contains("name") &&
+                        (json_response.contains("parameters") || json_response.contains("arguments"))) {
+
+                        std::string tool_name = json_response["name"];
+                        auto params_json = json_response.contains("parameters") ?
+                                          json_response["parameters"] :
+                                          json_response["arguments"];
+
+                        std::map<std::string, std::any> tool_params;
+                        for (auto& [key, value] : params_json.items()) {
+                            if (value.is_string()) {
+                                tool_params[key] = value.get<std::string>();
+                            } else if (value.is_number_integer()) {
+                                tool_params[key] = value.get<int>();
+                            } else if (value.is_number_float()) {
+                                tool_params[key] = value.get<double>();
+                            } else if (value.is_boolean()) {
+                                tool_params[key] = value.get<bool>();
+                            } else {
+                                tool_params[key] = value.dump();
+                            }
+                        }
+
+                        LOG_DEBUG("Parsed JSON inside <tool_call> tags: " + tool_name);
+
+                        ToolCall tc;
+                        tc.name = tool_name;
+                        tc.parameters = tool_params;
+                        tc.raw_json = json_str;
+                        tc.tool_call_id = json_response.value("id", "");
+                        tc.content = content_before;
+                        return tc;
+                    }
+                } catch (const nlohmann::json::exception& e) {
+                    LOG_DEBUG("Failed to parse JSON inside <tool_call>: " + std::string(e.what()));
+                }
             }
 
             // Fall back to old <function= format
@@ -404,6 +523,92 @@ std::optional<ToolCall> parse_xml_wrapped_json(const std::string& response) {
     return std::nullopt;
 }
 
+// Parse MindLink format: [tool_call: tool_name for 'args']
+// This format is baked into some fine-tuned models like MindLink
+std::optional<ToolCall> parse_bracket_tool_call(const std::string& response) {
+    // Look for [tool_call: pattern
+    size_t start = response.find("[tool_call:");
+    if (start == std::string::npos) {
+        return std::nullopt;
+    }
+
+    // Find the closing bracket
+    size_t end = response.find(']', start);
+    if (end == std::string::npos) {
+        return std::nullopt;
+    }
+
+    // Extract content between [tool_call: and ]
+    std::string inner = response.substr(start + 11, end - start - 11);
+
+    // Trim whitespace
+    size_t first = inner.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        return std::nullopt;
+    }
+    inner = inner.substr(first);
+
+    LOG_DEBUG("Parsing bracket tool call: [tool_call:" + inner + "]");
+
+    std::string tool_name;
+    std::map<std::string, std::any> tool_params;
+
+    // Check for " for '" pattern (tool_name for 'arg')
+    size_t for_pos = inner.find(" for '");
+    if (for_pos != std::string::npos) {
+        tool_name = inner.substr(0, for_pos);
+
+        // Extract argument between quotes
+        size_t arg_start = for_pos + 6;  // " for '"
+        size_t arg_end = inner.find('\'', arg_start);
+        if (arg_end != std::string::npos) {
+            std::string arg_value = inner.substr(arg_start, arg_end - arg_start);
+            // Use "command" as default param name - common for execute_command tool
+            tool_params["command"] = arg_value;
+            LOG_DEBUG("  Extracted arg: command = " + arg_value);
+        }
+    } else {
+        // No arguments - just tool name
+        // Trim any trailing whitespace
+        size_t last = inner.find_last_not_of(" \t");
+        tool_name = (last != std::string::npos) ? inner.substr(0, last + 1) : inner;
+    }
+
+    if (tool_name.empty()) {
+        return std::nullopt;
+    }
+
+    LOG_DEBUG("Successfully parsed bracket tool call: " + tool_name);
+
+    // Extract content before the tool call
+    std::string content_before;
+    if (start > 0) {
+        content_before = response.substr(0, start);
+        // Trim trailing whitespace
+        size_t last = content_before.find_last_not_of(" \t\n\r");
+        if (last != std::string::npos) {
+            content_before = content_before.substr(0, last + 1);
+        } else {
+            content_before.clear();
+        }
+    }
+
+    // Build raw_json for debugging
+    nlohmann::json params_json;
+    for (const auto& [key, value] : tool_params) {
+        params_json[key] = std::any_cast<std::string>(value);
+    }
+
+    ToolCall tc;
+    tc.name = tool_name;
+    tc.parameters = tool_params;
+    tc.raw_json = params_json.dump();
+    tc.tool_call_id = "";
+    tc.content = content_before;
+
+    return tc;
+}
+
 // Parse simple XML tag format: <toolname param="value"/> or <toolname param="value">...</toolname>
 // Only matches tags at the start of a line (after optional whitespace)
 std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
@@ -500,6 +705,13 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         return tools_block_result;
     }
 
+    // Try bracket format (e.g., [tool_call: execute_command for 'whoami'])
+    // This format is baked into fine-tuned models like MindLink
+    auto bracket_result = parse_bracket_tool_call(response);
+    if (bracket_result.has_value()) {
+        return bracket_result;
+    }
+
     // Try XML-wrapped JSON format (e.g., <read>{ "file_path": "./test" }</read>)
     auto xml_json_result = parse_xml_wrapped_json(response);
     if (xml_json_result.has_value()) {
@@ -541,8 +753,17 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
             return std::nullopt;
         }
 
-        // Parse the JSON
-        auto json_response = nlohmann::json::parse(json_str);
+        // Parse the JSON - try as-is first, then with single-quote fix
+        nlohmann::json json_response;
+        try {
+            json_response = nlohmann::json::parse(json_str);
+        } catch (const nlohmann::json::exception&) {
+            // Try fixing single quotes (Python-style strings)
+            std::string fixed_json = fix_single_quotes(json_str);
+            LOG_DEBUG("Retrying JSON parse with fixed quotes: " + fixed_json.substr(0, 100));
+            json_response = nlohmann::json::parse(fixed_json);
+            json_str = fixed_json;  // Use fixed version for raw_json
+        }
 
         // Check for required fields (accept both "parameters" and "arguments")
         if (!json_response.contains("name")) {

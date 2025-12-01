@@ -69,14 +69,65 @@ std::string Qwen3ThinkingTemplate::get_generation_prompt() const {
     // to tell the model "thinking is done, just respond"
     // This matches llama-server behavior with --reasoning-format auto
     if (config && !config->thinking) {
+        LOG_DEBUG("Qwen3ThinkingTemplate: thinking disabled, returning empty think block");
         return "<|im_start|>assistant\n<think>\n\n</think>\n\n";
     }
     // When thinking is enabled, let the model do its thinking
+    LOG_DEBUG("Qwen3ThinkingTemplate: thinking enabled (config=" + std::string(config ? "valid" : "null") +
+              ", thinking=" + std::string(config ? (config->thinking ? "true" : "false") : "n/a") + ")");
     return "<|im_start|>assistant\n";
 }
 
 ModelFamily Qwen3ThinkingTemplate::get_family() const {
     return ModelFamily::QWEN_3_X;
+}
+
+// ==================== Llama2Template Implementation ====================
+
+std::string Llama2Template::format_message(const Message& msg) const {
+    // Llama 2 uses [INST] tags for user messages
+    if (msg.type == Message::USER) {
+        return "[INST] " + msg.content + " [/INST]";
+    } else if (msg.type == Message::ASSISTANT) {
+        return msg.content + "</s>";
+    } else if (msg.type == Message::TOOL) {
+        // Tool results as user context
+        return "[INST] Tool result: " + msg.content + " [/INST]";
+    }
+    return msg.content;
+}
+
+std::string Llama2Template::format_system_message(const std::string& content, const std::vector<Session::Tool>& tools) const {
+    std::string system_content;
+
+    if (content.empty()) {
+        system_content = "You are a helpful assistant.";
+    } else {
+        system_content = content;
+    }
+
+    if (!tools.empty()) {
+        system_content += "\n\nAvailable tools:\n";
+        for (const auto& tool : tools) {
+            system_content += "- " + tool.name + ": " + tool.description + "\n";
+        }
+        system_content += "\nTo use a tool, respond with JSON: {\"name\": \"tool_name\", \"parameters\": {...}}\n";
+    }
+
+    // Llama 2 system format uses <<SYS>> tags
+    return "<s>[INST] <<SYS>>\n" + system_content + "\n<</SYS>>\n\n";
+}
+
+std::string Llama2Template::get_generation_prompt() const {
+    return "";  // Llama 2 generation follows directly after [/INST]
+}
+
+std::string Llama2Template::get_assistant_end_tag() const {
+    return "</s>";
+}
+
+ModelFamily Llama2Template::get_family() const {
+    return ModelFamily::LLAMA_2_X;
 }
 
 // ==================== Llama3Template Implementation ====================
@@ -182,8 +233,10 @@ ModelFamily GLM4Template::get_family() const {
 
 // ==================== MinjaTemplate Implementation ====================
 
-MinjaTemplate::MinjaTemplate(const std::string& template_text, void* template_node_ptr)
-    : template_text(template_text), template_node(template_node_ptr) {
+MinjaTemplate::MinjaTemplate(const std::string& template_text, void* template_node_ptr,
+                             const std::string& eos_tok, const std::string& bos_tok)
+    : template_text(template_text), template_node(template_node_ptr),
+      eos_token(eos_tok), bos_token(bos_tok) {
 }
 
 MinjaTemplate::~MinjaTemplate() {
@@ -198,8 +251,7 @@ std::string MinjaTemplate::format_message(const Message& msg) const {
     }
 
     if (!template_node) {
-        // Fallback to generic format
-        return msg.get_role() + ": " + msg.content + "\n\n";
+        throw std::runtime_error("MinjaTemplate::format_message() called but template_node is null");
     }
 
     auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
@@ -233,7 +285,8 @@ std::string MinjaTemplate::format_message(const Message& msg) const {
     messages.push_back(msg_obj);
 
     context->set("messages", messages);
-    context->set("bos_token", minja::Value(""));
+    context->set("bos_token", minja::Value(bos_token));
+    context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(false));
 
     // Render through template
@@ -245,22 +298,7 @@ std::string MinjaTemplate::format_message(const Message& msg) const {
 
 std::string MinjaTemplate::format_system_message(const std::string& content, const std::vector<Session::Tool>& tools) const {
     if (!template_node) {
-        // Fallback to generic format
-        std::string formatted = "system: ";
-        if (content.empty()) {
-            formatted += "You are a helpful assistant.";
-        } else {
-            formatted += content;
-        }
-
-        if (!tools.empty()) {
-            formatted += "\n\nAvailable tools:\n";
-            for (const auto& tool : tools) {
-                formatted += "- " + tool.name + ": " + tool.description + "\n";
-            }
-        }
-
-        return formatted + "\n\n";
+        throw std::runtime_error("MinjaTemplate::format_system_message() called but template_node is null");
     }
 
     auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
@@ -294,7 +332,8 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
     messages.push_back(sys_msg);
 
     context->set("messages", messages);
-    context->set("bos_token", minja::Value(""));
+    context->set("bos_token", minja::Value(bos_token));
+    context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(false));
 
     // Add tools if present
@@ -322,13 +361,54 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
 }
 
 std::string MinjaTemplate::get_generation_prompt() const {
-    // Generic fallback
-    return "assistant: ";
+    if (!template_node) {
+        throw std::runtime_error("MinjaTemplate::get_generation_prompt() called but template_node is null");
+    }
+
+    auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
+
+    // Render template with a dummy message twice:
+    // once without add_generation_prompt, once with.
+    // The difference is the generation prompt.
+    auto context_without = minja::Context::make(minja::Value::object());
+    auto context_with = minja::Context::make(minja::Value::object());
+
+    // Build minimal messages array with single user message
+    auto messages = minja::Value::array();
+    auto msg_obj = minja::Value::object();
+    msg_obj.set("role", minja::Value("user"));
+    msg_obj.set("content", minja::Value("x"));
+    messages.push_back(msg_obj);
+
+    context_without->set("messages", messages);
+    context_without->set("bos_token", minja::Value(bos_token));
+    context_without->set("eos_token", minja::Value(eos_token));
+    context_without->set("add_generation_prompt", minja::Value(false));
+
+    context_with->set("messages", messages);
+    context_with->set("bos_token", minja::Value(bos_token));
+    context_with->set("eos_token", minja::Value(eos_token));
+    context_with->set("add_generation_prompt", minja::Value(true));
+
+    std::string without_prompt = (*template_ptr)->render(context_without);
+    std::string with_prompt = (*template_ptr)->render(context_with);
+
+    // The generation prompt is the additional text
+    if (with_prompt.length() > without_prompt.length() &&
+        with_prompt.substr(0, without_prompt.length()) == without_prompt) {
+        return with_prompt.substr(without_prompt.length());
+    }
+
+    throw std::runtime_error("MinjaTemplate::get_generation_prompt() failed to extract generation prompt from template");
 }
 
 std::string MinjaTemplate::get_assistant_end_tag() const {
-    // Generic fallback
-    return "\n";
+    // For minja templates, the end tag is typically the eos_token
+    // If eos_token wasn't provided, use a reasonable ChatML-style default
+    if (eos_token.empty()) {
+        return "<|im_end|>";
+    }
+    return eos_token;
 }
 
 ModelFamily MinjaTemplate::get_family() const {
@@ -339,7 +419,9 @@ ModelFamily MinjaTemplate::get_family() const {
 
 std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& template_text,
                                                             const ModelConfig& config,
-                                                            void* template_node_ptr) {
+                                                            void* template_node_ptr,
+                                                            const std::string& eos_token,
+                                                            const std::string& bos_token) {
     LOG_DEBUG("ChatTemplateFactory creating template for family: " + std::to_string(static_cast<int>(config.family)));
 
     switch (config.family) {
@@ -355,6 +437,16 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& tem
             }
             LOG_INFO("Creating ChatMLTemplate for Qwen 3.x (non-thinking)");
             return std::make_unique<ChatMLTemplate>();
+
+        case ModelFamily::LLAMA_2_X:
+            // If model has a jinja template, use MinjaTemplate with tokens
+            // Otherwise use hardcoded Llama2Template
+            if (!template_text.empty() && template_node_ptr) {
+                LOG_INFO("Creating MinjaTemplate for Llama 2.x with custom template");
+                return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
+            }
+            LOG_INFO("Creating Llama2Template for Llama 2.x");
+            return std::make_unique<Llama2Template>();
 
         case ModelFamily::LLAMA_3_X:
             LOG_INFO("Creating Llama3Template");
@@ -373,7 +465,7 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& tem
         case ModelFamily::GENERIC:
         default:
             LOG_INFO("Creating MinjaTemplate for unknown/generic family");
-            return std::make_unique<MinjaTemplate>(template_text, template_node_ptr);
+            return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
     }
 }
 

@@ -6,6 +6,7 @@
 
 /// @brief Model family classification for prompt format detection
 enum class ModelFamily {
+    LLAMA_2_X,      // Llama 1.x, 2.x, TinyLlama - Uses [INST] format
     LLAMA_3_X,      // Llama 3.0, 3.1, 3.2, 3.3 - Uses ipython role, <|eom_id|>, <|python_tag|>
     QWEN_2_X,       // Qwen 2.x series - Uses <|im_start|>, tool role
     QWEN_3_X,       // Qwen 3.x series (includes MindLink) - Uses <|im_start|>, tool role, enhanced capabilities
@@ -107,6 +108,47 @@ struct ModelConfig {
             .vision_support = false,
             .audio_support = false,
             .function_calling_support = true,
+            .realtime_capable = false,
+            .fine_tunable = false,
+            .training_cutoff_date = "",
+            .deprecated = false,
+            .replacement_model = "",
+            .notes = ""
+        };
+    }
+
+    /// @brief Create config for Llama 2.x family (includes Llama 1.x, TinyLlama)
+    static ModelConfig create_llama_2x(const std::string& version = "2") {
+        return ModelConfig{
+            .family = ModelFamily::LLAMA_2_X,
+            .version = version,
+            .tool_result_role = "tool",
+            .uses_eom_token = false,
+            .uses_python_tag = false,
+            .uses_builtin_tools_array = false,
+            .supports_thinking_mode = false,
+            .uses_observation_role = false,
+            .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
+            .assistant_start_tag = "[/INST] ",
+            .assistant_end_tag = "</s>",
+            .provider = "local",
+            .model_name = "",
+            .context_window = 0,
+            .max_output_tokens = 0,
+            .max_cot_tokens = 0,
+            .max_tokens_param_name = "max_tokens",
+            .supported_endpoints = {},
+            .special_headers = {},
+            .aliases = {},
+            .supports_temperature = true,
+            .supports_streaming = true,
+            .vision_support = false,
+            .audio_support = false,
+            .function_calling_support = false,
             .realtime_capable = false,
             .fine_tunable = false,
             .training_cutoff_date = "",
@@ -309,6 +351,12 @@ public:
     /// @param model_path Full path to model file
     /// @return ModelConfig with detected family and settings
     static ModelConfig detect_from_model_path(const std::string& model_path);
+
+    /// @brief Detect model family from config.json file
+    /// Reads architecture/model_type from HuggingFace or TensorRT-LLM config format
+    /// @param model_dir Path to model/engine directory containing config.json
+    /// @return ModelConfig with detected family and settings
+    static ModelConfig detect_from_config_file(const std::string& model_dir);
 
     /// @brief Detect model family from API model name
     /// For API backends (OpenAI, Anthropic, etc.)

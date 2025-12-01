@@ -67,12 +67,26 @@ public:
     void set_chars_per_token(float ratio) { chars_per_token = ratio; }
 
     // Override to provide default tool call filtering for API backends
+    // Include common formats used by various models
+    // Use partial markers (without closing >) to match tags with attributes
     std::vector<std::string> get_tool_call_markers() const override {
-        return {"<tool_call", "<function_call"};
+        return {
+            "<tool_call", "<function_call", "<tools",
+            "<execute_command", "<.execute_command",
+            "<read", "<.read", "<write", "<.write",
+            "<bash", "<.bash", "<edit", "<.edit",
+            "<glob", "<.glob", "<grep", "<.grep"
+        };
     }
 
     std::vector<std::string> get_tool_call_end_markers() const override {
-        return {"</tool_call>", "</function_call>"};
+        return {
+            "</tool_call>", "</function_call>", "</tools>",
+            "</execute_command>", "</.execute_command>",
+            "</read>", "</.read>", "</write>", "</.write>",
+            "</bash>", "</.bash>", "</edit>", "</.edit>",
+            "</glob>", "</.glob>", "</grep>", "</.grep>"
+        };
     }
 
 protected:

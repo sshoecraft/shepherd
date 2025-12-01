@@ -126,6 +126,8 @@ void LlamaCppBackend::parse_backend_config() {
         if (config->json.contains("pipeline_parallel")) pipeline_parallel = config->json["pipeline_parallel"].get<int>();
         else if (config->json.contains("pp")) pipeline_parallel = config->json["pp"].get<int>();
 
+        if (config->json.contains("ubatch")) n_batch = config->json["ubatch"].get<int>();
+
         LOG_DEBUG("Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
                   ", gpu_layers=" + std::to_string(gpu_layers) +
                   ", tensor_parallel=" + std::to_string(tensor_parallel));
@@ -1612,19 +1614,23 @@ void LlamaCppBackend::initialize(Session& session) {
 
     LOG_INFO("Using context size: " + std::to_string(context_size) + " tokens");
 
-    // Determine optimal batch size
-    if (has_gpu) {
-        if (context_size >= 32768) {
-            n_batch = 4096;
-        } else if (context_size >= 8192) {
-            n_batch = 2048;
+    // Determine optimal batch size (only if not set via --ubatch)
+    if (n_batch == 512) {  // Default value means not overridden
+        if (has_gpu) {
+            if (context_size >= 32768) {
+                n_batch = 4096;
+            } else if (context_size >= 8192) {
+                n_batch = 2048;
+            } else {
+                n_batch = std::min(static_cast<int>(context_size), 2048);
+            }
         } else {
-            n_batch = std::min(static_cast<int>(context_size), 2048);
+            n_batch = std::min(static_cast<int>(context_size) / 4, 1024);
         }
+        LOG_INFO("Using n_batch = " + std::to_string(n_batch) + " (auto, GPU: " + (has_gpu ? "yes" : "no") + ")");
     } else {
-        n_batch = std::min(static_cast<int>(context_size) / 4, 1024);
+        LOG_INFO("Using n_batch = " + std::to_string(n_batch) + " (from --ubatch)");
     }
-    LOG_INFO("Using n_batch = " + std::to_string(n_batch) + " (GPU: " + (has_gpu ? "yes" : "no") + ")");
 
     // Create llama context with KV space callback
     llama_context_params ctx_params = llama_context_default_params();
@@ -1705,8 +1711,17 @@ void LlamaCppBackend::initialize(Session& session) {
         throw BackendError("Failed to parse chat template with minja: " + std::string(e.what()));
     }
 
-    // Detect model family
+    // Detect model family - priority: chat template -> config.json -> path
     model_config = Models::detect_from_chat_template(chat_template_text, model_path);
+    if (model_config.family == ModelFamily::GENERIC) {
+        // Try config.json in model directory
+        std::filesystem::path model_dir = std::filesystem::path(model_path).parent_path();
+        model_config = Models::detect_from_config_file(model_dir.string());
+    }
+    if (model_config.family == ModelFamily::GENERIC) {
+        // Last resort: path-based detection
+        model_config = Models::detect_from_model_path(model_path);
+    }
     max_output_tokens = model_config.max_output_tokens;
     LOG_INFO("Model configuration: family=" + std::to_string(static_cast<int>(model_config.family)) +
              ", version=" + model_config.version +

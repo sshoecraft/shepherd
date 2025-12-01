@@ -1,0 +1,14 @@
+
+doit() {
+	. ~/venv/bin/activate
+#	CUDA_VISIBLE_DEVICES=1,2
+	./build_engine.py "$@" 2>&1 | tee build.log
+}
+
+#doit ~/models/models--Skywork--MindLink-32B-0801/snapshots/1c102e4027b8f9788bec9587c4a78da8150639ba --output_dir ~/models/MindLink-32B-0801_int8_tp2_engine --max_seq_len 32768 --tp 2 --pp 1 --quant int8 --clean
+#doit ~/models/llama-3.1-8b-instruct --output_dir ~/models/llama-3.1-8b-instruct_engine --max_seq_len 32768 --tp 2 --pp 1 --clean
+#doit ~/models/MindLink-72B-0801-AWQ --output_dir ~/models/MindLink-72B-0801_engine --max_seq_len 32768 --workers 1 --tp 1 --pp 3 --quant int4 --clean
+#doit ~/models/TinyLlama-1.1B-Chat-v1.0 --max_seq_len 2048 --clean
+#doit ~/models/Qwen3-Coder-30B-A3B-Instruct --max_seq_len 131072 --tp 1 --pp 3
+
+doit ~/models/MindLink-72B-0801 --output_dir ~/models/MindLink-72B-0801_engine --max_seq_len 32768 --workers 1 --tp 1 --pp 3 --quant int8 --cpu --clean

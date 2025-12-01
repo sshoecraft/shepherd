@@ -26,19 +26,129 @@ ModelConfig Models::detect_from_chat_template(const std::string& template_text, 
         return config;
     }
 
-    // Fallback: Try path-based detection if model_path provided
-    if (!model_path.empty()) {
-        LOG_DEBUG("Chat template detection failed, trying path analysis");
-        return detect_from_path_analysis(model_path);
-    }
-
-    // Final fallback: Generic model
-    LOG_WARN("Could not detect specific model family, using generic configuration");
+    // Return GENERIC - caller should try config.json before path analysis
+    LOG_DEBUG("Chat template detection returned generic, caller should try config.json");
     return ModelConfig::create_generic();
 }
 
 ModelConfig Models::detect_from_model_path(const std::string& model_path) {
     return detect_from_path_analysis(model_path);
+}
+
+ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
+    std::string config_file = model_dir + "/config.json";
+    std::ifstream file(config_file);
+    if (!file.is_open()) {
+        LOG_DEBUG("No config.json found at: " + config_file);
+        return ModelConfig::create_generic();
+    }
+
+    std::string config_json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+
+    LOG_DEBUG("Detecting model family from config.json...");
+
+    // Helper lambda to extract string value after a key
+    auto extract_string = [&config_json](const std::string& key) -> std::string {
+        size_t pos = config_json.find("\"" + key + "\"");
+        if (pos == std::string::npos) return "";
+        size_t colon = config_json.find(":", pos);
+        if (colon == std::string::npos) return "";
+        size_t quote_start = config_json.find("\"", colon);
+        if (quote_start == std::string::npos) return "";
+        size_t quote_end = config_json.find("\"", quote_start + 1);
+        if (quote_end == std::string::npos) return "";
+        return config_json.substr(quote_start + 1, quote_end - quote_start - 1);
+    };
+
+    // Check architecture field (TensorRT-LLM engine format, also works for HF)
+    std::string architecture = extract_string("architecture");
+    if (!architecture.empty()) {
+        LOG_DEBUG("Found architecture: " + architecture);
+
+        // Map architecture class names to model families
+        if (architecture.find("Llama") != std::string::npos) {
+            // Check for Llama 3.x specific tokens in the config
+            if (config_json.find("<|begin_of_text|>") != std::string::npos ||
+                config_json.find("<|eom_id|>") != std::string::npos) {
+                LOG_INFO("Detected Llama 3.x from config.json architecture");
+                return ModelConfig::create_llama_3x();
+            } else {
+                LOG_INFO("Detected Llama 2.x from config.json architecture");
+                return ModelConfig::create_llama_2x();
+            }
+        }
+        else if (architecture.find("Qwen2") != std::string::npos && architecture.find("Qwen3") == std::string::npos) {
+            LOG_INFO("Detected Qwen 2.x from config.json architecture");
+            return ModelConfig::create_qwen_2x();
+        }
+        else if (architecture.find("Qwen") != std::string::npos) {
+            // Qwen3 or generic Qwen
+            LOG_INFO("Detected Qwen 3.x from config.json architecture");
+            return ModelConfig::create_qwen_3x();
+        }
+        else if (architecture.find("GLM") != std::string::npos || architecture.find("ChatGLM") != std::string::npos) {
+            LOG_INFO("Detected GLM-4 from config.json architecture");
+            return ModelConfig::create_glm_4();
+        }
+        else if (architecture.find("Mistral") != std::string::npos) {
+            LOG_INFO("Detected Mistral from config.json architecture");
+            // Mistral uses similar format to Llama 2
+            return ModelConfig::create_llama_2x();
+        }
+    }
+
+    // Check model_type field (standard HuggingFace format)
+    std::string model_type = extract_string("model_type");
+    if (!model_type.empty()) {
+        LOG_DEBUG("Found model_type: " + model_type);
+
+        // Convert to lowercase for comparison
+        std::transform(model_type.begin(), model_type.end(), model_type.begin(), ::tolower);
+
+        if (model_type == "llama") {
+            if (config_json.find("<|begin_of_text|>") != std::string::npos ||
+                config_json.find("<|eom_id|>") != std::string::npos) {
+                LOG_INFO("Detected Llama 3.x from config.json model_type");
+                return ModelConfig::create_llama_3x();
+            } else {
+                LOG_INFO("Detected Llama 2.x from config.json model_type");
+                return ModelConfig::create_llama_2x();
+            }
+        }
+        else if (model_type == "qwen2") {
+            LOG_INFO("Detected Qwen 2.x from config.json model_type");
+            return ModelConfig::create_qwen_2x();
+        }
+        else if (model_type == "qwen" || model_type == "qwen3") {
+            LOG_INFO("Detected Qwen 3.x from config.json model_type");
+            return ModelConfig::create_qwen_3x();
+        }
+        else if (model_type == "chatglm" || model_type == "glm") {
+            LOG_INFO("Detected GLM-4 from config.json model_type");
+            return ModelConfig::create_glm_4();
+        }
+        else if (model_type == "mistral") {
+            LOG_INFO("Detected Mistral from config.json model_type");
+            return ModelConfig::create_llama_2x();
+        }
+    }
+
+    // Check qwen_type field (TensorRT-LLM Qwen format)
+    std::string qwen_type = extract_string("qwen_type");
+    if (!qwen_type.empty()) {
+        LOG_DEBUG("Found qwen_type: " + qwen_type);
+        if (qwen_type == "qwen3") {
+            LOG_INFO("Detected Qwen 3.x from config.json qwen_type");
+            return ModelConfig::create_qwen_3x();
+        } else if (qwen_type == "qwen2") {
+            LOG_INFO("Detected Qwen 2.x from config.json qwen_type");
+            return ModelConfig::create_qwen_2x();
+        }
+    }
+
+    LOG_DEBUG("Could not detect model family from config.json");
+    return ModelConfig::create_generic();
 }
 
 ModelConfig Models::detect_from_model_name(const std::string& model_name) {
@@ -99,10 +209,11 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
                 version = "3";
             }
 
-            // Check if this is a thinking model (model_lower already defined above)
-            // MindLink models are Qwen3 derivatives that use thinking mode
-            bool is_thinking = (model_lower.find("thinking") != std::string::npos) ||
-                               (model_lower.find("mindlink") != std::string::npos);
+            // Check if this is a thinking model by looking for <think> in the template
+            // Don't assume based on model name - check the actual template content
+            bool is_thinking = (template_text.find("<think>") != std::string::npos) ||
+                               (template_text.find("</think>") != std::string::npos) ||
+                               (model_lower.find("thinking") != std::string::npos);
             if (is_thinking) {
                 LOG_INFO("Detected Thinking model variant");
             }
@@ -167,9 +278,9 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
         if (version.empty()) {
             version = "3";
         }
-        // MindLink models are Qwen3 derivatives that use thinking mode
-        bool is_thinking = (model_lower.find("thinking") != std::string::npos) ||
-                           (model_lower.find("mindlink") != std::string::npos);
+        // Only detect thinking mode if "thinking" is in the name
+        // Path-based detection can't check template content, so be conservative
+        bool is_thinking = (model_lower.find("thinking") != std::string::npos);
         if (is_thinking) {
             LOG_INFO("Detected Thinking model variant from path");
         }
@@ -434,9 +545,19 @@ void Models::init(const std::string& custom_path) {
         LOG_WARN("Failed to load custom models file: " + custom_path);
     }
 
-    std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
-    if (!home.empty()) {
-        std::string user_path = home + "/.shepherd/models.json";
+    // Check XDG config location first
+    std::string config_home;
+    const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
+    if (xdg_config && xdg_config[0] != '\0') {
+        config_home = xdg_config;
+    } else {
+        std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
+        if (!home.empty()) {
+            config_home = home + "/.config";
+        }
+    }
+    if (!config_home.empty()) {
+        std::string user_path = config_home + "/shepherd/models.json";
         if (std::filesystem::exists(user_path)) {
             loaded = load_models_database(user_path);
             if (loaded) {

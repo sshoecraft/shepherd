@@ -259,19 +259,20 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 			if (!prov) {
 				std::cout << "Provider '" << name << "' not found\n";
 			} else {
-				// Create new backend from provider
-				auto new_backend = BackendFactory::create_from_provider(prov, backend->context_size);
+				// Shutdown current backend first to free GPU memory
+				size_t old_context_size = backend->context_size;
+				backend->shutdown();
+
+				// Connect to the specified provider (creates and initializes)
+				auto new_backend = provider_manager.connect_provider(name, session, old_context_size);
 				if (!new_backend) {
-					std::cout << "Failed to create backend for provider '" << name << "'\n";
+					std::cout << "Failed to connect to provider '" << name << "'\n";
 					return true;
 				}
 
-				// Initialize the new backend
-				new_backend->initialize(session);
-
-				// Switch session to new backend
-				session.switch_backend(new_backend.release());
-				provider_manager.set_current_provider(name);
+				// Update backend ownership and session pointer
+				backend = std::move(new_backend);
+				session.backend = backend.get();
 
 				std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
 			}
@@ -279,31 +280,33 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 		}
 
 		if (subcmd == "next") {
-			auto next = provider_manager.get_next_provider();
-			if (!next) {
+			auto next_name = provider_manager.get_next_provider();
+			if (!next_name) {
 				std::cout << "No available providers (all rate limited or none configured)\n";
 			} else {
-				auto prov = provider_manager.get_provider(*next);
-				if (!prov) {
-					std::cout << "Failed to load provider '" << *next << "'\n";
-					return true;
-				}
+				// Shutdown current backend first to free GPU memory
+				size_t old_context_size = backend->context_size;
+				backend->shutdown();
 
-				// Create new backend from provider
-				auto new_backend = BackendFactory::create_from_provider(prov, backend->context_size);
+				// Connect to the next provider (creates and initializes)
+				auto new_backend = provider_manager.connect_provider(*next_name, session, old_context_size);
 				if (!new_backend) {
-					std::cout << "Failed to create backend for provider '" << *next << "'\n";
+					std::cout << "Failed to connect to provider '" << *next_name << "'\n";
 					return true;
 				}
 
-				// Initialize the new backend
-				new_backend->initialize(session);
+				// Get provider info for display
+				auto prov = provider_manager.get_provider(*next_name);
 
-				// Switch session to new backend
-				session.switch_backend(new_backend.release());
-				provider_manager.set_current_provider(*next);
+				// Update backend ownership and session pointer
+				backend = std::move(new_backend);
+				session.backend = backend.get();
 
-				std::cout << "Switched to provider '" << *next << "' (" << prov->type << " / " << prov->model << ")\n";
+				std::cout << "Switched to provider '" << *next_name << "'";
+				if (prov) {
+					std::cout << " (" << prov->type << " / " << prov->model << ")";
+				}
+				std::cout << "\n";
 			}
 			return true;
 		}
@@ -416,8 +419,8 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 			std::cout << "Streaming: " << (config->streaming ? "enabled" : "disabled") << "\n";
 			std::cout << "Warmup: " << (config->warmup ? "enabled" : "disabled") << "\n";
 			std::cout << "Calibration: " << (config->calibration ? "enabled" : "disabled") << "\n";
+			std::cout << "Auto provider: " << (config->auto_provider ? "enabled" : "disabled") << "\n";
 			std::cout << "Truncate limit: " << config->truncate_limit << "\n";
-			// Add more config fields as needed
 			return true;
 		}
 
@@ -435,6 +438,9 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 			} else if (key == "calibration") {
 				config->calibration = (value == "true" || value == "1" || value == "on");
 				std::cout << "Calibration " << (config->calibration ? "enabled" : "disabled") << "\n";
+			} else if (key == "auto_provider") {
+				config->auto_provider = (value == "true" || value == "1" || value == "on");
+				std::cout << "Auto provider " << (config->auto_provider ? "enabled" : "disabled") << "\n";
 			} else if (key == "truncate_limit") {
 				config->truncate_limit = std::stoi(value);
 				std::cout << "Truncate limit set to: " << config->truncate_limit << "\n";
@@ -526,6 +532,28 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 	// Get tool call markers from backend (model-specific from chat template)
 	tio.markers.tool_call_start = backend->get_tool_call_markers();
 	tio.markers.tool_call_end = backend->get_tool_call_end_markers();
+
+	// Add fallback markers if backend didn't provide any
+	// These cover common tool call formats used by various models
+	if (tio.markers.tool_call_start.empty()) {
+		LOG_DEBUG("Adding fallback tool call markers for terminal filtering");
+		tio.markers.tool_call_start = {
+			"<tool_call>", "<function_call>", "<tools>",
+			"<execute_command>", "<.execute_command>",
+			"<read>", "<.read>", "<write>", "<.write>",
+			"<bash>", "<.bash>", "<edit>", "<.edit>",
+			"<glob>", "<.glob>", "<grep>", "<.grep>"
+		};
+		tio.markers.tool_call_end = {
+			"</tool_call>", "</function_call>", "</tools>",
+			"</execute_command>", "</.execute_command>",
+			"</read>", "</.read>", "</write>", "</.write>",
+			"</bash>", "</.bash>", "</edit>", "</.edit>",
+			"</glob>", "</.glob>", "</grep>", "</.grep>"
+		};
+	} else {
+		LOG_DEBUG("Using backend-provided tool call markers: " + std::to_string(tio.markers.tool_call_start.size()));
+	}
 
 	// Get thinking markers from backend (model-specific)
 	tio.markers.thinking_start = backend->get_thinking_start_markers();

@@ -1,388 +1,211 @@
-# LlamaCpp Backend Architecture
+# llama.cpp Backend Architecture
 
 ## Overview
 
-The LlamaCpp backend (`backends/llamacpp.cpp`) provides text generation using the llama.cpp library. It manages conversation state in memory and interfaces with llama.cpp's KV cache for token processing.
+The llama.cpp backend (`llamacpp.cpp`) provides inference using the llama.cpp library. It supports GGUF model files with CPU and GPU acceleration (CUDA, Metal), multi-GPU configurations, and maintains a stateful KV cache for efficient multi-turn conversations.
 
-## Class Structure
+## Model Loading
 
-### LlamaCppBackend
+### Model Path Resolution
 
-**Inheritance:** Inherits from `Backend` base class
+The backend constructs the full model path from config:
 
-**Key Member Variables:**
-- `void* model` - Pointer to llama_model
-- `void* model_ctx` - Pointer to llama_context (KV cache lives here)
-- `void* template_node` - Pointer to minja template for chat formatting
-- `void* chat_templates` - Pointer to common_chat_templates
-- `Session backend_session` - Tracks what's in KV cache (server mode only)
-- `Session* current_session` - Pointer to active session (for callbacks)
-- `size_t context_size` - Maximum context window in tokens
-- `int system_formatted_tokens` - Token count of formatted system message
-- `int current_user_formatted_tokens` - Token count of last user message
-- `int last_assistant_formatted_tokens` - Token count of last assistant message
-
-**Key Methods:**
-- `initialize(Session& session)` - Load model and initialize KV cache
-- `add_message(Session& session, ...)` - Add single message (CLI mode)
-- `generate_from_session(const Session& session, ...)` - Generate from full session (server mode)
-- `render_message(const Message& msg, bool add_generation_prompt)` - Format message through template
-- `format_and_decode_message(Message& msg)` - Format and add tokens to KV cache
-- `count_message_tokens(...)` - Count tokens for a message
-- `generate(int max_tokens, StreamCallback callback)` - Generate tokens from current KV state
-
-## Session Objects
-
-### Session Structure
-- `std::vector<Message> messages` - Ordered array of conversation messages
-- `std::string system_message` - System prompt (NOT stored in messages array)
-- `std::vector<Tool> tools` - Available tools for this session
-- `int total_tokens` - Cumulative token count
-- `int last_user_message_index` - Index of last user message
-- `int last_user_message_tokens` - Token count of last user message
-- `int last_assistant_message_index` - Index of last assistant message
-- `int last_assistant_message_tokens` - Token count of last assistant message
-
-### Message Structure
-- `Type type` - Enum: SYSTEM, USER, ASSISTANT, TOOL
-- `std::string content` - Message content
-- `int tokens` - Formatted token count (includes template overhead)
-- `std::string tool_name` - For tool messages
-- `std::string tool_call_id` - For tool messages
-
-### backend_session
-- Used ONLY in server mode (`generate_from_session()`)
-- Represents the exact state of KV cache
-- Contains messages that have been decoded to KV cache
-- Used for prefix comparison with incoming sessions
-
-### current_session
-- Pointer to the active Session object
-- Set during `add_message()` or `generate_from_session()`
-- Used by eviction callbacks to know which session to modify
-
-## Operating Modes
-
-### CLI Mode
-
-**Entry Point:** `add_message(Session& session, Message::Type type, const std::string& content, ...)`
-
-**Flow:**
-1. Count tokens: `count_message_tokens(type, content, tool_name, tool_id)`
-2. Create Message object with token count
-3. Format and decode: `format_and_decode_message(msg)`
-4. If decode succeeds, add message to `session.messages`
-5. Update `session.total_tokens`
-6. If USER message, call `generate()` to produce response
-7. Return Response object
-
-**State Management:**
-- `current_session` points to `&session`
-- No `backend_session` used
-- Session passed to `add_message()` is modified directly
-
-### Server Mode
-
-**Entry Point:** `generate_from_session(const Session& session, int max_tokens, StreamCallback callback)`
-
-**Flow:**
-1. Compare `session.messages` with `backend_session.messages`
-2. Find matching prefix (messages with same role and content)
-3. Clear diverged messages from KV cache if needed
-4. Set `current_session = &backend_session`
-5. Add system message if not cached
-6. Loop through NEW messages (from matching_prefix onward):
-   - Count tokens if not set
-   - Call `format_and_decode_message(msg_copy)`
-   - Add to `backend_session.messages`
-7. Update `backend_session.tools` and `backend_session.system_message`
-8. Call `generate()` to produce response
-9. Return Response object
-
-**Prefix Matching:**
-- Compares `session.messages[i]` with `backend_session.messages[i + offset]`
-- offset accounts for system message in backend_session
-- Stops at first mismatch of role or content
-- Uses matched count to determine which messages are already cached
-
-**Divergence Handling:**
-- If `backend_session` has more messages than matched
-- Calculate token position: sum of `message.tokens` for kept messages
-- Clear KV cache from that position: `llama_memory_seq_rm(mem, 0, clear_from_pos, -1)`
-- Remove messages from `backend_session.messages`
-
-## Message Formatting
-
-### render_message()
-
-**Location:** Line 964
-
-**Purpose:** Format a message through the chat template abstraction
-
-**Implementation:**
-- Uses `chat_template->format_message(msg)` to format the message
-- ChatTemplate handles model-specific formatting (ChatML, Llama3, GLM4, etc.)
-- Adds generation prompt if requested: `chat_template->get_generation_prompt()`
-- No more hard-coded format strings - all handled by ChatTemplate classes
-
-**Returns:** Formatted string ready for tokenization
-
-**See:** `backends/chat_template.md` for details on ChatTemplate system
-
-### format_and_decode_message()
-
-**Location:** Line 1038
-
-**Purpose:** Format message and add tokens to KV cache
-
-**Flow:**
-1. Check if assistant message (line 1037)
-   - If YES: use raw content (no template)
-   - If NO: call `render_message(msg, false)`
-2. Get llama_context and llama_vocab
-3. Tokenize rendered string: `llama_tokenize()`
-4. Update `msg.tokens` with actual token count
-5. Check if message fits in context
-6. Check if eviction needed
-7. Decode tokens to KV cache: `llama_batch_decode()`
-8. Return success/failure
-
-**Assistant Message Handling:**
-- Never run through template
-- Use `msg.content` directly
-- Prevents "think tag stripping"
-
-### count_message_tokens()
-
-**Location:** Line 100
-
-**Purpose:** Count tokens for a message before decoding
-
-**Implementation:**
-- Checks if model/chat_templates initialized
-- Converts Message::Type to role string
-- Builds `common_chat_msg` for the message
-- Uses `common_chat_format_single()` with conversation context
-- Tokenizes through llama_tokenize
-- Returns token count
-
-**Used For:**
-- Pre-calculating token requirements
-- Context limit checks
-- API response metrics
-
-## Chat Template System
-
-### Initialization
-
-**In initialize()** (line 1612-1677):
-1. Get chat template string from model: `llama_model_meta_val_str()`
-2. Save to `/tmp/shepherd_chat_template.jinja` for debugging
-3. Initialize chat_templates: `common_chat_templates_init(model, ...)`
-4. Parse with minja: `minja::Parser::parse()`
-5. Store in `template_node` pointer (kept for MinjaTemplate fallback)
-6. Detect model family from template patterns: `Models::detect_from_chat_template()`
-7. **Create ChatTemplate instance**: `ChatTemplateFactory::create(template_text, model_config, template_node)`
-8. Store in `chat_template` member
-
-### ChatTemplate Abstraction
-
-**Purpose:** Abstract chat template formatting into model-specific classes
-
-**Factory Pattern:**
-- `ChatTemplateFactory::create()` detects model family and instantiates appropriate template class
-- Supports: ChatMLTemplate (Qwen), Llama3Template, GLM4Template, MinjaTemplate (fallback)
-
-**Usage:**
-- `chat_template->format_message(msg)` - Format user/assistant/tool messages
-- `chat_template->format_system_message(content, tools)` - Format system message with tools
-- `chat_template->get_generation_prompt()` - Get assistant start tag
-- `chat_template->get_assistant_end_tag()` - Get assistant end tag
-
-**Benefits:**
-- No hard-coded format strings in backend logic
-- Easy to add new template types
-- Fallback to minja for unknown templates
-- Consistent formatting across all message types
-
-**See:** `backends/chat_template.md` for complete ChatTemplate documentation
-
-### Model Family Detection
-
-**Detected from template** (line 1667):
-- Uses `Models::detect_from_chat_template(chat_template_text, model_path)`
-- Checks for specific patterns in template string
-- Sets `model_config.family` (LLAMA_3_X, QWEN_2_X, QWEN_3_X, GLM_4, etc.)
-- Sets `model_config.tool_result_role` ("tool", "ipython", or "observation")
-- Sets flags: `uses_eom_token`, `uses_python_tag`, `uses_builtin_tools_array`
-- Returns ModelConfig used by ChatTemplateFactory
-
-## KV Cache Management
-
-### Token Decoding
-
-**Process:**
-1. Create llama_batch from tokens
-2. Set sequence id (always 0)
-3. Call `llama_batch_decode(ctx, batch)`
-4. Tokens now in KV cache at current position
-
-### Position Tracking
-
-- Each message has `tokens` count
-- KV position = sum of all previous message tokens
-- Used for eviction and clearing operations
-
-### Eviction
-
-**Trigger:** Context full callback
-
-**Process:**
-1. `evict_to_free_space()` called
-2. Determine what to keep (system, last user, last assistant)
-3. Calculate token position to clear from
-4. Clear KV cache: `llama_memory_seq_rm()`
-5. Remove messages from session
-
-### Memory Operations
-
-**llama_memory_t:** Unified memory manager
-- `llama_get_memory(ctx)` - Get memory handle
-- `llama_memory_seq_rm(mem, seq_id, pos_start, pos_end)` - Remove tokens
-- Position -1 means "to end"
-
-## Generation
-
-### generate()
-
-**Location:** Line 474
-
-**Signature:** `std::string generate(int max_tokens = 0, StreamCallback callback = nullptr)`
-
-**Purpose:** Generate tokens from current KV state (internal method)
-
-**Parameters:**
-- `max_tokens` - Maximum tokens to generate (0 = use default)
-- `callback` - Optional streaming callback for token-by-token output
-
-**Flow:**
-1. Extract tool call markers from chat template
-2. Log KV cache state (messages in cache)
-3. Add generation prompt to KV cache (e.g., `<|im_start|>assistant\n`)
-4. Call `run_inference()` with callback
-5. Add closing tag to KV cache (e.g., `<|im_end|>\n`)
-6. Return generated text
-
-**Used by:**
-- CLI mode: `add_message()` calls `generate()` without callback
-- Server mode: `generate_from_session()` calls `generate()` with callback for streaming
-
-### run_inference()
-
-**Location:** Line 714
-
-**Signature:** `std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, StreamCallback callback = nullptr)`
-
-**Purpose:** Core token generation loop using llama.cpp
-
-**Parameters:**
-- `prompt_text` - Text to generate from (usually empty since KV cache is pre-filled)
-- `max_tokens` - Maximum tokens to generate
-- `suppress_streaming` - If true, don't write to terminal (set in server mode)
-- `callback` - Optional streaming callback for API server streaming
-
-**Flow:**
-1. Calculate available tokens (context - used)
-2. Cap max_tokens if needed
-3. Create sampling context: `common_sampler_init()`
-4. Generation loop until stop condition:
-   - Sample next token: `common_sampler_sample()`
-   - Check for EOS/EOG tokens (break if found)
-   - Convert token to text: `llama_token_to_piece()`
-   - Accumulate text in response string
-   - **Call streaming callback if provided** (line 882-891)
-   - Write to terminal if not suppressed (line 894-896)
-   - Decode token into KV cache
-   - Check for cancellation (Escape key)
-5. Return accumulated response text
-
-**Sampling:**
-- Uses `common_sampler` from llama.cpp
-- Configured with temperature, top_p, top_k, etc.
-- Supports penalties (repeat, frequency, presence)
-
-**Streaming:**
-- Two streaming mechanisms:
-  1. **Terminal streaming** - Writes to `tio` (TerminalIO) unless `suppress_streaming=true`
-  2. **Callback streaming** - Calls provided callback with delta for each token
-- Callback signature: `bool callback(const std::string& delta, const std::string& accumulated, const Response& partial)`
-- Callback returns bool (false = stop generation)
-- Used by API server for SSE streaming to clients
-
-## Initialization Flow
-
-### initialize(Session& session)
-
-**Purpose:** Load model and prepare for inference
-
-**Steps:**
-1. Load model: `llama_model_load(model_path, params)`
-2. Set context size from model metadata
-3. Configure GPU layers (auto-detect or specified)
-4. Configure multi-GPU if multiple devices
-5. Create context: `llama_backend_init_ctx(model, ctx_params)`
-6. Initialize chat templates
-7. Detect model family
-8. Add system message to session if provided
-
-**GPU Configuration:**
-- Detects available CUDA devices
-- Supports pipeline parallelism (PP) and tensor parallelism (TP)
-- Split modes: LAYER (PP) or ROW (TP)
-- Distributes model across devices
-
-**Batch Size:**
-- Default: 512 tokens
-- GPU: increased to 2048
-- Used for prompt processing
-
-## Tool Handling
-
-### System Message with Tools
-
-**Format via Models::format_system_message():**
-1. Get base system message
-2. If tools present, append tool descriptions
-3. Format as JSON schema or plain text
-4. Return formatted string
-
-**Tool Invocation:**
-- Model generates tool_call in response
-- Parser extracts tool name and arguments
-- Shepherd executes tool
-- Result added as TOOL message
-- Conversation continues
-
-## Debug Output
-
-### Response Debug File
-
-**Location:** `/tmp/shepherd_response_debug.txt`
-
-Raw model responses are always written to this file for debugging. Each response is logged with timestamp and length:
-
-```
-=== Response at <timestamp> ===
-<raw response content including think tags if present>
-=== End (length: <bytes>) ===
+```cpp
+// If absolute path, use directly
+if (model_filename[0] == '/') {
+    full_model_path = model_filename;
+} else {
+    // Combine model_path directory with filename
+    full_model_path = model_path / model_filename;
+}
 ```
 
-This is useful for debugging thinking model behavior and verifying what the model actually outputs before any filtering.
+### GPU Layer Configuration
 
-## File Locations
+Priority for GPU layers:
+1. `GGML_N_GPU_LAYERS` environment variable
+2. `gpu_layers` config setting
+3. Auto mode (`-1` or unset): loads all layers to GPU
 
-- `backends/llamacpp.cpp` - Implementation
-- `backends/llamacpp.h` - Header
-- `llama.cpp/` - Submodule dependency
-- `/tmp/shepherd_chat_template.jinja` - Extracted template (debug)
-- `/tmp/shepherd_response_debug.txt` - Raw response log (debug)
+```cpp
+if (gpu_layers >= 0) {
+    model_params.n_gpu_layers = gpu_layers;
+} else {
+    model_params.n_gpu_layers = INT32_MAX;  // Auto: llama.cpp caps at actual count
+}
+```
+
+### Multi-GPU Support
+
+Two parallelism modes available:
+
+1. **Pipeline Parallelism (PP)** - `pipeline_parallel` config
+   - Uses `LLAMA_SPLIT_MODE_LAYER`
+   - Distributes layers across GPUs
+   - No peer-to-peer GPU communication needed
+
+2. **Tensor Parallelism (TP)** - `tensor_parallel` config
+   - Uses `LLAMA_SPLIT_MODE_ROW`
+   - Splits individual tensors across GPUs
+   - Requires GPU peer-to-peer support
+
+```cpp
+if (tensor_parallel > 1) {
+    model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
+} else {
+    model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+}
+```
+
+## Stateful KV Cache
+
+### Design Philosophy
+
+Unlike typical inference where each request rebuilds context, shepherd maintains a persistent KV cache across turns:
+
+- Messages are tokenized and added to KV cache incrementally
+- The cache persists between user messages
+- Only new tokens need to be processed for each turn
+- Dramatically reduces latency for multi-turn conversations
+
+### Token Tracking
+
+Each message in the session tracks its token count:
+
+```cpp
+struct Message {
+    int tokens;  // Actual tokens in KV cache for this message
+};
+```
+
+The backend verifies KV cache state matches session state:
+
+```cpp
+int expected = sum of message.tokens;
+int actual = llama_memory_seq_pos_max(mem, 0) + 1;
+// These should match
+```
+
+### Eviction Strategy
+
+When KV cache fills up, the backend evicts old messages to make room:
+
+1. Calculate tokens needed for new content
+2. Identify message ranges to evict (oldest first, preserving system prompt)
+3. Use `llama_kv_self_seq_rm()` to remove token ranges
+4. Use `llama_kv_self_seq_shift()` to compact remaining tokens
+5. Update session to reflect removed messages
+
+```cpp
+uint32_t evict_to_free_space(uint32_t tokens_needed);
+```
+
+## Chat Template Handling
+
+### Template Sources
+
+1. **llama.cpp's common_chat_templates** - Primary source, handles tool formatting
+2. **minja template parser** - For token counting and custom rendering
+
+### Tool Call Detection
+
+The backend extracts tool call markers from the chat template:
+
+```cpp
+// Common patterns:
+// - Hermes format: <tool_call> ... </tool_call>
+// - Llama format: <|python_tag|> ... <|eom_id|>
+```
+
+These markers are used to detect when the model is making a tool call.
+
+### Thinking Model Support
+
+For models that support reasoning (Qwen3, etc.), the backend tracks thinking markers:
+
+```cpp
+std::vector<std::string> thinking_start_markers;  // e.g., "<think>"
+std::vector<std::string> thinking_end_markers;    // e.g., "</think>"
+```
+
+## Generation Flow
+
+### Sampling Chain
+
+The sampler chain is configured in this order (per llama.cpp recommendations):
+
+1. `top_k` - Limit vocabulary to top K tokens
+2. `top_p` - Nucleus sampling
+3. `penalties` - Repetition, frequency, presence penalties
+4. `temperature` - Final temperature scaling
+5. `dist` - Distribution sampling
+
+```cpp
+llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
+llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, min_keep));
+llama_sampler_chain_add(sampler, llama_sampler_init_penalties(...));
+llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
+llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));
+```
+
+### Cancellation Support
+
+Generation can be cancelled via `g_generation_cancelled` global:
+
+```cpp
+// Check between batches during prompt processing
+if (g_generation_cancelled) {
+    LOG_INFO("Generation cancelled");
+    return "";
+}
+
+// Check during token generation
+if (g_generation_cancelled) {
+    break;
+}
+```
+
+This enables responsive Ctrl+C handling.
+
+## Shutdown
+
+The `shutdown()` method properly cleans up resources:
+
+```cpp
+void shutdown() {
+    llama_free(model_ctx);      // Free context
+    llama_model_free(model);    // Free model
+    common_chat_templates_free(chat_templates);
+}
+```
+
+This is called:
+- When switching providers (to free GPU memory)
+- In the destructor
+- On application exit
+
+## Configuration Options
+
+From provider config JSON:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `temperature` | float | 0.7 | Sampling temperature |
+| `top_p` | float | 0.9 | Nucleus sampling threshold |
+| `top_k` | int | 40 | Top-K sampling limit |
+| `min_keep` | int | 1 | Minimum tokens to keep |
+| `penalty_repeat` | float | 1.0 | Repetition penalty (1.0 = disabled) |
+| `penalty_freq` | float | 0.0 | Frequency penalty |
+| `penalty_present` | float | 0.0 | Presence penalty |
+| `penalty_last_n` | int | 64 | Tokens to consider for penalties |
+| `gpu_layers` | int | -1 | GPU layers (-1 = auto) |
+| `context_size` | int | 32768 | Context window size |
+| `pipeline_parallel` / `pp` | int | 1 | Pipeline parallelism (GPUs) |
+| `tensor_parallel` / `tp` | int | 1 | Tensor parallelism (GPUs) |
+| `ubatch` | int | 512 | Batch size for prompt processing |
+
+## Key Files
+
+- `llamacpp.cpp` - Main backend implementation
+- `llamacpp.h` - Header with class definition
+- `llama.cpp/` - Submodule with llama.cpp library

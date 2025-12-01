@@ -478,7 +478,6 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
 
             // Non-streaming response
             Response resp = backend->generate_from_session(session, max_tokens);
-			session.dump();
 
             // Check for errors
             if (!resp.success) {

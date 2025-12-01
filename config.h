@@ -62,6 +62,7 @@ public:
     int truncate_limit;
     bool streaming;
     bool thinking;        // Show thinking/reasoning blocks in output
+    bool auto_provider;   // Auto-switch to next provider on connection failure
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
     // Legacy/runtime fields (not saved to config, only used for command-line overrides)

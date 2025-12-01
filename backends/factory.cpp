@@ -12,6 +12,12 @@
 std::unique_ptr<Backend> BackendFactory::create_from_provider(ProviderConfig* provider, size_t context_size) {
     LOG_DEBUG("Creating backend from provider: " + provider->name + " (type: " + provider->type + ")");
 
+    // Print loading message - but only for the initial process (not mpirun children)
+    // This ensures "Loading provider" prints exactly once, even for TensorRT multi-GPU
+    if (!getenv("OMPI_COMM_WORLD_SIZE")) {
+        std::cerr << "Loading provider: " << provider->name << std::endl;
+    }
+
     // Set config globals from provider (for now, until backends are fully refactored)
     extern std::unique_ptr<Config> config;
     config->model = provider->model;

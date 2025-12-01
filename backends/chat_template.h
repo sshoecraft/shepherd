@@ -49,6 +49,17 @@ public:
     ModelFamily get_family() const override;
 };
 
+class Llama2Template : public ChatTemplate {
+public:
+    Llama2Template() = default;
+
+    std::string format_message(const Message& msg) const override;
+    std::string format_system_message(const std::string& content, const std::vector<Session::Tool>& tools) const override;
+    std::string get_generation_prompt() const override;
+    std::string get_assistant_end_tag() const override;
+    ModelFamily get_family() const override;
+};
+
 class Llama3Template : public ChatTemplate {
 public:
     Llama3Template() = default;
@@ -73,7 +84,8 @@ public:
 
 class MinjaTemplate : public ChatTemplate {
 public:
-    MinjaTemplate(const std::string& template_text, void* template_node_ptr);
+    MinjaTemplate(const std::string& template_text, void* template_node_ptr,
+                  const std::string& eos_token = "", const std::string& bos_token = "");
     ~MinjaTemplate() override;
 
     std::string format_message(const Message& msg) const override;
@@ -85,13 +97,17 @@ public:
 private:
     std::string template_text;
     void* template_node;
+    std::string eos_token;
+    std::string bos_token;
 };
 
 class ChatTemplateFactory {
 public:
     static std::unique_ptr<ChatTemplate> create(const std::string& template_text,
                                                   const ModelConfig& config,
-                                                  void* template_node_ptr = nullptr);
+                                                  void* template_node_ptr = nullptr,
+                                                  const std::string& eos_token = "",
+                                                  const std::string& bos_token = "");
 };
 
 } // namespace ChatTemplates

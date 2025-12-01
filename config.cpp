@@ -59,6 +59,9 @@ void Config::set_defaults() {
 
 	// Thinking/reasoning blocks hidden by default
 	thinking = false;
+
+	// Auto-switch provider on connection failure (disabled by default)
+	auto_provider = false;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -164,7 +167,12 @@ std::string Config::get_config_path() const {
 }
 
 std::string Config::get_default_model_path() const {
-    return get_home_directory() + "/.shepherd/models";
+    // Use XDG data directory
+    const char* xdg_data = getenv("XDG_DATA_HOME");
+    if (xdg_data && xdg_data[0] != '\0') {
+        return std::string(xdg_data) + "/shepherd/models";
+    }
+    return get_home_directory() + "/.local/share/shepherd/models";
 }
 
 void Config::load() {
@@ -260,6 +268,11 @@ void Config::load() {
             thinking = json["thinking"].get<bool>();
         }
 
+        // Load auto_provider setting (auto-switch on connection failure)
+        if (json.contains("auto_provider")) {
+            auto_provider = json["auto_provider"].get<bool>();
+        }
+
         // Load RAG memory database path (optional)
         if (json.contains("memory_database")) {
             memory_database = json["memory_database"];
@@ -310,6 +323,7 @@ void Config::save() const {
             {"calibration", calibration},
             {"streaming", streaming},
             {"thinking", thinking},
+            {"auto_provider", auto_provider},
             {"truncate_limit", truncate_limit},
             {"max_db_size", max_db_size_str}
         };

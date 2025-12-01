@@ -249,9 +249,270 @@ std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content)
     return ToolCall(tool_name, tool_params, xml_content, "");
 }
 
+// Parse <tools> block with JSON inside (possibly in markdown code fence)
+// Format: <tools>\n```json\n{ "name": "...", "arguments": {...} }\n```
+std::optional<ToolCall> parse_tools_block(const std::string& response) {
+    // Look for <tools> tag
+    size_t tools_start = response.find("<tools>");
+    if (tools_start == std::string::npos) {
+        return std::nullopt;
+    }
+
+    // Extract content after <tools>
+    std::string after_tag = response.substr(tools_start + 7);
+
+    // Try to find JSON - might be in a code fence or raw
+    std::string json_str;
+
+    // Check for markdown code fence
+    size_t fence_start = after_tag.find("```");
+    if (fence_start != std::string::npos) {
+        // Skip the opening fence and optional language tag
+        size_t json_start = after_tag.find('\n', fence_start);
+        if (json_start != std::string::npos) {
+            json_start++;
+            size_t fence_end = after_tag.find("```", json_start);
+            if (fence_end != std::string::npos) {
+                json_str = after_tag.substr(json_start, fence_end - json_start);
+            }
+        }
+    } else {
+        // Look for raw JSON
+        json_str = extract_json(after_tag);
+    }
+
+    if (json_str.empty()) {
+        return std::nullopt;
+    }
+
+    // Trim whitespace
+    json_str = trim(json_str);
+
+    try {
+        auto json_obj = nlohmann::json::parse(json_str);
+
+        // Must have "name" field
+        if (!json_obj.contains("name")) {
+            return std::nullopt;
+        }
+
+        std::string tool_name = json_obj["name"].get<std::string>();
+        LOG_DEBUG("Found <tools> block tool call: " + tool_name);
+
+        // Get arguments/parameters
+        nlohmann::json args;
+        if (json_obj.contains("arguments")) {
+            args = json_obj["arguments"];
+        } else if (json_obj.contains("parameters")) {
+            args = json_obj["parameters"];
+        }
+
+        std::map<std::string, std::any> tool_params;
+        for (auto& [key, value] : args.items()) {
+            if (value.is_string()) {
+                tool_params[key] = value.get<std::string>();
+            } else if (value.is_number_integer()) {
+                tool_params[key] = value.get<int>();
+            } else if (value.is_number_float()) {
+                tool_params[key] = value.get<double>();
+            } else if (value.is_boolean()) {
+                tool_params[key] = value.get<bool>();
+            } else {
+                tool_params[key] = value.dump();
+            }
+        }
+
+        // Extract content before the tag
+        std::string content_before;
+        if (tools_start > 0) {
+            content_before = trim(response.substr(0, tools_start));
+        }
+
+        ToolCall tc;
+        tc.name = tool_name;
+        tc.parameters = tool_params;
+        tc.raw_json = args.dump();
+        tc.tool_call_id = "";
+        tc.content = content_before;
+
+        LOG_DEBUG("Successfully parsed <tools> block with " + std::to_string(tool_params.size()) + " parameters");
+        return tc;
+
+    } catch (const nlohmann::json::exception& e) {
+        LOG_DEBUG("Failed to parse JSON in <tools> block: " + std::string(e.what()));
+    }
+
+    return std::nullopt;
+}
+
+// Parse XML wrapper with JSON content: <toolname>{ JSON }</toolname>
+// Matches tags at the start of a line containing JSON arguments
+// Also handles malformed tags like <.toolname> (with leading dot)
+std::optional<ToolCall> parse_xml_wrapped_json(const std::string& response) {
+    // Look for pattern: <toolname>\n  { ... }\n or <toolname>{ ... }</toolname>
+    // Also match <.toolname> with leading dot (some models do this)
+    std::regex tag_regex(R"(<\.?([a-zA-Z_][a-zA-Z0-9_]*)>\s*\{([^}]*)\})");
+    std::smatch match;
+
+    if (std::regex_search(response, match, tag_regex)) {
+        std::string tool_name = match[1].str();
+        std::string json_content = "{" + match[2].str() + "}";
+
+        LOG_DEBUG("Found XML-wrapped JSON tool call: " + tool_name);
+
+        try {
+            auto json_obj = nlohmann::json::parse(json_content);
+
+            std::map<std::string, std::any> tool_params;
+            for (auto& [key, value] : json_obj.items()) {
+                if (value.is_string()) {
+                    tool_params[key] = value.get<std::string>();
+                } else if (value.is_number_integer()) {
+                    tool_params[key] = value.get<int>();
+                } else if (value.is_number_float()) {
+                    tool_params[key] = value.get<double>();
+                } else if (value.is_boolean()) {
+                    tool_params[key] = value.get<bool>();
+                } else {
+                    tool_params[key] = value.dump();
+                }
+                LOG_DEBUG("  Parameter: " + key + " = " + value.dump().substr(0, 50));
+            }
+
+            // Extract content before the tag
+            size_t tag_start = response.find("<" + tool_name + ">");
+            std::string content_before;
+            if (tag_start > 0) {
+                content_before = trim(response.substr(0, tag_start));
+            }
+
+            ToolCall tc;
+            tc.name = tool_name;
+            tc.parameters = tool_params;
+            tc.raw_json = json_content;
+            tc.tool_call_id = "";
+            tc.content = content_before;
+
+            LOG_DEBUG("Successfully parsed XML-wrapped JSON with " + std::to_string(tool_params.size()) + " parameters");
+            return tc;
+
+        } catch (const nlohmann::json::exception& e) {
+            LOG_DEBUG("Failed to parse JSON in XML wrapper: " + std::string(e.what()));
+        }
+    }
+
+    return std::nullopt;
+}
+
+// Parse simple XML tag format: <toolname param="value"/> or <toolname param="value">...</toolname>
+// Only matches tags at the start of a line (after optional whitespace)
+std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
+    // Split response into lines and look for XML tags at start of lines
+    std::istringstream stream(response);
+    std::string line;
+    std::string content_before;
+
+    while (std::getline(stream, line)) {
+        // Trim leading whitespace
+        size_t first_non_space = line.find_first_not_of(" \t");
+        if (first_non_space == std::string::npos) {
+            content_before += line + "\n";
+            continue;
+        }
+
+        std::string trimmed = line.substr(first_non_space);
+
+        // Check if line starts with < and doesn't look like HTML/markdown
+        if (trimmed.empty() || trimmed[0] != '<') {
+            content_before += line + "\n";
+            continue;
+        }
+
+        // Skip common non-tool tags
+        if (trimmed.find("<!") == 0 || trimmed.find("<?") == 0 ||
+            trimmed.find("<http") == 0 || trimmed.find("<a ") == 0 ||
+            trimmed.find("<div") == 0 || trimmed.find("<span") == 0 ||
+            trimmed.find("<p>") == 0 || trimmed.find("<br") == 0 ||
+            trimmed.find("</") == 0) {
+            content_before += line + "\n";
+            continue;
+        }
+
+        // Try to parse as <toolname attr="value" .../> or <toolname attr="value">
+        // Regex: <word followed by space/attributes, ending with /> or >
+        std::regex tag_regex(R"(<([a-zA-Z_][a-zA-Z0-9_]*)\s+([^>]*?)\s*/?>)");
+        std::smatch match;
+
+        if (std::regex_search(trimmed, match, tag_regex)) {
+            std::string tool_name = match[1].str();
+            std::string attrs_str = match[2].str();
+
+            LOG_DEBUG("Found simple XML tag tool call: " + tool_name);
+
+            // Parse attributes: key="value" or key='value'
+            std::map<std::string, std::any> tool_params;
+            std::regex attr_regex(R"(([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*["']([^"']*)["'])");
+            std::sregex_iterator attr_it(attrs_str.begin(), attrs_str.end(), attr_regex);
+            std::sregex_iterator attr_end;
+
+            for (; attr_it != attr_end; ++attr_it) {
+                std::string key = (*attr_it)[1].str();
+                std::string value = (*attr_it)[2].str();
+                tool_params[key] = value;
+                LOG_DEBUG("  Attribute: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : ""));
+            }
+
+            if (!tool_params.empty()) {
+                // Build JSON for raw_json field
+                nlohmann::json params_json;
+                for (const auto& [key, value] : tool_params) {
+                    params_json[key] = std::any_cast<std::string>(value);
+                }
+
+                // Trim trailing newline from content_before
+                while (!content_before.empty() && (content_before.back() == '\n' || content_before.back() == '\r')) {
+                    content_before.pop_back();
+                }
+
+                ToolCall tc;
+                tc.name = tool_name;
+                tc.parameters = tool_params;
+                tc.raw_json = params_json.dump();
+                tc.tool_call_id = "";
+                tc.content = content_before;
+
+                LOG_DEBUG("Successfully parsed simple XML tag with " + std::to_string(tool_params.size()) + " attributes");
+                return tc;
+            }
+        }
+
+        content_before += line + "\n";
+    }
+
+    return std::nullopt;
+}
+
 std::optional<ToolCall> parse_tool_call(const std::string& response,
                                         const std::vector<std::string>& tool_call_markers) {
-    // Try XML format first (Qwen/Unsloth models)
+    // Try <tools> block format (e.g., <tools>```json { "name": "...", "arguments": {...} }```)
+    auto tools_block_result = parse_tools_block(response);
+    if (tools_block_result.has_value()) {
+        return tools_block_result;
+    }
+
+    // Try XML-wrapped JSON format (e.g., <read>{ "file_path": "./test" }</read>)
+    auto xml_json_result = parse_xml_wrapped_json(response);
+    if (xml_json_result.has_value()) {
+        return xml_json_result;
+    }
+
+    // Try simple XML tag format (e.g., <read file_path="./test"/>)
+    auto simple_xml_result = parse_simple_xml_tag(response);
+    if (simple_xml_result.has_value()) {
+        return simple_xml_result;
+    }
+
+    // Try XML format (Qwen/Unsloth models)
     auto xml_result = parse_xml_tool_call(response);
     if (xml_result.has_value()) {
         return xml_result;

@@ -89,9 +89,11 @@ private:
     FilterState filter_state;
     bool in_tool_call;
     bool in_thinking;
+    bool in_code_block;        // Inside ``` code block - don't capture tool calls
     bool suppress_output;
     std::string tag_buffer;
     std::string current_tag;
+    std::string backtick_buffer;  // Track consecutive backticks
 
     // Private methods
     std::string get_input_line(const char* prompt);

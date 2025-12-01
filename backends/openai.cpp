@@ -64,11 +64,15 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
         try {
             nlohmann::json error_json = nlohmann::json::parse(http_response.body);
             if (error_json.contains("error")) {
+                // OpenAI format: {"error": {"message": "..."}} or {"error": "..."}
                 if (error_json["error"].is_object() && error_json["error"].contains("message")) {
                     resp.error = error_json["error"]["message"].get<std::string>();
                 } else if (error_json["error"].is_string()) {
                     resp.error = error_json["error"].get<std::string>();
                 }
+            } else if (error_json.contains("message")) {
+                // TRT-LLM/vLLM format: {"object":"error","message":"...","type":"..."}
+                resp.error = error_json["message"].get<std::string>();
             }
         } catch (...) {
             // If JSON parsing fails, use raw error

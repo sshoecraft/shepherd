@@ -260,111 +260,29 @@ void TensorRTBackend::parse_backend_config() {
 
 #ifdef ENABLE_TENSORRT
 ModelConfig TensorRTBackend::detect_model_family() {
-    // Use centralized model detection from Models class
+    // Detection priority: chat template -> config.json -> path
+    // All detection logic is centralized in the Models class
+
+    // 1. Try chat template detection (most reliable when template exists)
     ModelConfig config = Models::detect_from_chat_template(chat_template_text_, model_path_);
-
-    // If template detection failed, try config.json as fallback
-    if (config.family == ModelFamily::GENERIC) {
-        std::string config_file = model_path_ + "/config.json";
-        std::ifstream file(config_file);
-        if (file.is_open()) {
-            std::string config_json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            file.close();
-
-            LOG_DEBUG("Detecting model family from config.json...");
-
-            // TensorRT engines might have a different config structure
-            // Check for architecture field in pretrained_config first
-            size_t arch_pos = config_json.find("\"architecture\"");
-            if (arch_pos != std::string::npos) {
-                size_t colon_pos = config_json.find(":", arch_pos);
-                size_t quote_start = config_json.find("\"", colon_pos);
-                size_t quote_end = config_json.find("\"", quote_start + 1);
-
-                if (quote_start != std::string::npos && quote_end != std::string::npos) {
-                    std::string architecture = config_json.substr(quote_start + 1, quote_end - quote_start - 1);
-                    LOG_DEBUG("Found architecture: " + architecture);
-
-                    // Check for Qwen3ForCausalLM
-                    if (architecture == "Qwen3ForCausalLM") {
-                        LOG_INFO("Detected Qwen 3.x (MindLink) from config.json architecture");
-                        return ModelConfig::create_qwen_3x();
-                    }
-                }
-            }
-
-            // Also check for qwen_type field
-            size_t qwen_type_pos = config_json.find("\"qwen_type\"");
-            if (qwen_type_pos != std::string::npos) {
-                size_t colon_pos = config_json.find(":", qwen_type_pos);
-                size_t quote_start = config_json.find("\"", colon_pos);
-                size_t quote_end = config_json.find("\"", quote_start + 1);
-
-                if (quote_start != std::string::npos && quote_end != std::string::npos) {
-                    std::string qwen_type = config_json.substr(quote_start + 1, quote_end - quote_start - 1);
-                    LOG_DEBUG("Found qwen_type: " + qwen_type);
-
-                    if (qwen_type == "qwen3") {
-                        LOG_INFO("Detected Qwen 3.x from config.json qwen_type");
-                        return ModelConfig::create_qwen_3x();
-                    } else if (qwen_type == "qwen2") {
-                        LOG_INFO("Detected Qwen 2.x from config.json qwen_type");
-                        return ModelConfig::create_qwen_2x();
-                    }
-                }
-            }
-
-            // Look for model_type field (standard HF format)
-            size_t model_type_pos = config_json.find("\"model_type\"");
-            if (model_type_pos != std::string::npos) {
-                size_t colon_pos = config_json.find(":", model_type_pos);
-                size_t quote_start = config_json.find("\"", colon_pos);
-                size_t quote_end = config_json.find("\"", quote_start + 1);
-
-                if (quote_start != std::string::npos && quote_end != std::string::npos) {
-                    std::string model_type = config_json.substr(quote_start + 1, quote_end - quote_start - 1);
-                    LOG_DEBUG("Found model_type: " + model_type);
-
-                    // Convert to lowercase for case-insensitive comparison
-                    std::transform(model_type.begin(), model_type.end(), model_type.begin(), ::tolower);
-
-                    if (model_type == "llama") {
-                        // Check for Llama 3.x specific tokens in tokenizer
-                        if (config_json.find("<|begin_of_text|>") != std::string::npos ||
-                            config_json.find("<|eom_id|>") != std::string::npos) {
-                            LOG_INFO("Detected Llama 3.x from config.json");
-                            return ModelConfig::create_llama_3x();
-                        }
-                    }
-                    else if (model_type == "chatglm" || model_type == "glm") {
-                        LOG_INFO("Detected GLM-4.x from config.json");
-                        return ModelConfig::create_glm_4();
-                    }
-                    else if (model_type == "qwen2") {
-                        LOG_INFO("Detected Qwen 2.x from config.json");
-                        return ModelConfig::create_qwen_2x();
-                    }
-                    else if (model_type == "qwen" || model_type == "qwen3") {
-                        // Check path for MindLink or Qwen3 indicators
-                        std::string path_lower = model_path_;
-                        std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
-
-                        if (path_lower.find("mindlink") != std::string::npos ||
-                            path_lower.find("qwen3") != std::string::npos ||
-                            path_lower.find("qwen-3") != std::string::npos) {
-                            LOG_INFO("Detected Qwen 3.x (or MindLink) from config.json");
-                            return ModelConfig::create_qwen_3x();
-                        } else {
-                            LOG_INFO("Detected Qwen 2.x from config.json");
-                            return ModelConfig::create_qwen_2x();
-                        }
-                    }
-                }
-            }
-        }
+    if (config.family != ModelFamily::GENERIC) {
+        return config;
     }
 
-    return config;
+    // 2. Try config.json detection (architecture/model_type fields)
+    config = Models::detect_from_config_file(model_path_);
+    if (config.family != ModelFamily::GENERIC) {
+        return config;
+    }
+
+    // 3. Last resort: path-based detection
+    config = Models::detect_from_model_path(model_path_);
+    if (config.family != ModelFamily::GENERIC) {
+        return config;
+    }
+
+    LOG_WARN("Could not detect model family, using generic configuration");
+    return ModelConfig::create_generic();
 }
 
 void TensorRTBackend::initialize(Session& session) {
@@ -372,6 +290,9 @@ void TensorRTBackend::initialize(Session& session) {
         LOG_WARN("TensorRTBackend already initialized");
         return;
     }
+
+    // Suppress TensorRT-LLM INFO logs (they go to stdout and interfere with output)
+    setenv("TLLM_LOG_LEVEL", "error", 0);  // 0 = don't overwrite if already set
 
     // Get model path from config
     std::string model_filename = config->model;
@@ -701,31 +622,31 @@ void TensorRTBackend::initialize(Session& session) {
                 }
 
                 // Load BOS token configuration for filtering
-                add_bos_token_ = tokenizer_config.value("add_bos_token", false);
+                add_bos_token = tokenizer_config.value("add_bos_token", false);
                 if (tokenizer_config.contains("bos_token")) {
                     if (tokenizer_config["bos_token"].is_string()) {
-                        std::string bos_token_str = tokenizer_config["bos_token"].get<std::string>();
-                        if (!bos_token_str.empty()) {
-                            std::vector<int> bos_encoded = tokenizer_->encode(bos_token_str);
+                        bos_token = tokenizer_config["bos_token"].get<std::string>();
+                        if (!bos_token.empty()) {
+                            std::vector<int> bos_encoded = tokenizer_->encode(bos_token);
                             if (!bos_encoded.empty()) {
-                                bos_token_id_ = bos_encoded[0];
-                                LOG_INFO("Loaded BOS token: " + bos_token_str + " (ID: " + std::to_string(bos_token_id_) + ")");
+                                bos_token_id = bos_encoded[0];
+                                LOG_INFO("Loaded BOS token: " + bos_token + " (ID: " + std::to_string(bos_token_id) + ")");
                             }
                         }
                     } else if (tokenizer_config["bos_token"].is_object() &&
                                tokenizer_config["bos_token"].contains("content")) {
-                        std::string bos_token_str = tokenizer_config["bos_token"]["content"].get<std::string>();
-                        if (!bos_token_str.empty()) {
-                            std::vector<int> bos_encoded = tokenizer_->encode(bos_token_str);
+                        bos_token = tokenizer_config["bos_token"]["content"].get<std::string>();
+                        if (!bos_token.empty()) {
+                            std::vector<int> bos_encoded = tokenizer_->encode(bos_token);
                             if (!bos_encoded.empty()) {
-                                bos_token_id_ = bos_encoded[0];
-                                LOG_INFO("Loaded BOS token: " + bos_token_str + " (ID: " + std::to_string(bos_token_id_) + ")");
+                                bos_token_id = bos_encoded[0];
+                                LOG_INFO("Loaded BOS token: " + bos_token + " (ID: " + std::to_string(bos_token_id) + ")");
                             }
                         }
                     }
                 }
-                LOG_INFO("BOS token config: add_bos_token=" + std::string(add_bos_token_ ? "true" : "false") +
-                         ", bos_token_id=" + (bos_token_id_ >= 0 ? std::to_string(bos_token_id_) : "none"));
+                LOG_INFO("BOS token config: add_bos_token=" + std::string(add_bos_token ? "true" : "false") +
+                         ", bos_token_id=" + (bos_token_id >= 0 ? std::to_string(bos_token_id) : "none"));
             } catch (const std::exception& e) {
                 LOG_WARN("Error reading tokenizer_config.json: " + std::string(e.what()));
             }
@@ -738,6 +659,50 @@ void TensorRTBackend::initialize(Session& session) {
                  ", tool_result_role=" + model_config_.tool_result_role +
                  ", supports_thinking=" + std::to_string(model_config_.supports_thinking_mode));
 
+        // Create ChatTemplate instance based on model family
+        // Pass eos_token and bos_token for models that need them in their jinja templates
+        std::string eos_tok = stop_tokens.empty() ? "" : stop_tokens[0];
+        chat_template_ = ChatTemplates::ChatTemplateFactory::create(
+            chat_template_text_, model_config_, template_node_, eos_tok, bos_token);
+        LOG_INFO("Created ChatTemplate for family: " + std::to_string(static_cast<int>(model_config_.family)));
+
+        // Build stop token sequences for generation
+        // Some models use multi-token role tags (e.g., <|user|>) that need sequence-based stopping
+        std::vector<std::string> stop_sequences;
+
+        // Add role tags that indicate start of non-assistant content
+        // These prevent the model from generating fake user/system turns
+        if (chat_template_text_.find("<|user|>") != std::string::npos) {
+            stop_sequences.push_back("<|user|>");
+        }
+        if (chat_template_text_.find("<|system|>") != std::string::npos) {
+            stop_sequences.push_back("<|system|>");
+        }
+        // Llama 3.x style
+        if (chat_template_text_.find("<|start_header_id|>") != std::string::npos) {
+            stop_sequences.push_back("<|start_header_id|>user");
+            stop_sequences.push_back("<|start_header_id|>system");
+        }
+        // ChatML style (Qwen, etc.)
+        if (chat_template_text_.find("<|im_start|>") != std::string::npos) {
+            stop_sequences.push_back("<|im_start|>user");
+            stop_sequences.push_back("<|im_start|>system");
+        }
+
+        // Encode stop sequences
+        for (const auto& seq : stop_sequences) {
+            std::vector<int> encoded = tokenizer_->encode(seq, false);
+            if (!encoded.empty()) {
+                stop_token_ids.push_back(encoded);
+                std::string token_str;
+                for (size_t i = 0; i < encoded.size(); i++) {
+                    if (i > 0) token_str += ", ";
+                    token_str += std::to_string(encoded[i]);
+                }
+                LOG_INFO("Added stop sequence: " + seq + " -> [" + token_str + "]");
+            }
+        }
+
         // Set max_output_tokens from model config
         max_output_tokens = model_config_.max_output_tokens;
 
@@ -749,11 +714,9 @@ void TensorRTBackend::initialize(Session& session) {
 
         // In CLI mode, add system message
         if (!g_server_mode && !session.system_message.empty()) {
-            std::string formatted_system = Models::format_system_message(
-                model_config_,
+            std::string formatted_system = chat_template_->format_system_message(
                 session.system_message,
-                ToolRegistry::instance(),
-                template_node_
+                session.tools
             );
 
             Response sys_resp = add_message(session, Message::SYSTEM, formatted_system, "", "", 0, 0);
@@ -778,65 +741,21 @@ int TensorRTBackend::count_message_tokens(Message::Type type,
         return static_cast<int>(content.length() / 4.0 + 0.5);
     }
 
-    // Format message through template to get exact count
-    if (!template_node_) {
+    // Use ChatTemplate for formatting if available
+    if (!chat_template_) {
         return tokenizer_->count_tokens(content);
     }
 
-    auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node_);
-    auto context = minja::Context::builtins();
-
-    // Build messages array with just this message
-    auto messages = minja::Value::array();
-    auto msg_obj = minja::Value::object();
-
-    // Convert Message::Type to role string
-    std::string role;
-    switch (type) {
-        case Message::SYSTEM: role = "system"; break;
-        case Message::USER: role = "user"; break;
-        case Message::ASSISTANT: role = "assistant"; break;
-        case Message::TOOL: role = "tool"; break;
-        default: role = "user"; break;
-    }
-
-    msg_obj.set("role", minja::Value(role));
-    msg_obj.set("content", minja::Value(content));
-
-    if (!tool_name.empty()) {
-        msg_obj.set("name", minja::Value(tool_name));
-    }
-    if (!tool_id.empty()) {
-        msg_obj.set("tool_call_id", minja::Value(tool_id));
-    }
-
-    messages.push_back(msg_obj);
-    context->set("messages", messages);
-    context->set("add_generation_prompt", minja::Value(false));
-
-    // Add date_string and strftime_now
-    time_t now = time(nullptr);
-    struct tm* tm_info = localtime(&now);
-    char date_buffer[128];
-    strftime(date_buffer, sizeof(date_buffer), "%d %b %Y", tm_info);
-    context->set("date_string", minja::Value(std::string(date_buffer)));
-
-    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
-        if (args.args.empty()) return minja::Value("");
-        std::string format = args.args[0].get<std::string>();
-        time_t now = time(nullptr);
-        struct tm* tm_info = localtime(&now);
-        char buffer[128];
-        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
-        return minja::Value(std::string(buffer));
-    });
-    context->set("strftime_now", strftime_now);
+    // Create a temporary Message to format through ChatTemplate
+    Message msg(type, content, 0);
+    msg.tool_name = tool_name;
+    msg.tool_call_id = tool_id;
 
     try {
-        std::string rendered = (*template_ptr)->render(context);
-        return tokenizer_->count_tokens(rendered);
+        std::string formatted = chat_template_->format_message(msg);
+        return tokenizer_->count_tokens(formatted);
     } catch (const std::exception& e) {
-        LOG_WARN("Exception rendering message: " + std::string(e.what()));
+        LOG_WARN("Exception formatting message for token count: " + std::string(e.what()));
         return tokenizer_->count_tokens(content);
     }
 }
@@ -866,12 +785,7 @@ Response TensorRTBackend::add_message(Session& session, Message::Type type,
     int message_tokens = prompt_tokens;
     if (message_tokens == 0) {
         if (type == Message::SYSTEM && !session.tools.empty()) {
-            std::string formatted = Models::format_system_message(
-                model_config_,
-                content,
-                ToolRegistry::instance(),
-                template_node_
-            );
+            std::string formatted = chat_template_->format_system_message(content, session.tools);
             message_tokens = count_message_tokens(type, formatted, tool_name, tool_id);
         } else {
             message_tokens = count_message_tokens(type, content, tool_name, tool_id);
@@ -953,6 +867,7 @@ Response TensorRTBackend::add_message(Session& session, Message::Type type,
         resp.content = response_text;
         resp.prompt_tokens = message_tokens;
         resp.completion_tokens = asst_tokens;
+        resp.was_streamed = !g_server_mode;  // We wrote to tio during generate()
         // Determine finish reason
         if (!tool_calls.empty()) {
             resp.finish_reason = "tool_calls";
@@ -988,11 +903,12 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
 
     LOG_DEBUG("TensorRT generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
 
-    std::cout << "===== INCOMING SESSION =====" << std::endl;
-    session.dump();
-
-    std::cout << "===== BACKEND SESSION (CACHED) =====" << std::endl;
-    backend_session.dump();
+    // Debug: Show last message type and if generation prompt will be added
+    if (!session.messages.empty()) {
+        const auto& last_msg = session.messages.back();
+        LOG_DEBUG("Last message: type=" + std::to_string(static_cast<int>(last_msg.type)) +
+                  ", will add gen prompt=" + std::string(last_msg.type != Message::SYSTEM && last_msg.type != Message::ASSISTANT ? "YES" : "NO"));
+    }
 
     // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
     size_t cached_count = backend_session.messages.size();
@@ -1052,11 +968,9 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
 
         LOG_DEBUG("Adding system message to backend");
 
-        std::string formatted_system = Models::format_system_message(
-            model_config_,
+        std::string formatted_system = chat_template_->format_system_message(
             session.system_message,
-            ToolRegistry::instance(),
-            template_node_
+            session.tools
         );
 
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
@@ -1103,6 +1017,10 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
             // For the LAST message, add generation prompt if it will trigger generation
             bool is_last = (i == session.messages.size() - 1);
             bool will_generate = is_last && (msg_copy.type != Message::SYSTEM && msg_copy.type != Message::ASSISTANT);
+
+            LOG_INFO("Processing msg " + std::to_string(i) + ": type=" + std::to_string(static_cast<int>(msg_copy.type)) +
+                     ", is_last=" + std::string(is_last ? "true" : "false") +
+                     ", will_generate=" + std::string(will_generate ? "true" : "false"));
 
             if (!tokenize_and_accumulate_message(msg_copy, will_generate)) {
                 Response err_resp;
@@ -1164,6 +1082,16 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
     // Generate response
     std::string result = generate(backend_session, max_tokens, callback);
 
+    // Add assistant message to backend_session so next turn knows what was generated
+    if (!result.empty()) {
+        Message assistant_msg(Message::ASSISTANT, result, 0);
+        assistant_msg.tokens = tokenizer_->count_tokens(result);
+        backend_session.messages.push_back(assistant_msg);
+        backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+        backend_session.last_assistant_message_tokens = assistant_msg.tokens;
+        LOG_DEBUG("Added assistant message to backend cache (" + std::to_string(assistant_msg.tokens) + " tokens)");
+    }
+
     // If streaming (callback provided), return empty response
     if (callback) {
         Response empty_resp;
@@ -1186,63 +1114,40 @@ Response TensorRTBackend::generate_from_session(const Session& session, int max_
 // Helper methods
 
 std::string TensorRTBackend::render_message(const Message& msg, bool add_generation_prompt) {
-    LOG_DEBUG("render_message called: template_node_=" + std::string(template_node_ ? "exists" : "null") +
+    LOG_DEBUG("render_message called: chat_template_=" + std::string(chat_template_ ? "exists" : "null") +
               ", msg.type=" + std::to_string(static_cast<int>(msg.type)) +
               ", content_len=" + std::to_string(msg.content.length()));
 
-    if (!template_node_) {
+    if (!chat_template_) {
         throw BackendError("No chat template loaded - cannot render message. Model must provide a chat template in tokenizer_config.json");
     }
 
-    // Use Minja template for proper rendering (including thinking tags)
-    auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node_);
-    auto context = minja::Context::builtins();
+    std::string formatted;
 
-    // Build messages array with just this message
-    auto messages = minja::Value::array();
-    auto msg_obj = minja::Value::object();
-
-    std::string role = msg.get_role();
-    msg_obj.set("role", minja::Value(role));
-    msg_obj.set("content", minja::Value(msg.content));
-
-    if (!msg.tool_name.empty()) {
-        msg_obj.set("name", minja::Value(msg.tool_name));
-    }
-    if (!msg.tool_call_id.empty()) {
-        msg_obj.set("tool_call_id", minja::Value(msg.tool_call_id));
+    // SYSTEM messages from initialize() are already formatted by format_system_message
+    // They already contain <|im_start|>system...<|im_end|> - don't double-wrap
+    if (msg.type == Message::SYSTEM) {
+        // System messages are pre-formatted, use content directly
+        formatted = msg.content;
+    } else {
+        // Use ChatTemplate abstraction for model-specific formatting
+        formatted = chat_template_->format_message(msg);
     }
 
-    messages.push_back(msg_obj);
-    context->set("messages", messages);
-    context->set("add_generation_prompt", minja::Value(add_generation_prompt));
-
-    // Add date_string and strftime_now for template compatibility
-    time_t now = time(nullptr);
-    struct tm* tm_info = localtime(&now);
-    char date_buffer[128];
-    strftime(date_buffer, sizeof(date_buffer), "%d %b %Y", tm_info);
-    context->set("date_string", minja::Value(std::string(date_buffer)));
-
-    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
-        if (args.args.empty()) return minja::Value("");
-        std::string format = args.args[0].get<std::string>();
-        time_t now = time(nullptr);
-        struct tm* tm_info = localtime(&now);
-        char buffer[128];
-        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
-        return minja::Value(std::string(buffer));
-    });
-    context->set("strftime_now", strftime_now);
-
-    std::string result = (*template_ptr)->render(context);
+    // Add generation prompt if requested
+    // This applies to user messages and tool results - anything that triggers assistant generation
+    if (add_generation_prompt) {
+        std::string gen_prompt = chat_template_->get_generation_prompt();
+        formatted += gen_prompt;
+        LOG_DEBUG("Added generation prompt (" + std::to_string(gen_prompt.length()) + " chars)");
+    }
 
     LOG_DEBUG("Rendered message (type=" + std::to_string(static_cast<int>(msg.type)) +
-              ", role=" + role + ", add_generation_prompt=" +
+              ", role=" + msg.get_role() + ", add_generation_prompt=" +
               std::string(add_generation_prompt ? "true" : "false") + ")");
-    LOG_DEBUG("Full rendered output (" + std::to_string(result.length()) + " chars): " + result);
+    LOG_DEBUG("Full rendered output (" + std::to_string(formatted.length()) + " chars): " + formatted);
 
-    return result;
+    return formatted;
 }
 
 bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_generation_prompt) {
@@ -1397,6 +1302,18 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, St
         // Create request
         int actual_max_tokens = (max_tokens > 0) ? max_tokens : 512;
 
+        // Convert stop_token_ids to list format for TensorRT
+        std::optional<std::list<tle::VecTokens>> stop_words_opt;
+        if (!stop_token_ids.empty()) {
+            std::list<tle::VecTokens> stop_words_list;
+            for (const auto& seq : stop_token_ids) {
+                tle::VecTokens vec(seq.begin(), seq.end());
+                stop_words_list.push_back(vec);
+            }
+            stop_words_opt = stop_words_list;
+            LOG_DEBUG("Passing " + std::to_string(stop_words_list.size()) + " stop sequences to TensorRT");
+        }
+
         LOG_DEBUG("About to construct Request object");
         tle::Request request(
             input_tokens,
@@ -1408,7 +1325,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, St
             std::nullopt,  // padId
             std::nullopt,  // positionIds
             std::nullopt,  // badWords
-            std::nullopt,  // stopWords - could add additional stop sequences here
+            stop_words_opt,  // stopWords - multi-token stop sequences (e.g., <|user|>)
             std::nullopt,  // embeddingBias
             std::nullopt,  // externalDraftTokensConfig
             std::nullopt,  // pTuningConfig
@@ -1439,6 +1356,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, St
         // Collect responses
         std::string response_text;
         std::vector<int32_t> output_tokens;
+        size_t last_decoded_len = 0;  // Track decoded length for incremental output
 
         LOG_DEBUG("Starting response collection loop");
         while (request_active_) {
@@ -1489,14 +1407,24 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, St
 
                     output_tokens.insert(output_tokens.end(), beam_tokens.begin(), beam_tokens.end());
 
-                    // Decode immediately - it's essentially free (0.2 microseconds per token)
-                    std::vector<int> new_tokens(beam_tokens.begin(), beam_tokens.end());
-                    std::string new_text = tokenizer_->decode(new_tokens);
+                    // Decode all accumulated tokens to get correct spacing
+                    // BPE/SentencePiece tokenizers encode spaces INTO tokens (e.g., "▁Place")
+                    // so we must decode the full sequence and extract just the new text
+                    std::string full_decoded = tokenizer_->decode(output_tokens);
+                    std::string new_text;
+                    if (last_decoded_len < full_decoded.length()) {
+                        new_text = full_decoded.substr(last_decoded_len);
+                    } else if (full_decoded.length() > 0) {
+                        // Edge case: decoder returned shorter string (shouldn't happen but be safe)
+                        new_text = full_decoded;
+                        LOG_DEBUG("Decoder returned shorter string than expected");
+                    }
+                    last_decoded_len = full_decoded.length();
 
                     // Debug: Log token IDs and decoded text to track think tag issues
                     if (g_debug_level > 2) {
                         std::string token_ids_str;
-                        for (auto tid : new_tokens) {
+                        for (auto tid : beam_tokens) {
                             if (!token_ids_str.empty()) token_ids_str += ",";
                             token_ids_str += std::to_string(tid);
                         }
@@ -1649,16 +1577,17 @@ void TensorRTBackend::shutdown() {
         event_manager_ = nullptr;
     }
 
-    // Shutdown executor
+    // Delete executor - let destructor handle MPI coordination
+    // TensorRT-LLM examples don't call shutdown() explicitly
+    // The executor destructor handles cleanup and MPI_Finalize is atexit-registered
     if (executor_) {
         namespace tle = tensorrt_llm::executor;
         auto* executor = static_cast<tle::Executor*>(executor_);
 
         try {
-            executor->shutdown();
             delete executor;
         } catch (const std::exception& e) {
-            LOG_ERROR("Error during TensorRT executor shutdown: " + std::string(e.what()));
+            LOG_ERROR("Error during TensorRT executor cleanup: " + std::string(e.what()));
         }
 
         executor_ = nullptr;

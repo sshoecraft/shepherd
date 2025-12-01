@@ -23,6 +23,7 @@ TerminalIO::TerminalIO()
     , filter_state(NORMAL)
     , in_tool_call(false)
     , in_thinking(false)
+    , in_code_block(false)
     , suppress_output(false) {
 }
 
@@ -147,18 +148,28 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
     for (size_t i = 0; i < len; i++) {
         char c = text[i];
 
+        // Track backticks for code block detection (``` toggles code block mode)
+        if (c == '`') {
+            backtick_buffer += c;
+            if (backtick_buffer.length() >= 3) {
+                // Found ```, toggle code block state
+                in_code_block = !in_code_block;
+                backtick_buffer.clear();
+            }
+        } else {
+            backtick_buffer.clear();
+        }
+
         switch (filter_state) {
             case NORMAL:
-                if (c == '<' && last_char_was_newline) {
-                    // Only detect tags at start of line (after newline)
+                if (c == '<' && !in_code_block) {
+                    // Detect potential tag start (but not inside code blocks)
                     tag_buffer = "<";
                     filter_state = DETECTING_TAG;
                 } else {
                     if (!suppress_output) {
                         write_raw(&c, 1, color);
                     }
-                    // Track newlines for tag detection
-                    last_char_was_newline = (c == '\n');
                 }
                 break;
 
@@ -172,8 +183,33 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
                 }
 
                 // Check if we've matched a tool call start marker
+                // Also check if we're one char past a marker with a valid boundary
                 std::string matched_marker;
+                bool is_tool_call = false;
+
                 if (matches_any(tag_buffer, markers.tool_call_start, &matched_marker)) {
+                    // Exact match - wait for boundary char to confirm
+                    // Don't transition yet
+                } else {
+                    // Check if we're one char past a marker (boundary check)
+                    for (const auto& marker : markers.tool_call_start) {
+                        if (tag_buffer.length() == marker.length() + 1 &&
+                            tag_buffer.substr(0, marker.length()) == marker) {
+                            // We have marker + one more char
+                            char boundary = tag_buffer.back();
+                            if (boundary == '>' || boundary == ' ' || boundary == '/' ||
+                                boundary == '\n' || boundary == '\t' || boundary == '\r') {
+                                matched_marker = marker;
+                                is_tool_call = true;
+                                break;
+                            }
+                            // If boundary is a letter/digit, this is NOT a tool call (e.g., <reading vs <read)
+                            // Fall through to could_match check
+                        }
+                    }
+                }
+
+                if (is_tool_call) {
                     in_tool_call = true;
                     current_tag = matched_marker;
                     filter_state = IN_TOOL_CALL;
@@ -401,9 +437,11 @@ void TerminalIO::begin_response() {
     filter_state = NORMAL;
     in_tool_call = false;
     in_thinking = false;
+    in_code_block = false;
     suppress_output = false;
     tag_buffer.clear();
     current_tag.clear();
+    backtick_buffer.clear();
     last_char_was_newline = true;  // Start responses as if on new line
 }
 

@@ -1,6 +1,10 @@
 #include "provider.h"
 #include "config.h"
 #include "logger.h"
+#include "backends/backend.h"
+#include "backends/factory.h"
+#include "session.h"
+#include "shepherd.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +21,7 @@ static void serialize_common(json& j, const ProviderConfig& cfg) {
     j["name"] = cfg.name;
     j["model"] = cfg.model;
     j["priority"] = cfg.priority;
+    j["context_size"] = cfg.context_size;
 
     // Rate limits
     if (cfg.rate_limits.requests_per_second > 0 ||
@@ -57,6 +62,7 @@ static void deserialize_common(ProviderConfig& cfg, const json& j) {
     cfg.name = j.value("name", "");
     cfg.model = j.value("model", "");
     cfg.priority = j.value("priority", 100);
+    cfg.context_size = j.value("context_size", 0);
 
     // Rate limits
     if (j.contains("rate_limits")) {
@@ -91,7 +97,6 @@ json LlamaProviderConfig::to_json() const {
     j["tp"] = tp;
     j["pp"] = pp;
     j["gpu_layers"] = gpu_layers;
-    j["context_size"] = context_size;
     j["temperature"] = temperature;
     j["top_p"] = top_p;
     j["top_k"] = top_k;
@@ -110,7 +115,6 @@ LlamaProviderConfig LlamaProviderConfig::from_json(const json& j) {
     cfg.tp = j.value("tp", 1);
     cfg.pp = j.value("pp", 1);
     cfg.gpu_layers = j.value("gpu_layers", -1);
-    cfg.context_size = j.value("context_size", 0);
     cfg.temperature = j.value("temperature", 0.7f);
     cfg.top_p = j.value("top_p", 1.0f);
     cfg.top_k = j.value("top_k", 40);
@@ -130,7 +134,6 @@ json TensorRTProviderConfig::to_json() const {
     j["tp"] = tp;
     j["pp"] = pp;
     j["gpu_id"] = gpu_id;
-    j["context_size"] = context_size;
     j["temperature"] = temperature;
     j["top_p"] = top_p;
     j["top_k"] = top_k;
@@ -149,7 +152,6 @@ TensorRTProviderConfig TensorRTProviderConfig::from_json(const json& j) {
     cfg.tp = j.value("tp", 1);
     cfg.pp = j.value("pp", 1);
     cfg.gpu_id = j.value("gpu_id", 0);
-    cfg.context_size = j.value("context_size", 0);
     cfg.temperature = j.value("temperature", 0.7f);
     cfg.top_p = j.value("top_p", 1.0f);
     cfg.top_k = j.value("top_k", 40);
@@ -487,6 +489,10 @@ bool Provider::interactive_edit(ProviderConfig& config) {
     std::getline(std::cin, input);
     if (!input.empty()) config.priority = std::stoi(input);
 
+    std::cout << "Context size (0=auto) [" << config.context_size << "]: ";
+    std::getline(std::cin, input);
+    if (!input.empty()) config.context_size = std::stoi(input);
+
     // Dispatch to type-specific editor
     bool is_api = false;
     if (auto* llama = dynamic_cast<LlamaProviderConfig*>(&config)) {
@@ -718,4 +724,58 @@ std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string&
     }
 
     return config;
+}
+
+std::unique_ptr<Backend> Provider::connect_provider(const std::string& name, Session& session, size_t context_size) {
+    auto provider_config = get_provider(name);
+    if (!provider_config) {
+        LOG_ERROR("Provider '" + name + "' not found");
+        return nullptr;
+    }
+
+    // Use provider's context_size if set, otherwise use the passed-in value
+    size_t effective_context_size = (provider_config->context_size > 0)
+        ? provider_config->context_size
+        : context_size;
+
+    try {
+        LOG_INFO("Connecting to provider: " + name + " (priority: " + std::to_string(provider_config->priority) + ")");
+        auto backend = BackendFactory::create_from_provider(provider_config, effective_context_size);
+        if (!backend) {
+            LOG_ERROR("Failed to create backend for provider '" + name + "'");
+            return nullptr;
+        }
+
+        backend->initialize(session);
+        current_provider = name;
+        LOG_INFO("Successfully connected to provider: " + name);
+        return backend;
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("Provider '" + name + "' failed: " + std::string(e.what()));
+        return nullptr;
+    }
+}
+
+std::unique_ptr<Backend> Provider::connect_next_provider(Session& session, size_t context_size) {
+    auto provider_names = list_providers();
+    if (provider_names.empty()) {
+        LOG_ERROR("No providers configured");
+        return nullptr;
+    }
+
+    for (const auto& name : provider_names) {
+        auto backend = connect_provider(name, session, context_size);
+        if (backend) {
+            return backend;
+        }
+        // Failed - check if we should try next
+        if (!config->auto_provider) {
+            LOG_INFO("auto_provider disabled, not trying other providers");
+            return nullptr;
+        }
+    }
+
+    LOG_ERROR("All providers failed to connect");
+    return nullptr;
 }

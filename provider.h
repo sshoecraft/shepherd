@@ -7,6 +7,10 @@
 #include <memory>
 #include "nlohmann/json.hpp"
 
+// Forward declarations
+class Backend;
+class Session;
+
 // Base provider configuration
 class ProviderConfig {
 public:
@@ -14,6 +18,7 @@ public:
     std::string name;           // User-friendly name
     std::string model;          // Model name or file
     int priority = 100;         // Priority for selection (lower = higher priority)
+    int context_size = 0;       // Context window size (0=auto/default)
 
     // Rate limits (common to all providers)
     struct RateLimits {
@@ -49,7 +54,6 @@ public:
     int tp = 1;                     // Tensor parallelism
     int pp = 1;                     // Pipeline parallelism
     int gpu_layers = -1;            // -1=auto, 0=CPU only, >0=specific count
-    int context_size = 0;           // 0=auto
     float temperature = 0.7f;
     float top_p = 1.0f;
     int top_k = 40;
@@ -68,7 +72,6 @@ public:
     int tp = 1;                     // Tensor parallelism
     int pp = 1;                     // Pipeline parallelism
     int gpu_id = 0;
-    int context_size = 0;           // 0=auto
     float temperature = 0.7f;
     float top_p = 1.0f;
     int top_k = 40;
@@ -142,6 +145,17 @@ public:
 
     // Get next available provider (skips rate-limited ones)
     std::optional<std::string> get_next_provider() const;
+
+    // Connect to next available provider - creates backend, initializes, returns it
+    // Tries providers in priority order until one succeeds
+    // Returns nullptr if all providers fail (errors logged)
+    // On success, updates current_provider
+    std::unique_ptr<Backend> connect_next_provider(Session& session, size_t context_size);
+
+    // Connect to a specific provider by name
+    // Returns nullptr on failure (error logged)
+    // On success, updates current_provider
+    std::unique_ptr<Backend> connect_provider(const std::string& name, Session& session, size_t context_size);
 
     // Check if provider is rate limited
     bool is_rate_limited(const std::string& name) const;

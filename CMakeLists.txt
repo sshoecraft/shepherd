@@ -114,8 +114,28 @@ endif()
 
 # TensorRT-LLM headers (bundled with Shepherd + from package)
 if(ENABLE_TENSORRT)
+    # Detect installed TensorRT-LLM version
+    # Read version.py directly to avoid import side effects
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import site; exec(open(site.getsitepackages()[0]+'/tensorrt_llm/version.py').read()); print(__version__)"
+        OUTPUT_VARIABLE TRT_LLM_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT TRT_LLM_VERSION)
+        message(FATAL_ERROR "Could not detect TensorRT-LLM version. Is tensorrt_llm installed?")
+    endif()
+    message(STATUS "Detected TensorRT-LLM version: ${TRT_LLM_VERSION}")
+
+    # Check if we have headers for this version
+    set(TRT_LLM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/tensorrt-llm/${TRT_LLM_VERSION}")
+    if(NOT EXISTS "${TRT_LLM_INCLUDE_DIR}")
+        message(FATAL_ERROR "No headers found for TensorRT-LLM ${TRT_LLM_VERSION}. Expected: ${TRT_LLM_INCLUDE_DIR}")
+    endif()
+    message(STATUS "Using TensorRT-LLM headers from: ${TRT_LLM_INCLUDE_DIR}")
+
     target_include_directories(shepherd PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${TRT_LLM_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/tokenizers/include
     )
     # Add CUDA headers from tensorrt_llm package

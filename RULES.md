@@ -9,6 +9,7 @@
 - DO NOT! I REPEAT _DO NOT_ _EVER_ ... I MEAN EVER ... USE git to "restore" changes
 - DO NOT EVER edit the Makefile without being told to do so
 - DO NOT use any file in an "old" directory
+- NEVER EVER "fallback" to hardcoded responses or text
 
 **CODING STYLE**:
 - DO NOT put an underscore suffix (_) after variable names
@@ -21,3 +22,8 @@
 - DO NOT put any icons or graphics that indicate claude code is being used - just list the items in bullet points in a clear concise manner
 - DO NOT put at the end: 🤖 Generated with Claude Code
 - DO NOT give any indication an claude was used - like "<user> and claude ..." etc
+
+**BEHAVIOR:**
+- DO NOT give up and offer alternatives when working on something - keep working until a solution is found or told to stop
+- Before you work on any module, check to see if there's an associated .md file for it
+- After making changes to any module create/maintain the .md file for it describing the arch/history/etc

@@ -70,9 +70,28 @@ virtual ModelFamily get_family() const = 0;
 
 **Returns:** `ModelFamily::QWEN_3_X`
 
+#### Llama2Template
+
+**Location:** `backends/chat_template.cpp:82`
+
+**Used for:** Llama 1.x, Llama 2.x models (when no custom jinja template provided)
+
+**Format:**
+- User message: `[INST] {content} [/INST]`
+- Assistant message: `{content}</s>`
+- System: `<s>[INST] <<SYS>>\n{content}\n<</SYS>>\n\n`
+- Generation prompt: Empty (follows directly after `[/INST]`)
+- End tag: `</s>`
+
+**Tool Format:**
+- Simple tool list in system message
+- JSON format: `{"name": "tool_name", "parameters": {...}}`
+
+**Returns:** `ModelFamily::LLAMA_2_X`
+
 #### Llama3Template
 
-**Location:** `backends/chat_template.cpp:64`
+**Location:** `backends/chat_template.cpp:130`
 
 **Used for:** Llama 3.x models
 
@@ -112,23 +131,25 @@ virtual ModelFamily get_family() const = 0;
 
 #### MinjaTemplate
 
-**Location:** `backends/chat_template.cpp:169`
+**Location:** `backends/chat_template.cpp:230`
 
-**Used for:** Unknown/unsupported models (fallback)
+**Used for:** Unknown/unsupported models (fallback), Llama 2.x with custom jinja templates
 
 **Constructor:**
 ```cpp
-MinjaTemplate(const std::string& template_text, void* template_node_ptr)
+MinjaTemplate(const std::string& template_text, void* template_node_ptr,
+              const std::string& eos_token = "", const std::string& bos_token = "")
 ```
 
 **Implementation:**
 - Stores reference to minja template_node from llama.cpp
+- Stores eos_token and bos_token for template context
 - For assistant messages: Returns raw content (no template processing)
 - For other messages: Renders through minja template with full context
 - Falls back to generic format if template_node is null
 
 **Format:**
-- Uses minja template rendering with context (strftime_now, date_string, messages array)
+- Uses minja template rendering with context (strftime_now, date_string, messages array, eos_token, bos_token)
 - Generic fallback: `{role}: {content}\n\n`
 
 **Tool Handling:**
@@ -140,7 +161,7 @@ MinjaTemplate(const std::string& template_text, void* template_node_ptr)
 
 ### ChatTemplateFactory
 
-**Location:** `backends/chat_template.cpp:309`
+**Location:** `backends/chat_template.cpp:391`
 
 **Purpose:** Factory class to create appropriate ChatTemplate instance based on model family
 
@@ -149,7 +170,9 @@ MinjaTemplate(const std::string& template_text, void* template_node_ptr)
 static std::unique_ptr<ChatTemplate> create(
     const std::string& template_text,
     const ModelConfig& config,
-    void* template_node_ptr = nullptr
+    void* template_node_ptr = nullptr,
+    const std::string& eos_token = "",
+    const std::string& bos_token = ""
 );
 ```
 
@@ -158,9 +181,11 @@ static std::unique_ptr<ChatTemplate> create(
 - Creates ChatMLTemplate for QWEN_2_X
 - Creates Qwen3ThinkingTemplate for QWEN_3_X when `config.supports_thinking_mode` is true
 - Creates ChatMLTemplate for QWEN_3_X when thinking mode is not supported
+- Creates MinjaTemplate for LLAMA_2_X when custom jinja template is provided (passes eos_token/bos_token)
+- Creates Llama2Template for LLAMA_2_X when no custom template
 - Creates Llama3Template for LLAMA_3_X
 - Creates GLM4Template for GLM_4
-- Falls back to MinjaTemplate for all other families
+- Falls back to MinjaTemplate for all other families (passes eos_token/bos_token)
 
 **Returns:** `std::unique_ptr<ChatTemplate>` to appropriate subclass
 

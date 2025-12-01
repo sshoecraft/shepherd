@@ -115,6 +115,9 @@ public:
                                      const std::string& tool_name = "",
                                      const std::string& tool_id = "") = 0;
 
+    // Shutdown and cleanup resources (called before switching providers)
+    virtual void shutdown() {}
+
     // Public member variables (no getters/setters per RULES.md)
     std::string name;
     std::string backend_name;

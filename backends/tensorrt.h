@@ -2,6 +2,7 @@
 
 #include "backend.h"
 #include "models.h"
+#include "chat_template.h"
 
 #include <thread>
 #include <atomic>
@@ -114,15 +115,17 @@ private:
     std::mutex block_map_mutex_;
 
     // Chat template support
-    void* template_node_ = nullptr; // std::shared_ptr<minja::TemplateNode>*
+    void* template_node_ = nullptr; // std::shared_ptr<minja::TemplateNode>* (kept for MinjaTemplate fallback)
     std::string chat_template_text_;
+    std::unique_ptr<ChatTemplates::ChatTemplate> chat_template_;  // ChatTemplate abstraction
     std::vector<std::string> stop_tokens;  // Loaded from tokenizer_config.json (string form)
     std::vector<std::vector<int32_t>> stop_token_ids;  // Encoded stop token IDs for TensorRT
     std::optional<int32_t> eos_token_id;  // EOS token ID for TensorRT
 
     // BOS token configuration (loaded from tokenizer_config.json)
-    bool add_bos_token_ = false;
-    int bos_token_id_ = -1;
+    std::string bos_token;  // String form for chat template
+    bool add_bos_token = false;
+    int bos_token_id = -1;
 
     // Tokenizer
     std::unique_ptr<TensorRTTokenizer> tokenizer_;

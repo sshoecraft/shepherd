@@ -1,0 +1,2 @@
+#./quantize.py ~/models/models--Skywork--MindLink-32B-0801/snapshots/1c102e4027b8f9788bec9587c4a78da8150639ba --bits 8 --group-size 32 --output ~/models/MindLink-32B-0801-Int8-g32
+#./hfquant.py ~/models/MindLink-72B-0801 --bits 4 --output ~/models/MindLink-72B-0801-AWQ

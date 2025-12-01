@@ -90,16 +90,17 @@ static void print_usage(int, char** argv) {
 	printf("	-m, --model		   Model name or file (overrides config)\n");
 	printf("	-p, --provider	   Provider name to use (from provider list)\n");
 	printf("	--model_path	   Model directory path (overrides config, e.g., ~/models)\n");
-	printf("	--backend		   Backend (llamacpp, openai, anthropic, gemini, grok, ollama)\n");
+	printf("	--backend		   Backend (llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama)\n");
 	printf("	--api-key		   API key for cloud backends\n");
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
 	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
 	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
 	printf("	--pp N			   Pipeline parallelism size (llamacpp only, default: 1)\n");
-	printf("	--models-file FILE Path to models database JSON file (default: ~/.shepherd/models.json)\n");
+	printf("	--ubatch N		   Micro-batch size for prompt processing (llamacpp only, default: auto)\n");
+	printf("	--models-file FILE Path to models database JSON file (default: ~/.config/shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
-	printf("	--memory-db		   Path to RAG memory database (default: ~/.shepherd/memory.db)\n");
+	printf("	--memory-db		   Path to RAG memory database (default: ~/.local/share/shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
@@ -124,7 +125,7 @@ static void print_usage(int, char** argv) {
 	printf("										  Options: --api-key, --api-base, --context-size, --max-tokens\n");
 	printf("	api remove <name>					  Remove an API tool\n");
 	printf("\nConfiguration:\n");
-	printf("	Edit ~/.shepherd/config.json to configure:\n");
+	printf("	Edit ~/.config/shepherd/config.json to configure:\n");
 	printf("	- backend: llamacpp, openai, anthropic");
 #ifdef PLATFORM_LINUX
 #ifdef ENABLE_TENSORRT
@@ -133,7 +134,7 @@ static void print_usage(int, char** argv) {
 #endif
 	printf("\n");
 	printf("	- model: model name or path\n");
-	printf("	- model_path: directory for models (optional, defaults to ~/.shepherd/models)\n");
+	printf("	- model_path: directory for models (optional, defaults to ~/.local/share/shepherd/models)\n");
 	printf("	- key: API key for cloud backends (optional)\n");
 	printf("	- context_size: context window size (optional, 0 = auto)\n");
 	printf("\nFeatures:\n");
@@ -973,12 +974,14 @@ int main(int argc, char** argv) {
 	std::string memory_db_override;
 	std::string models_file_override;
 	std::string system_prompt_override;
+	bool system_prompt_was_set = false;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
 	int gpu_layers_override = -999;  // -999 means not specified, -1=auto/all, 0=CPU only, >0=specific
 	int tp_override = -1;  // -1 means not specified
 	int pp_override = -1;  // -1 means not specified
+	int ubatch_override = -1;  // -1 means not specified
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
@@ -1005,6 +1008,7 @@ int main(int argc, char** argv) {
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
 		{"pp", required_argument, 0, 1030},
+		{"ubatch", required_argument, 0, 1035},
 		{"thinking", no_argument, 0, 1031},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
@@ -1069,6 +1073,7 @@ int main(int argc, char** argv) {
 				break;
 			case 1028: // --system-prompt
 				system_prompt_override = optarg;
+				system_prompt_was_set = true;
 				break;
 			case 1006: // --template
 				template_override = optarg;
@@ -1109,6 +1114,13 @@ int main(int argc, char** argv) {
 				pp_override = std::atoi(optarg);
 				if (pp_override < 1) {
 					printf("Error: pp must be at least 1\n");
+					return 1;
+				}
+				break;
+			case 1035: // --ubatch
+				ubatch_override = std::atoi(optarg);
+				if (ubatch_override < 1) {
+					printf("Error: ubatch must be at least 1\n");
 					return 1;
 				}
 				break;
@@ -1179,7 +1191,12 @@ int main(int argc, char** argv) {
 
 	// Apply command-line overrides
 	if (!backend_override.empty()) {
-		config->set_backend(backend_override);
+		try {
+			config->set_backend(backend_override);
+		} catch (const ConfigError& e) {
+			fprintf(stderr, "Error: %s\n", e.what());
+			return 1;
+		}
 	}
 	if (!api_key_override.empty()) {
 		config->key = api_key_override;
@@ -1213,6 +1230,9 @@ int main(int argc, char** argv) {
 	}
 	if (pp_override != -1) {  // -1 means not specified
 		config->json["pp"] = pp_override;
+	}
+	if (ubatch_override != -1) {  // -1 means not specified
+		config->json["ubatch"] = ubatch_override;
 	}
 
 	// Validate configuration (skip model path check if overridden)
@@ -1312,48 +1332,20 @@ int main(int argc, char** argv) {
 
 		// Create the backend from provider system or legacy config
 		std::unique_ptr<Backend> backend;
+		bool use_provider_mode = backend_override.empty() && model_override.empty() && api_key_override.empty();
+		Provider provider_mgr;  // Need this for provider mode
 
 		// Check if using command-line overrides (legacy mode)
-		if (!backend_override.empty() || !model_override.empty() || !api_key_override.empty()) {
-			// Legacy mode: create from command-line args
+		if (!use_provider_mode) {
+			// Legacy mode: create from command-line args (will initialize after session is ready)
 			LOG_INFO("Using command-line overrides (legacy mode)");
 			backend = BackendFactory::create_backend(config->backend, context_size);
-		} else {
-			// Provider mode: load providers and select by priority or name
-			Provider provider_mgr;
-
-			std::optional<std::string> provider_name;
-
-			// If --provider specified, use that
-			if (!provider_override.empty()) {
-				provider_name = provider_override;
-				LOG_INFO("Using provider from command line: " + provider_override);
-			} else {
-				// Otherwise select highest priority available provider
-				provider_name = provider_mgr.get_highest_priority_provider();
-			}
-
-			if (!provider_name) {
-				fprintf(stderr, "No providers configured. Use 'shepherd provider add' to add a provider.\n");
+			if (!backend) {
+				LOG_ERROR("Failed to create backend");
 				return 1;
 			}
-
-			auto provider_config = provider_mgr.get_provider(*provider_name);
-			if (!provider_config) {
-				fprintf(stderr, "Failed to load provider: %s\n", provider_name->c_str());
-				return 1;
-			}
-
-			LOG_INFO("Using provider: " + *provider_name + " (priority: " + std::to_string(provider_config->priority) + ")");
-			// Always show provider info on startup (even when INFO logs are suppressed)
-			std::cout << "Provider: " << *provider_name << std::endl;
-			backend = BackendFactory::create_from_provider(provider_config, context_size);
 		}
-
-		if (!backend) {
-			LOG_ERROR("Failed to create backend");
-			return 1;
-		}
+		// Provider mode: backend will be created after session/tools are ready
 
 
 		// Initialize RAG system with specified or default path (skip in server mode - clients have their own RAG)
@@ -1392,7 +1384,7 @@ int main(int argc, char** argv) {
 
 		// Create the session that will be used throughout (not in server mode)
 		Session session;
-		session.system_message = system_prompt_override.empty() ? config->system_message : system_prompt_override;
+		session.system_message = system_prompt_was_set ? system_prompt_override : config->system_message;
 
 		// Initialize tools system (skip in server mode - tools handled by client)
 		if (!g_server_mode) {
@@ -1501,15 +1493,32 @@ int main(int argc, char** argv) {
 			tool_descriptions = registry.list_tools_with_descriptions();
 		}
 
+		// Now that session/tools are ready, connect to provider (if using provider mode)
+		if (use_provider_mode) {
+			if (!provider_override.empty()) {
+				// Specific provider requested - only try that one
+				backend = provider_mgr.connect_provider(provider_override, session, context_size);
+			} else {
+				// Try providers in priority order (respects auto_provider setting)
+				backend = provider_mgr.connect_next_provider(session, context_size);
+			}
+
+			if (!backend) {
+				fprintf(stderr, "Failed to connect to provider. Use 'shepherd provider add' to configure providers.\n");
+				return 1;
+			}
+		} else {
+			// Legacy mode: initialize the backend we created earlier
+			backend->initialize(session);
+		}
+
 		LOG_INFO("Shepherd initialization complete");
 
 		// ============================================================================
 		// Server Mode - HTTP API via FastAPI
 		// ============================================================================
 		if (g_server_mode) {
-			// Initialize backend before starting server
-			LOG_DEBUG("Initializing backend for server mode...");
-			backend->initialize(session);
+			// Backend already initialized above via connect_provider or legacy init
 
 			// MPI rank check: Only rank 0 should run the server
 			// (backend->initialize() may have re-exec'd with mpirun for multi-GPU models)
@@ -1528,6 +1537,8 @@ int main(int argc, char** argv) {
 
 		// Populate tools from registry (all ranks need this for Session creation)
 		// This converts from ToolRegistry format to Session::Tool format
+		// Skip if tools were already added during initialization above
+		if (session.tools.empty()) {
 		for (const auto& [tool_name, tool_desc] : tool_descriptions) {
 			Session::Tool st;
 			st.name = tool_name;
@@ -1575,12 +1586,11 @@ int main(int argc, char** argv) {
 
 			session.tools.push_back(st);
 		}
+		} // end if (session.tools.empty())
 
 		LOG_DEBUG("Session created with " + std::to_string(session.tools.size()) + " tools");
 
-		// Initialize backend (calibrate tokens, validate setup, etc.)
-		LOG_DEBUG("Initializing backend...");
-		backend->initialize(session);
+		// Backend already initialized above via connect_provider or legacy init
 		session.backend = backend.get();
 
 		// Calculate desired completion tokens once (used throughout session lifetime)
@@ -1601,15 +1611,18 @@ int main(int argc, char** argv) {
 		}
 
 		// ============================================================================
-		// MPI Multi-GPU: Non-leader ranks wait here after initialization
+		// MPI Multi-GPU: Non-leader ranks wait for shutdown signal
 		// ============================================================================
 		LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
 		if (!is_mpi_leader) {
-			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0...");
-			// Keep process alive - backend will be controlled via MPI by rank 0
-			while (true) {
-				std::this_thread::sleep_for(std::chrono::seconds(3600));
-			}
+			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for shutdown signal...");
+			// Workers wait at barrier - rank 0 will hit this barrier when done
+			// The executor's internal threads handle MPI work distribution
+#ifdef ENABLE_TENSORRT
+			MPI_Barrier(MPI_COMM_WORLD);
+#endif
+			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " received shutdown signal, exiting");
+			return 0;
 		}
 
 		// From here on, only rank 0 continues...
@@ -1627,34 +1640,30 @@ int main(int argc, char** argv) {
 	// ============================================================================
 	int cli_result = run_cli(backend, session);
 
-	// If we're running under MPI, abort all ranks when rank 0 exits
-	// This ensures worker processes (ranks 1, 2, ...) don't keep running
-	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
-	if (mpi_rank_env && std::atoi(mpi_rank_env) == 0) {
-		const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
-		if (mpi_size_env && std::atoi(mpi_size_env) > 1) {
-			LOG_DEBUG("Rank 0 exiting, aborting MPI job to terminate worker ranks");
+	// Clean shutdown for MPI
+	// Signal workers to exit via barrier, then all ranks exit together
+	const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
+	bool is_mpi = mpi_size_env && std::atoi(mpi_size_env) > 1;
+
+	if (is_mpi) {
+		LOG_DEBUG("Rank 0 done, signaling workers via barrier");
 #ifdef ENABLE_TENSORRT
-			MPI_Abort(MPI_COMM_WORLD, cli_result);
+		MPI_Barrier(MPI_COMM_WORLD);
 #endif
-		}
 	}
 
+	// TensorRT-LLM registers MPI_Finalize as atexit handler (mpiUtils.cpp:186)
 	return cli_result;
 
 } catch (const std::exception& e) {
-	fprintf(stderr, "Fatal error: %s\n", e.what());
 	LOG_FATAL("Fatal error: " + std::string(e.what()));
 
-	// Also abort MPI on fatal error
-	const char* mpi_rank_env = getenv("OMPI_COMM_WORLD_RANK");
-	if (mpi_rank_env && std::atoi(mpi_rank_env) == 0) {
-		const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
-		if (mpi_size_env && std::atoi(mpi_size_env) > 1) {
+	// For fatal errors, use MPI_Abort to terminate all ranks immediately
+	const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
+	if (mpi_size_env && std::atoi(mpi_size_env) > 1) {
 #ifdef ENABLE_TENSORRT
-			MPI_Abort(MPI_COMM_WORLD, 1);
+		MPI_Abort(MPI_COMM_WORLD, 1);
 #endif
-		}
 	}
 
 	return 1;

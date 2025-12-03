@@ -18,11 +18,20 @@ bool is_valid_utf8(const std::string& input) {
             num_bytes = 1;
         } else if ((byte & 0xE0) == 0xC0) {
             // 2-byte sequence (110xxxxx 10xxxxxx)
+            // Reject overlong encodings: 0xC0 and 0xC1 are invalid
+            if (byte == 0xC0 || byte == 0xC1) {
+                return false;
+            }
             num_bytes = 2;
         } else if ((byte & 0xF0) == 0xE0) {
             // 3-byte sequence (1110xxxx 10xxxxxx 10xxxxxx)
+            num_bytes = 3;
         } else if ((byte & 0xF8) == 0xF0) {
             // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+            // Reject invalid start bytes: 0xF5-0xFF are invalid
+            if (byte >= 0xF5) {
+                return false;
+            }
             num_bytes = 4;
         } else {
             // Invalid UTF-8 start byte
@@ -68,13 +77,21 @@ std::string sanitize_utf8(const std::string& input) {
             num_bytes = 1;
         } else if ((byte & 0xE0) == 0xC0 && i + 1 < length) {
             // 2-byte sequence (110xxxxx 10xxxxxx)
+            // Reject overlong encodings: 0xC0 and 0xC1 are invalid
+            if (byte == 0xC0 || byte == 0xC1) {
+                result += '\xEF'; // Replacement character U+FFFD
+                result += '\xBF';
+                result += '\xBD';
+                i++;
+                continue;
+            }
             if ((bytes[i + 1] & 0xC0) == 0x80) {
                 num_bytes = 2;
             } else {
                 // Invalid continuation byte
                 result += '\xEF'; // Replacement character U+FFFD
                 result += '\xBF';
-                result += '?';
+                result += '\xBD';
                 i++;
                 continue;
             }
@@ -86,19 +103,27 @@ std::string sanitize_utf8(const std::string& input) {
                 // Invalid continuation bytes
                 result += '\xEF';
                 result += '\xBF';
-                result += '?';
+                result += '\xBD';
                 i++;
                 continue;
             }
         } else if ((byte & 0xF8) == 0xF0 && i + 3 < length) {
             // 4-byte sequence (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+            // Reject invalid start bytes: 0xF5-0xFF are invalid
+            if (byte >= 0xF5) {
+                result += '\xEF'; // Replacement character U+FFFD
+                result += '\xBF';
+                result += '\xBD';
+                i++;
+                continue;
+            }
             if ((bytes[i + 1] & 0xC0) == 0x80 && (bytes[i + 2] & 0xC0) == 0x80 && (bytes[i + 3] & 0xC0) == 0x80) {
                 num_bytes = 4;
             } else {
                 // Invalid continuation bytes
                 result += '\xEF';
                 result += '\xBF';
-                result += '?';
+                result += '\xBD';
                 i++;
                 continue;
             }
@@ -106,7 +131,7 @@ std::string sanitize_utf8(const std::string& input) {
             // Invalid UTF-8 start byte or incomplete sequence
             result += '\xEF'; // Replacement character U+FFFD
             result += '\xBF';
-            result += '?';
+            result += '\xBD';
             i++;
             continue;
         }

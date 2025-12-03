@@ -827,6 +827,9 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 						}
 					}
 
+					// Sanitize tool result to ensure valid UTF-8 for JSON
+					result_content = utf8_sanitizer::sanitize_utf8(result_content);
+
 					// Show tool result (truncated for display)
 					cli.show_tool_result(result_content);
 

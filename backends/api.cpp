@@ -10,6 +10,39 @@
 ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
 	http_client = std::make_unique<HttpClient>();
 	http_client->set_timeout(timeout_seconds);
+
+	// Configure SSL settings from config if available
+	if (!config->json.is_null() && !config->json.empty()) {
+		if (config->json.contains("ssl_verify")) {
+			bool ssl_verify = config->json["ssl_verify"].get<bool>();
+			http_client->set_ssl_verify(ssl_verify);
+			LOG_DEBUG("SSL verification: " + std::string(ssl_verify ? "enabled" : "disabled"));
+		}
+		if (config->json.contains("ca_bundle_path")) {
+			std::string ca_bundle = config->json["ca_bundle_path"].get<std::string>();
+			http_client->set_ca_bundle(ca_bundle);
+			LOG_DEBUG("CA bundle path: " + ca_bundle);
+		}
+
+		// Load OAuth configuration
+		if (config->json.contains("client_id")) {
+			oauth_client_id_ = config->json["client_id"].get<std::string>();
+			LOG_DEBUG("OAuth client_id loaded");
+		}
+		if (config->json.contains("client_secret")) {
+			oauth_client_secret_ = config->json["client_secret"].get<std::string>();
+			LOG_DEBUG("OAuth client_secret loaded (length: " + std::to_string(oauth_client_secret_.length()) + ")");
+		}
+		if (config->json.contains("token_url")) {
+			oauth_token_url_ = config->json["token_url"].get<std::string>();
+			LOG_DEBUG("OAuth token_url: " + oauth_token_url_);
+		}
+		if (config->json.contains("token_scope")) {
+			oauth_scope_ = config->json["token_scope"].get<std::string>();
+			LOG_DEBUG("OAuth scope: " + oauth_scope_);
+		}
+	}
+
 	LOG_DEBUG("ApiBackend created");
 }
 
@@ -138,6 +171,9 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
         nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
 
         LOG_DEBUG("Sending to API with max_tokens=" + std::to_string(max_tokens));
+
+        // Enforce rate limits before making request
+        enforce_rate_limits();
 
         // Get headers and endpoint from concrete backend
         auto headers = get_api_headers();
@@ -426,4 +462,168 @@ void ApiBackend::calibrate_token_counts(Session& session) {
         // Use conservative default ratio for API models (optimized for code-heavy content)
         chars_per_token = 2.5f;
     }
+}
+
+// Rate limiting enforcement
+void ApiBackend::enforce_rate_limits() {
+    LOG_DEBUG("enforce_rate_limits() called");
+    std::lock_guard<std::mutex> lock(rate_limit_mutex_);
+
+    auto now = std::chrono::steady_clock::now();
+
+    // Get rate limits from provider config
+    int requests_per_second = 0;
+    int requests_per_minute = 0;
+
+    if (!config->json.is_null() && !config->json.empty()) {
+        requests_per_second = config->json.value("requests_per_second", 0);
+        requests_per_minute = config->json.value("requests_per_minute", 0);
+    }
+
+    LOG_DEBUG("Rate limit check: requests_per_second=" + std::to_string(requests_per_second) +
+              ", requests_per_minute=" + std::to_string(requests_per_minute));
+
+    // If no rate limits configured, return immediately
+    if (requests_per_second == 0 && requests_per_minute == 0) {
+        LOG_DEBUG("No rate limits configured, skipping");
+        return;
+    }
+
+    LOG_DEBUG("Rate limits are configured, proceeding with enforcement");
+
+    // Remove timestamps older than 1 minute (we only need to track up to 1 minute)
+    auto one_minute_ago = now - std::chrono::minutes(1);
+    while (!request_timestamps_.empty() && request_timestamps_.front() < one_minute_ago) {
+        request_timestamps_.pop_front();
+    }
+
+    // Check requests_per_second limit
+    if (requests_per_second > 0) {
+        auto one_second_ago = now - std::chrono::seconds(1);
+        int requests_last_second = 0;
+        for (auto it = request_timestamps_.rbegin(); it != request_timestamps_.rend(); ++it) {
+            if (*it >= one_second_ago) {
+                requests_last_second++;
+            } else {
+                break;
+            }
+        }
+
+        if (requests_last_second >= requests_per_second) {
+            // Calculate how long to sleep
+            auto oldest_in_window = request_timestamps_[request_timestamps_.size() - requests_last_second];
+            auto wait_until = oldest_in_window + std::chrono::seconds(1);
+            auto sleep_duration = wait_until - now;
+
+            if (sleep_duration.count() > 0) {
+                LOG_DEBUG("Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
+                         "ms (requests_per_second=" + std::to_string(requests_per_second) + ")");
+                std::this_thread::sleep_for(sleep_duration);
+                now = std::chrono::steady_clock::now();
+            }
+        }
+    }
+
+    LOG_DEBUG("About to check requests_per_minute limit");
+
+    // Check requests_per_minute limit
+    if (requests_per_minute > 0) {
+        LOG_DEBUG("Checking requests_per_minute: " + std::to_string(request_timestamps_.size()) + " requests in last minute, limit=" + std::to_string(requests_per_minute));
+        if ((int)request_timestamps_.size() >= requests_per_minute) {
+            // Calculate how long to sleep
+            auto oldest_in_window = request_timestamps_.front();
+            auto wait_until = oldest_in_window + std::chrono::minutes(1);
+            auto sleep_duration = wait_until - now;
+
+            if (sleep_duration.count() > 0) {
+                LOG_DEBUG("Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
+                         "ms (requests_per_minute=" + std::to_string(requests_per_minute) + ")");
+                std::this_thread::sleep_for(sleep_duration);
+                now = std::chrono::steady_clock::now();
+            }
+        }
+    } else {
+        LOG_DEBUG("requests_per_minute is NOT > 0, it is: " + std::to_string(requests_per_minute));
+    }
+
+    // Record this request timestamp
+    request_timestamps_.push_back(now);
+}
+
+// OAuth 2.0 token acquisition using client credentials grant
+ApiBackend::OAuthToken ApiBackend::acquire_oauth_token(const std::string& client_id,
+                                                        const std::string& client_secret,
+                                                        const std::string& token_url,
+                                                        const std::string& scope) {
+    LOG_DEBUG("Acquiring OAuth token from: " + token_url);
+
+    OAuthToken token;
+
+    try {
+        // Build form-urlencoded request body
+        std::string body = "grant_type=client_credentials&client_id=" + client_id +
+                          "&client_secret=" + client_secret;
+        if (!scope.empty()) {
+            body += "&scope=" + scope;
+        }
+
+        // Set headers for OAuth token request
+        std::map<std::string, std::string> headers = {
+            {"Content-Type", "application/x-www-form-urlencoded"},
+            {"Accept", "application/json"}
+        };
+
+        // Make POST request
+        HttpResponse response = http_client->post(token_url, body, headers);
+
+        if (!response.is_success()) {
+            LOG_ERROR("OAuth token request failed with status " + std::to_string(response.status_code));
+            LOG_ERROR("Response body: " + response.body);
+            return token;  // Return empty token
+        }
+
+        // Parse JSON response
+        nlohmann::json response_json = nlohmann::json::parse(response.body);
+
+        token.access_token = response_json.value("access_token", "");
+        token.token_type = response_json.value("token_type", "Bearer");
+        int expires_in = response_json.value("expires_in", 3600);
+
+        // Set expiry time (current time + expires_in, minus 60 seconds buffer)
+        token.expires_at = time(nullptr) + expires_in - 60;
+
+        LOG_INFO("OAuth token acquired successfully (expires in " + std::to_string(expires_in) + " seconds)");
+
+    } catch (const std::exception& e) {
+        LOG_ERROR("Failed to acquire OAuth token: " + std::string(e.what()));
+    }
+
+    return token;
+}
+
+// Ensure we have a valid OAuth token, refreshing if needed
+bool ApiBackend::ensure_valid_oauth_token() {
+    // If OAuth is not configured, return true (use regular API key auth)
+    if (oauth_client_id_.empty() || oauth_client_secret_.empty() || oauth_token_url_.empty()) {
+        return true;
+    }
+
+    // Check if current token is valid
+    if (oauth_token_.is_valid()) {
+        LOG_DEBUG("OAuth token is valid");
+        return true;
+    }
+
+    // Token is expired or missing, acquire new one
+    LOG_INFO("OAuth token expired or missing, acquiring new token...");
+    oauth_token_ = acquire_oauth_token(oauth_client_id_, oauth_client_secret_,
+                                       oauth_token_url_, oauth_scope_);
+
+    if (!oauth_token_.access_token.empty()) {
+        LOG_INFO("OAuth token refreshed successfully");
+        return true;
+    }
+
+    LOG_ERROR("Failed to acquire OAuth token");
+    return false;
 }

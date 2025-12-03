@@ -179,6 +179,18 @@ json ApiProviderConfig::to_json() const {
     if (max_tokens > 0) j["max_tokens"] = max_tokens;
     if (!stop_sequences.empty()) j["stop_sequences"] = stop_sequences;
     if (!extra_headers.empty()) j["extra_headers"] = extra_headers;
+    if (!ssl_verify) j["ssl_verify"] = ssl_verify;  // Only write if false
+    if (!ca_bundle_path.empty()) j["ca_bundle_path"] = ca_bundle_path;
+
+    // OAuth 2.0 fields
+    if (!client_id.empty()) j["client_id"] = client_id;
+    if (!client_secret.empty()) j["client_secret"] = client_secret;
+    if (!token_url.empty()) j["token_url"] = token_url;
+    if (!token_scope.empty()) j["token_scope"] = token_scope;
+
+    // Azure OpenAI fields
+    if (!deployment_name.empty()) j["deployment_name"] = deployment_name;
+    if (!api_version.empty()) j["api_version"] = api_version;
 
     return j;
 }
@@ -201,6 +213,18 @@ ApiProviderConfig ApiProviderConfig::from_json(const json& j) {
     if (j.contains("extra_headers")) {
         cfg.extra_headers = j["extra_headers"].get<std::map<std::string, std::string>>();
     }
+    cfg.ssl_verify = j.value("ssl_verify", true);
+    cfg.ca_bundle_path = j.value("ca_bundle_path", "");
+
+    // OAuth 2.0 fields
+    cfg.client_id = j.value("client_id", "");
+    cfg.client_secret = j.value("client_secret", "");
+    cfg.token_url = j.value("token_url", "");
+    cfg.token_scope = j.value("token_scope", "");
+
+    // Azure OpenAI fields
+    cfg.deployment_name = j.value("deployment_name", "");
+    cfg.api_version = j.value("api_version", "");
 
     return cfg;
 }

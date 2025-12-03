@@ -7,6 +7,10 @@
 #include "http_client.h"
 #include <vector>
 #include <string>
+#include <deque>
+#include <chrono>
+#include <mutex>
+#include <thread>
 
 class ApiBackend : public Backend {
 public:
@@ -152,6 +156,29 @@ protected:
     // HTTP client for making requests
     std::unique_ptr<HttpClient> http_client;
 
+    // OAuth 2.0 token management
+    struct OAuthToken {
+        std::string access_token;
+        std::string token_type = "Bearer";
+        time_t expires_at = 0;  // Unix timestamp when token expires
+        bool is_valid() const { return !access_token.empty() && time(nullptr) < expires_at; }
+    };
+
+    /// @brief Acquire OAuth 2.0 access token using client credentials
+    /// @param client_id OAuth client ID
+    /// @param client_secret OAuth client secret
+    /// @param token_url OAuth token endpoint URL
+    /// @param scope OAuth scope (optional)
+    /// @return OAuth token structure with access_token and expiry
+    OAuthToken acquire_oauth_token(const std::string& client_id,
+                                    const std::string& client_secret,
+                                    const std::string& token_url,
+                                    const std::string& scope = "");
+
+    /// @brief Ensure we have a valid OAuth token, refreshing if needed
+    /// @return true if valid token available, false otherwise
+    bool ensure_valid_oauth_token();
+
 protected:
     /// @brief Adaptive token estimation using EMA
     /// Starts at 2.5 chars/token (conservative for code-heavy content), refines based on API responses
@@ -164,6 +191,20 @@ protected:
     /// @brief Flag to track if this is the first API call (warmup turn)
     /// First call establishes the baseline, subsequent calls use delta calculation
     bool first_call_ = true;
+
+    // OAuth 2.0 configuration and token storage
+    std::string oauth_client_id_;
+    std::string oauth_client_secret_;
+    std::string oauth_token_url_;
+    std::string oauth_scope_;
+    OAuthToken oauth_token_;
+
+    // Rate limiting tracking
+    std::deque<std::chrono::steady_clock::time_point> request_timestamps_;
+    std::mutex rate_limit_mutex_;
+
+    /// @brief Enforce rate limits by sleeping if necessary
+    void enforce_rate_limits();
 
     /// @brief Estimate tokens for a single message using EMA ratio
     /// @param content Message content

@@ -21,6 +21,9 @@ The provider module manages backend configurations for shepherd. Providers are s
 
 - **ApiProviderConfig** - OpenAI-compatible API configuration
   - api_key, base_url, temperature, max_tokens, stop_sequences
+  - OAuth 2.0: client_id, client_secret, token_url, token_scope
+  - Azure OpenAI: deployment_name, api_version
+  - SSL: ssl_verify, ca_bundle_path
 
 - **OllamaProviderConfig** - Ollama backend configuration
   - base_url, num_ctx, temperature, sampling params
@@ -72,8 +75,47 @@ There is currently overlap between the global `Config` class and `ProviderConfig
    - Be merged with provider settings when a provider is selected
 4. Single source of truth for each setting
 
+## OAuth 2.0 Support
+
+API providers support OAuth 2.0 client credentials flow for authentication:
+
+- `client_id` - OAuth client identifier
+- `client_secret` - OAuth client secret
+- `token_url` - OAuth token endpoint URL
+- `token_scope` - OAuth scope (optional)
+
+When OAuth is configured, the backend automatically:
+1. Requests bearer tokens from the token endpoint
+2. Caches tokens until 60 seconds before expiry
+3. Automatically refreshes expired tokens
+4. Uses OAuth tokens instead of API keys for authorization
+
+## Azure OpenAI Support
+
+Azure OpenAI deployments use a different URL structure and require additional configuration:
+
+- `deployment_name` - Azure deployment name (appears in URL path)
+- `api_version` - Azure API version query parameter (e.g., "2024-06-01")
+
+Example Azure OpenAI URL structure:
+```
+{base_url}/openai/deployments/{deployment_name}/chat/completions?api-version={api_version}
+```
+
+Note: Azure OpenAI does not support the `repetition_penalty` parameter. Use `frequency_penalty` and `presence_penalty` instead.
+
+## SSL Configuration
+
+API providers support SSL configuration for corporate proxies:
+
+- `ssl_verify` - Enable/disable SSL certificate verification (default: true)
+- `ca_bundle_path` - Custom CA certificate bundle path (optional)
+
+Disabling SSL verification is not recommended for production but may be necessary for corporate proxies with self-signed certificates.
+
 ## History
 
 - v2.4.0: Added provider abstraction and server implementation
 - v2.4.1: Added auto_provider config, provider fallback on connection failure
 - v2.5.0: Moved context_size to base ProviderConfig class
+- v2.5.2: Added OAuth 2.0, Azure OpenAI, and SSL configuration support

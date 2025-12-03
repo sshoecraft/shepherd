@@ -3,6 +3,7 @@
 #include "openai.h"
 #include "nlohmann/json.hpp"
 #include "sse_parser.h"
+#include "../tools/utf8_sanitizer.h"
 
 using json = nlohmann::json;
 
@@ -10,6 +11,18 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
+
+    // Load Azure OpenAI specific config
+    if (!config->json.is_null() && !config->json.empty()) {
+        if (config->json.contains("deployment_name")) {
+            deployment_name = config->json["deployment_name"].get<std::string>();
+            LOG_DEBUG("Azure deployment_name: " + deployment_name);
+        }
+        if (config->json.contains("api_version")) {
+            api_version = config->json["api_version"].get<std::string>();
+            LOG_DEBUG("Azure api_version: " + api_version);
+        }
+    }
 
     // Don't assume streaming - will test during initialize()
 
@@ -28,17 +41,31 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
 
     // Set API endpoint from config (api_base or default)
     if (!config->api_base.empty()) {
-        // User specified custom API base (e.g., local server)
+        // User specified custom API base
         api_endpoint = config->api_base;
-        // Ensure it has /chat/completions endpoint
-        if (api_endpoint.find("/chat/completions") == std::string::npos) {
+
+        // Check if this is Azure OpenAI format (has deployment_name and api_version)
+        if (!deployment_name.empty() && !api_version.empty()) {
+            // Azure OpenAI format: {base}/openai/deployments/{deployment}/chat/completions?api-version={version}
+            // Remove trailing slash if present
             if (api_endpoint.back() == '/') {
-                api_endpoint += "chat/completions";
-            } else {
-                api_endpoint += "/chat/completions";
+                api_endpoint.pop_back();
             }
+            // Build Azure URL
+            api_endpoint = api_endpoint + "/openai/deployments/" + deployment_name + "/chat/completions";
+            LOG_INFO("Using Azure OpenAI endpoint: " + api_endpoint + "?api-version=" + api_version);
+        } else {
+            // Standard OpenAI format
+            // Ensure it has /chat/completions endpoint
+            if (api_endpoint.find("/chat/completions") == std::string::npos) {
+                if (api_endpoint.back() == '/') {
+                    api_endpoint += "chat/completions";
+                } else {
+                    api_endpoint += "/chat/completions";
+                }
+            }
+            LOG_INFO("Using custom API endpoint: " + api_endpoint);
         }
-        LOG_INFO("Using custom API endpoint: " + api_endpoint);
     }
     // else: keep default api_endpoint = "https://api.openai.com/v1/chat/completions" from header
 
@@ -666,7 +693,7 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     request["temperature"] = temperature;
     request["frequency_penalty"] = frequency_penalty;
     request["presence_penalty"] = presence_penalty;
-    request["repetition_penalty"] = repeat_penalty;
+    // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
 
     // Add stop sequences if configured
     LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
@@ -785,7 +812,7 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     request["temperature"] = temperature;
     request["frequency_penalty"] = frequency_penalty;
     request["presence_penalty"] = presence_penalty;
-    request["repetition_penalty"] = repeat_penalty;
+    // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
 
     // Add stop sequences if configured
     LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
@@ -816,7 +843,19 @@ std::map<std::string, std::string> OpenAIBackend::get_api_headers() {
     std::map<std::string, std::string> headers;
 #ifdef ENABLE_API_BACKENDS
     headers["Content-Type"] = "application/json";
-    headers["Authorization"] = "Bearer " + api_key;
+
+    // Ensure valid OAuth token if configured, otherwise use API key
+    if (ensure_valid_oauth_token() && !oauth_token_.access_token.empty()) {
+        // Use OAuth bearer token
+        headers["Authorization"] = oauth_token_.token_type + " " + oauth_token_.access_token;
+        LOG_DEBUG("Using OAuth token for authorization");
+    } else if (!api_key.empty()) {
+        // Use API key
+        headers["Authorization"] = "Bearer " + api_key;
+        LOG_DEBUG("Using API key for authorization");
+    } else {
+        LOG_WARN("No authentication configured (neither OAuth nor API key)");
+    }
 
     // Add model-specific special headers if any
     for (const auto& [key, value] : model_config.special_headers) {
@@ -829,6 +868,10 @@ std::map<std::string, std::string> OpenAIBackend::get_api_headers() {
 
 std::string OpenAIBackend::get_api_endpoint() {
 #ifdef ENABLE_API_BACKENDS
+    // Add api-version query parameter for Azure OpenAI
+    if (!api_version.empty()) {
+        return api_endpoint + "?api-version=" + api_version;
+    }
     return api_endpoint;
 #else
     return "";
@@ -843,6 +886,7 @@ Response OpenAIBackend::add_message_stream(Session& session,
                                           const std::string& tool_id,
                                           int prompt_tokens,
                                           int max_tokens) {
+    LOG_INFO("*** OpenAIBackend::add_message_stream CALLED ***");
     LOG_DEBUG("OpenAIBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
              ", max_tokens=" + std::to_string(max_tokens));
 
@@ -856,11 +900,17 @@ Response OpenAIBackend::add_message_stream(Session& session,
         // Add streaming flag
         request["stream"] = true;
 
+        // Request usage information in streaming response (Azure OpenAI support)
+        request["stream_options"] = {{"include_usage", true}};
+
         LOG_DEBUG("Sending streaming request to API with max_tokens=" + std::to_string(max_tokens));
 
         // Get headers and endpoint from backend
         auto headers = get_api_headers();
         std::string endpoint = get_api_endpoint();
+
+        // Enforce rate limits before making request
+        enforce_rate_limits();
 
         // Streaming state
         Response accumulated_resp;
@@ -884,7 +934,9 @@ Response OpenAIBackend::add_message_stream(Session& session,
 
                     // Parse JSON data
                     try {
-                        json delta_json = json::parse(data);
+                        // Sanitize UTF-8 before parsing JSON (Azure OpenAI can return invalid UTF-8)
+                        std::string sanitized_data = utf8_sanitizer::sanitize_utf8(data);
+                        json delta_json = json::parse(sanitized_data);
 
                         // Extract delta content
                         if (delta_json.contains("choices") && !delta_json["choices"].empty()) {
@@ -953,7 +1005,7 @@ Response OpenAIBackend::add_message_stream(Session& session,
                         }
 
                         // Extract usage data (usually in final chunk)
-                        if (delta_json.contains("usage")) {
+                        if (delta_json.contains("usage") && delta_json["usage"].is_object()) {
                             const auto& usage = delta_json["usage"];
                             accumulated_resp.prompt_tokens = usage.value("prompt_tokens", 0);
                             accumulated_resp.completion_tokens = usage.value("completion_tokens", 0);

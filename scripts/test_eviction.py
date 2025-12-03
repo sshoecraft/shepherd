@@ -3,13 +3,18 @@
 Unified Shepherd CLIENT Eviction Test Suite
 
 Tests the shepherd binary's client-side eviction and RAG archival by:
-1. Spawning shepherd subprocesses with different context sizes
+1. Spawning shepherd subprocesses with different context sizes and providers
 2. Sending messages via stdin/stdout (not HTTP)
 3. Detecting eviction events from logs/output
 4. Verifying evicted messages are properly archived to RAG database
 5. Testing various eviction scenarios
 
 This tests the SHEPHERD CLIENT, not the server API.
+
+Usage:
+    test_eviction.py [--provider PROVIDER] [--mode MODE] [--test TEST_ID]
+
+    If --provider is not specified, shepherd will auto-select the highest priority provider.
 """
 
 import subprocess
@@ -35,8 +40,8 @@ print = functools.partial(print, flush=True)
 # ============================================================================
 
 SHEPHERD_BINARY = "/home/steve/bin/shepherd"
-DEFAULT_CONFIG = os.path.expanduser("~/.shepherd/config.json")
-DEFAULT_RAG_DB = os.path.expanduser("~/.shepherd/memory.db")
+DEFAULT_PROVIDER = None  # None means shepherd will auto-select
+DEFAULT_RAG_DB = os.path.expanduser("~/.local/share/shepherd/memory.db")
 
 # Test context sizes
 # Note: System + tools = ~4563 tokens, so minimum context is 8K
@@ -97,10 +102,10 @@ class EvictionEvent:
 class ShepherdProcess:
     """Manages a shepherd subprocess with stdin/stdout communication"""
 
-    def __init__(self, context_size: int, memory_db: str, config_file: str = None, verbose: bool = False):
+    def __init__(self, context_size: int, memory_db: str, provider: str = None, verbose: bool = False):
         self.context_size = context_size
         self.memory_db = memory_db
-        self.config_file = config_file or DEFAULT_CONFIG
+        self.provider = provider or DEFAULT_PROVIDER
         self.verbose = verbose
         self.process = None
         self.stdout_queue = queue.Queue()
@@ -130,9 +135,12 @@ class ShepherdProcess:
         # Build command using command-line arguments (ALWAYS use --debug for token tracking)
         cmd = [
             SHEPHERD_BINARY,
-            "--config", self.config_file,
             "--debug=5",
         ]
+
+        # Only add provider if specified (otherwise shepherd will auto-select)
+        if self.provider:
+            cmd.extend(["--provider", self.provider])
 
         # Only add context-size if not 0 (0 means use server's context size)
         if self.context_size > 0:
@@ -142,6 +150,10 @@ class ShepherdProcess:
 
         if self.verbose:
             print(f"  Starting: {' '.join(cmd)}")
+            if self.provider:
+                print(f"  Provider: {self.provider}")
+            else:
+                print(f"  Provider: Auto-select (highest priority)")
             if self.context_size > 0:
                 print(f"  Context: {self.context_size:,} tokens")
             else:
@@ -238,6 +250,8 @@ class ShepherdProcess:
 
         try:
             # Send message
+            if self.verbose:
+                print(f"      >> Sending: {message[:80]}...")
             self.process.stdin.write(message + "\n")
             self.process.stdin.flush()
 
@@ -247,6 +261,7 @@ class ShepherdProcess:
             eviction_event = None
             start_time = time.time()
             last_output_time = time.time()
+            lines_received = 0
 
             while time.time() - start_time < timeout:
                 # Check stdout
@@ -255,6 +270,9 @@ class ShepherdProcess:
                         line = self.stdout_queue.get_nowait()
                         response_lines.append(line)
                         last_output_time = time.time()
+                        lines_received += 1
+                        if self.verbose and lines_received <= 5:
+                            print(f"      << stdout: {line[:100]}")
 
                         # Update token count from output
                         # Llamacpp: [Prefill/Decode: X tokens, Y t/s, context: XXXX/YYYY]
@@ -334,10 +352,18 @@ class ShepherdProcess:
                     pass
 
                 # If we got output and nothing for 2 seconds, assume response complete
-                if response_lines and (time.time() - last_output_time > 2.0):
+                silence_duration = time.time() - last_output_time
+                if response_lines and silence_duration > 2.0:
+                    if self.verbose:
+                        print(f"      << Response complete after {silence_duration:.1f}s silence ({lines_received} lines)")
                     break
 
                 time.sleep(0.1)
+
+            # Check if we timed out
+            if time.time() - start_time >= timeout:
+                if self.verbose:
+                    print(f"      !! TIMEOUT after {timeout}s (received {lines_received} lines)")
 
             response = '\n'.join(response_lines)
             return response, stderr_lines, eviction_event
@@ -472,8 +498,8 @@ class RAGInspector:
 class UnifiedEvictionTestSuite:
     """Unified test suite for shepherd client eviction"""
 
-    def __init__(self, config_file: str = None, output_dir: str = None, clean: bool = False, verbose: bool = False):
-        self.config_file = config_file or DEFAULT_CONFIG
+    def __init__(self, provider: str = None, output_dir: str = None, clean: bool = False, verbose: bool = False):
+        self.provider = provider or DEFAULT_PROVIDER
         self.output_dir = output_dir or os.getcwd()
         self.verbose = verbose
         self.results = []
@@ -493,7 +519,10 @@ class UnifiedEvictionTestSuite:
         print("Unified Shepherd CLIENT Eviction Test Suite")
         print(f"{'='*70}")
         print(f"Binary: {SHEPHERD_BINARY}")
-        print(f"Config: {self.config_file}")
+        if self.provider:
+            print(f"Provider: {self.provider}")
+        else:
+            print(f"Provider: Auto-select (highest priority)")
         print(f"Output dir: {self.output_dir}")
         print(f"{'='*70}\n")
 
@@ -601,7 +630,7 @@ class UnifiedEvictionTestSuite:
 
         try:
             # Create and start shepherd with isolated memory DB
-            shepherd = ShepherdProcess(context_size, memory_db, config_file=self.config_file, verbose=self.verbose)
+            shepherd = ShepherdProcess(context_size, memory_db, provider=self.provider, verbose=self.verbose)
 
             if not shepherd.start():
                 result.status = "ERROR"
@@ -825,7 +854,7 @@ class UnifiedEvictionTestSuite:
                 messages_sent += 1
                 continue
 
-            msg = f"read {file_path}"
+            msg = f"read the file {file_path} - read the file in chunks if necessary until you have read the entire file"
             response, stderr, eviction = shepherd.send_message_with_eviction_detection(msg, messages_sent, timeout=60)
             messages_sent += 1
 
@@ -1454,7 +1483,7 @@ class UnifiedEvictionTestSuite:
             "test_run": {
                 "timestamp": datetime.now().isoformat(),
                 "binary": SHEPHERD_BINARY,
-                "config": self.config_file,
+                "provider": self.provider if self.provider else "auto-select",
                 "rag_db": DEFAULT_RAG_DB,
                 "duration_seconds": sum(r.duration_ms for r in self.results) / 1000
             },
@@ -1490,8 +1519,8 @@ def main():
                        help="Test mode: fast (2 tests), standard (7 tests), full (all tests)")
     parser.add_argument("--test",
                        help="Run only a specific test by ID (e.g., '5.1' for server limit overflow)")
-    parser.add_argument("--config",
-                       help="Path to shepherd config file (default: ~/.shepherd/config.json)")
+    parser.add_argument("--provider",
+                       help="Provider name to use (default: auto-select highest priority)")
     parser.add_argument("--output",
                        help="Output JSON report file")
     parser.add_argument("--output-dir",
@@ -1511,17 +1540,8 @@ def main():
         print("Please build shepherd or run from the correct directory")
         sys.exit(1)
 
-    # Determine config file to use
-    config_file = args.config if args.config else DEFAULT_CONFIG
-
-    # Check config exists
-    if not os.path.exists(config_file):
-        print(f"ERROR: Config not found: {config_file}")
-        print("Please create a shepherd config file")
-        sys.exit(1)
-
     # Create test suite
-    suite = UnifiedEvictionTestSuite(config_file=config_file, output_dir=args.output_dir, clean=args.clean, verbose=args.verbose)
+    suite = UnifiedEvictionTestSuite(provider=args.provider, output_dir=args.output_dir, clean=args.clean, verbose=args.verbose)
 
     try:
         # Run tests

@@ -34,6 +34,30 @@ std::unique_ptr<Backend> BackendFactory::create_from_provider(ProviderConfig* pr
         if (api->frequency_penalty != 0.0f) config->json["frequency_penalty"] = api->frequency_penalty;
         if (api->presence_penalty != 0.0f) config->json["presence_penalty"] = api->presence_penalty;
         if (api->max_tokens > 0) config->json["max_tokens"] = api->max_tokens;
+
+        // SSL settings
+        config->json["ssl_verify"] = api->ssl_verify;
+        if (!api->ca_bundle_path.empty()) config->json["ca_bundle_path"] = api->ca_bundle_path;
+
+        // OAuth 2.0 configuration
+        if (!api->client_id.empty()) config->json["client_id"] = api->client_id;
+        if (!api->client_secret.empty()) config->json["client_secret"] = api->client_secret;
+        if (!api->token_url.empty()) config->json["token_url"] = api->token_url;
+        if (!api->token_scope.empty()) config->json["token_scope"] = api->token_scope;
+
+        // Azure OpenAI configuration
+        if (!api->deployment_name.empty()) config->json["deployment_name"] = api->deployment_name;
+        if (!api->api_version.empty()) config->json["api_version"] = api->api_version;
+
+        // Rate limits (from base ProviderConfig)
+        if (api->rate_limits.requests_per_second > 0) {
+            config->json["requests_per_second"] = api->rate_limits.requests_per_second;
+            LOG_DEBUG("Set requests_per_second=" + std::to_string(api->rate_limits.requests_per_second));
+        }
+        if (api->rate_limits.requests_per_minute > 0) {
+            config->json["requests_per_minute"] = api->rate_limits.requests_per_minute;
+            LOG_DEBUG("Set requests_per_minute=" + std::to_string(api->rate_limits.requests_per_minute));
+        }
     }
     else if (auto* llama = dynamic_cast<LlamaProviderConfig*>(provider)) {
         config->model_path = llama->model_path;

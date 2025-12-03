@@ -96,6 +96,18 @@ public:
     int max_tokens = 0;             // 0=auto
     std::vector<std::string> stop_sequences;
     std::map<std::string, std::string> extra_headers;
+    bool ssl_verify = true;         // SSL certificate verification
+    std::string ca_bundle_path;     // Custom CA bundle path (empty = use system default)
+
+    // OAuth 2.0 configuration (for Azure OpenAI and similar services)
+    std::string client_id;          // OAuth client ID
+    std::string client_secret;      // OAuth client secret
+    std::string token_url;          // OAuth token endpoint
+    std::string token_scope;        // OAuth scope (default: empty)
+
+    // Azure OpenAI specific
+    std::string deployment_name;    // Azure OpenAI deployment name
+    std::string api_version;        // Azure OpenAI API version (e.g., "2024-06-01")
 
     nlohmann::json to_json() const override;
     static ApiProviderConfig from_json(const nlohmann::json& j);

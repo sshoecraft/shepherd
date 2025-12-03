@@ -339,8 +339,10 @@ if(ENABLE_LLAMACPP)
         # macOS: Use Metal backend
         target_link_libraries(shepherd PRIVATE ggml-metal)
     else()
-        # Linux: Use CUDA backend
-        target_link_libraries(shepherd PRIVATE ggml-cuda)
+        # Linux: Use CUDA backend if available
+        if(EXISTS "${LLAMACPP_DIR}/build/bin/libggml-cuda.${SHARED_LIB_EXT}")
+            target_link_libraries(shepherd PRIVATE ggml-cuda)
+        endif()
     endif()
 
     # Set RPATH so the executable can find llama.cpp libraries

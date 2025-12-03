@@ -15,6 +15,10 @@ public:
     ModelConfig model_config;
     // model_name is inherited from Backend base class
 
+    // Azure OpenAI specific
+    std::string deployment_name;  // Azure deployment name (replaces model in URL)
+    std::string api_version;      // Azure API version (e.g., "2024-06-01")
+
     explicit OpenAIBackend(size_t context_size);
     ~OpenAIBackend() override;
 

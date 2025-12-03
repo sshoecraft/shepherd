@@ -500,7 +500,7 @@ class UnifiedEvictionTestSuite:
 
     def __init__(self, provider: str = None, output_dir: str = None, clean: bool = False, verbose: bool = False):
         self.provider = provider or DEFAULT_PROVIDER
-        self.output_dir = output_dir or os.getcwd()
+        self.output_dir = output_dir or "/tmp/shepherd_tests"
         self.verbose = verbose
         self.results = []
 

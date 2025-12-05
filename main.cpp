@@ -3,16 +3,19 @@
 #include "tools/tools.h"
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
 #include "mcp/mcp.h"
+#include "mcp/mcp_config.h"
 #include "provider.h"
 #include "api_tools/api_tools.h"
 #include "rag.h"
-#include "server/server.h"
 #include "cli.h"
+#include "server/api_server.h"
+#include "server/cli_server.h"
 #include "terminal_io.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
 #include "backends/models.h"
 #include "version.h"
+#include "scheduler.h"
 
 #include <iostream>
 #include <fstream>
@@ -72,6 +75,9 @@ bool g_server_mode = false;
 // Global generation cancellation flag (for llamacpp backend)
 bool g_generation_cancelled = false;
 
+// Scheduler disable flag (--nosched)
+bool g_disable_scheduler = false;
+
 
 static void print_usage(int, char** argv) {
 	printf("\n=== Shepherd - Advanced LLM Management System ===\n");
@@ -83,6 +89,7 @@ static void print_usage(int, char** argv) {
 	printf("	%s config <show|set> [args...]\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s api <add|remove|list> [args...]\n", argv[0]);
+	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
@@ -102,12 +109,15 @@ static void print_usage(int, char** argv) {
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.local/share/shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
+	printf("	--nosched		   Disable scheduler (no scheduled tasks run)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
-	printf("	--server		   Start HTTP API server mode (OpenAI-compatible)\n");
-	printf("	--port PORT		   Server port (default: 8000, requires --server)\n");
-	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --server)\n");
+	printf("	--apiserver		   Start HTTP API server mode (OpenAI-compatible)\n");
+	printf("	--server		   Alias for --apiserver\n");
+	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
+	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
+	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
 	printf("	--colors		   Force enable colored output (overrides environment)\n");
@@ -159,302 +169,37 @@ static void cancel_handler(int signal) {
 	LOG_INFO("Received SIGUSR1 - cancelling generation");
 }
 
-#if 0
-static void show_config(const Config& config) {
-	printf("\n=== Current Configuration ===\n");
-	printf("Backend: %s\n", config.backend.c_str());
-	printf("Model: %s\n", config.model.c_str());
-
-	if (config.backend == "llamacpp" || config.backend == "tensorrt") {
-		printf("Model path: %s\n", config.model_path.c_str());
-	} else if (config.backend == "openai" || config.backend == "anthropic") {
-		printf("API key: %s\n", config.key.empty() ? "(not set)" : "***");
-	}
-
-	printf("Context size: %zu\n", config.context_size);
-
-	printf("\nAvailable backends: ");
-	auto available = Config::get_available_backends();
-	for (size_t i = 0; i < available.size(); ++i) {
-		if (i > 0) printf(", ");
-		printf("%s", available[i].c_str());
-	}
-	printf("\n\n");
-}
-#endif
-
 static int handle_config_subcommand(int argc, char** argv) {
-	Config cfg;
-	cfg.load();
-
-	if (argc < 3) {
-		std::cout << "Usage: shepherd config <show|set>" << std::endl;
-		return 1;
+	// Convert argc/argv to vector of args (skip "shepherd" and "config")
+	std::vector<std::string> args;
+	for (int i = 2; i < argc; i++) {
+		args.push_back(argv[i]);
 	}
 
-	std::string subcmd = argv[2];
-
-	if (subcmd == "show") {
-		std::cout << "=== Shepherd Configuration ===" << std::endl;
-		std::cout << "warmup = " << (cfg.warmup ? "true" : "false") << std::endl;
-		std::cout << "calibration = " << (cfg.calibration ? "true" : "false") << std::endl;
-		std::cout << "streaming = " << (cfg.streaming ? "true" : "false") << std::endl;
-		std::cout << "thinking = " << (cfg.thinking ? "true" : "false") << std::endl;
-		std::cout << "truncate_limit = " << cfg.truncate_limit << std::endl;
-		std::cout << "max_db_size = " << cfg.max_db_size_str << std::endl;
-		std::cout << "web_search_provider = " << (cfg.web_search_provider.empty() ? "" : cfg.web_search_provider) << std::endl;
-		std::cout << "web_search_api_key = " << (cfg.web_search_api_key.empty() ? "" : "(set)") << std::endl;
-		std::cout << "web_search_instance_url = " << (cfg.web_search_instance_url.empty() ? "" : cfg.web_search_instance_url) << std::endl;
-		std::cout << "memory_database = " << (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) << std::endl;
-		return 0;
-	}
-
-	if (subcmd == "set" && argc >= 5) {
-		std::string key = argv[3];
-		std::string value = argv[4];
-
-		if (key == "warmup") {
-			cfg.warmup = (value == "true" || value == "1" || value == "on");
-		} else if (key == "calibration") {
-			cfg.calibration = (value == "true" || value == "1" || value == "on");
-		} else if (key == "streaming") {
-			cfg.streaming = (value == "true" || value == "1" || value == "on");
-		} else if (key == "thinking") {
-			cfg.thinking = (value == "true" || value == "1" || value == "on");
-		} else if (key == "truncate_limit") {
-			cfg.truncate_limit = std::stoi(value);
-		} else if (key == "max_db_size") {
-			cfg.set_max_db_size(value);
-		} else if (key == "web_search_provider") {
-			cfg.web_search_provider = value;
-		} else if (key == "web_search_api_key") {
-			cfg.web_search_api_key = value;
-		} else if (key == "web_search_instance_url") {
-			cfg.web_search_instance_url = value;
-		} else if (key == "memory_database") {
-			cfg.memory_database = value;
-		} else {
-			std::cerr << "Unknown config key: " << key << std::endl;
-			return 1;
-		}
-
-		cfg.save();
-		std::cout << "Config updated: " << key << " = " << value << std::endl;
-		return 0;
-	}
-
-	std::cerr << "Unknown config subcommand: " << subcmd << std::endl;
-	std::cerr << "Available: show, set" << std::endl;
-	return 1;
+	// Call common implementation
+	return handle_config_args(args);
 }
 
 static int handle_provider_subcommand(int argc, char** argv) {
-	Provider provider_manager;
-
-	if (argc < 3) {
-		std::cout << "Usage: shepherd provider <add|list|show|edit|set|remove|use> [args...]" << std::endl;
-		return 1;
+	// Convert argc/argv to vector of args (skip "shepherd" and "provider")
+	std::vector<std::string> args;
+	for (int i = 2; i < argc; i++) {
+		args.push_back(argv[i]);
 	}
 
-	std::string subcmd = argv[2];
-
-	if (subcmd == "list") {
-		auto providers = provider_manager.list_providers();
-		if (providers.empty()) {
-			std::cout << "No providers configured" << std::endl;
-		} else {
-			std::string current = provider_manager.get_current_provider();
-			std::cout << "Available providers:" << std::endl;
-			for (const auto& name : providers) {
-				if (name == current) {
-					std::cout << "  * " << name << " (current)" << std::endl;
-				} else {
-					std::cout << "    " << name << std::endl;
-				}
-			}
-		}
-		return 0;
-	}
-
-	if (subcmd == "add") {
-		if (argc < 4) {
-			std::cerr << "Usage: shepherd provider add <type> --name <name> [--model <model>] [options...]" << std::endl;
-			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama" << std::endl;
-			return 1;
-		}
-
-		// Command-line mode: shepherd provider add <type> --name <name> ...
-		std::string type = argv[3];
-		std::vector<std::string> args;
-		for (int i = 4; i < argc; i++) {
-			args.push_back(argv[i]);
-		}
-
-		try {
-			auto new_config = provider_manager.parse_provider_args(type, args);
-
-			if (new_config->name.empty()) {
-				std::cerr << "Error: Provider name is required (use --name <name>)" << std::endl;
-				return 1;
-			}
-
-			provider_manager.save_provider(*new_config);
-			std::cout << "Provider '" << new_config->name << "' added successfully" << std::endl;
-			return 0;
-		} catch (const std::exception& e) {
-			std::cerr << "Error: " << e.what() << std::endl;
-			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama" << std::endl;
-			return 1;
-		}
-	}
-
-	if (subcmd == "show") {
-		std::string name = (argc >= 4) ? argv[3] : provider_manager.get_current_provider();
-		if (name.empty()) {
-			std::cout << "No provider specified or configured" << std::endl;
-			return 1;
-		}
-
-		auto prov = provider_manager.get_provider(name);
-		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found" << std::endl;
-			return 1;
-		}
-
-		std::cout << "Provider: " << prov->name << std::endl;
-		std::cout << "  Type: " << prov->type << std::endl;
-
-		// Type-specific display
-		if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-			std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << std::endl;
-			if (!api->base_url.empty()) {
-				std::cout << "  Base URL: " << api->base_url << std::endl;
-			}
-		}
-		else if (auto* llama = dynamic_cast<LlamaProviderConfig*>(prov)) {
-			std::cout << "  Model Path: " << llama->model_path << std::endl;
-			std::cout << "  TP: " << llama->tp << ", PP: " << llama->pp << std::endl;
-			std::cout << "  GPU Layers: " << llama->gpu_layers << std::endl;
-		}
-
-		std::cout << "  Model: " << prov->model << std::endl;
-		return 0;
-	}
-
-	if (subcmd == "edit" && argc >= 4) {
-		std::string name = argv[3];
-		auto prov = provider_manager.get_provider(name);
-		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found" << std::endl;
-			return 1;
-		}
-
-		if (provider_manager.interactive_edit(*prov)) {
-			provider_manager.save_provider(*prov);
-			std::cout << "Provider '" << prov->name << "' updated" << std::endl;
-		} else {
-			std::cout << "Edit cancelled" << std::endl;
-		}
-		return 0;
-	}
-
-	if (subcmd == "remove" && argc >= 4) {
-		std::string name = argv[3];
-		provider_manager.remove_provider(name);
-		std::cout << "Provider '" << name << "' removed" << std::endl;
-		return 0;
-	}
-
-	if (subcmd == "use" && argc >= 4) {
-		std::string name = argv[3];
-		auto prov = provider_manager.get_provider(name);
-		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found" << std::endl;
-			return 1;
-		}
-		provider_manager.set_current_provider(name);
-		std::cout << "Current provider set to: " << name << std::endl;
-		return 0;
-	}
-
-	std::cerr << "Unknown provider subcommand: " << subcmd << std::endl;
-	std::cerr << "Available: list, add, show, edit, set, remove, use" << std::endl;
-	return 1;
+	// Call common implementation
+	return handle_provider_args(args);
 }
 
-static int handle_mcp_command(int argc, char** argv) {
-	if (argc < 3) {
-		std::cerr << "Usage: shepherd mcp <add|remove|list> [args...]" << std::endl;
-		return 1;
+static int handle_mcp_subcommand(int argc, char** argv) {
+	// Convert argc/argv to vector of args (skip "shepherd" and "mcp")
+	std::vector<std::string> args;
+	for (int i = 2; i < argc; i++) {
+		args.push_back(argv[i]);
 	}
 
-	std::string subcommand = argv[2];
-	std::string config_path = Config::get_default_config_path();
-
-	if (subcommand == "list") {
-		// Suppress logs during health check
-		Logger::instance().set_log_level(LogLevel::FATAL);
-		MCPConfig::list_servers(config_path, true);  // Check health
-		return 0;
-	}
-
-	if (subcommand == "add") {
-		if (argc < 5) {
-			std::cerr << "Usage: shepherd mcp add <name> <command> [args...] [-e KEY=VALUE ...]" << std::endl;
-			return 1;
-		}
-
-		MCPServerEntry server;
-		server.name = argv[3];
-		server.command = argv[4];
-
-		// Parse arguments and environment variables
-		for (int i = 5; i < argc; i++) {
-			std::string arg = argv[i];
-
-			if (arg == "-e" || arg == "--env") {
-				// Next arg should be KEY=VALUE
-				if (i + 1 < argc) {
-					i++;
-					std::string env_pair = argv[i];
-					size_t eq_pos = env_pair.find('=');
-					if (eq_pos != std::string::npos) {
-						std::string key = env_pair.substr(0, eq_pos);
-						std::string value = env_pair.substr(eq_pos + 1);
-						server.env[key] = value;
-					} else {
-						std::cerr << "Warning: Invalid env format (use KEY=VALUE): " << env_pair << std::endl;
-					}
-				}
-			} else {
-				server.args.push_back(arg);
-			}
-		}
-
-		if (MCPConfig::add_server(config_path, server)) {
-			std::cout << "Added MCP server '" << server.name << "'" << std::endl;
-			return 0;
-		}
-		return 1;
-	}
-
-	if (subcommand == "remove") {
-		if (argc < 4) {
-			std::cerr << "Usage: shepherd mcp remove <name>" << std::endl;
-			return 1;
-		}
-
-		std::string name = argv[3];
-		if (MCPConfig::remove_server(config_path, name)) {
-			std::cout << "Removed MCP server '" << name << "'" << std::endl;
-			return 0;
-		}
-		return 1;
-	}
-
-	std::cerr << "Unknown mcp subcommand: " << subcommand << std::endl;
-	std::cerr << "Available: add, remove, list" << std::endl;
-	return 1;
+	// Call common implementation
+	return handle_mcp_args(args);
 }
 
 static int handle_api_command(int argc, char** argv) {
@@ -570,6 +315,17 @@ static int handle_api_command(int argc, char** argv) {
 	std::cerr << "Unknown api subcommand: " << subcommand << std::endl;
 	std::cerr << "Available: add, remove, list" << std::endl;
 	return 1;
+}
+
+static int handle_sched_command(int argc, char** argv) {
+	// Convert argc/argv to vector of args (skip "shepherd" and "sched")
+	std::vector<std::string> args;
+	for (int i = 2; i < argc; i++) {
+		args.push_back(argv[i]);
+	}
+
+	// Call common implementation
+	return handle_sched_args(args);
 }
 
 static int handle_edit_system_command(int argc, char** argv) {
@@ -688,179 +444,6 @@ static int handle_edit_system_command(int argc, char** argv) {
 	}
 }
 
-#if 0
-/// @brief Generate JSON schema for a tool
-/// @param tool_name Tool name
-/// @param description Tool description
-/// @param params Parameter definitions
-/// @return JSON schema string
-std::string generate_tool_json_schema(const std::string& tool_name,
-									  const std::string& description,
-									  const std::vector<ParameterDef>& params) {
-	std::string schema = "{\n";
-	schema += "  \"type\": \"function\",\n";
-	schema += "  \"function\": {\n";
-	schema += "    \"name\": \"" + tool_name + "\",\n";
-	schema += "    \"description\": \"" + description + "\",\n";
-	schema += "    \"parameters\": {\n";
-	schema += "		 \"type\": \"object\",\n";
-	schema += "		 \"properties\": {\n";
-
-	// Add properties
-	for (size_t i = 0; i < params.size(); ++i) {
-		const auto& param = params[i];
-		schema += "		   \"" + param.name + "\": {\n";
-		schema += "			 \"type\": \"" + param.type + "\"";
-		if (!param.description.empty()) {
-			schema += ",\n			\"description\": \"" + param.description + "\"";
-		}
-		schema += "\n		 }";
-		if (i < params.size() - 1) {
-			schema += ",";
-		}
-		schema += "\n";
-	}
-
-	schema += "		 }";
-
-	// Add required fields
-	std::vector<std::string> required_params;
-	for (const auto& param : params) {
-		if (param.required) {
-			required_params.push_back(param.name);
-		}
-	}
-	if (!required_params.empty()) {
-		schema += ",\n		\"required\": [";
-		for (size_t i = 0; i < required_params.size(); ++i) {
-			schema += "\"" + required_params[i] + "\"";
-			if (i < required_params.size() - 1) {
-				schema += ", ";
-			}
-		}
-		schema += "]";
-	}
-
-	schema += "\n	 }\n";
-	schema += "  }\n";
-	schema += "}";
-
-	return schema;
-}
-
-/// @brief Generate JSON schemas section for Llama 3.x first user message
-/// @param tool_descriptions Map of tool names to descriptions
-/// @param registry Tool registry for accessing tool objects
-/// @return Formatted JSON schemas string to prepend to first user message
-std::string generate_llama3_tool_schemas(const std::map<std::string, std::string>& tool_descriptions,
-										 ToolRegistry& registry) {
-	std::string result;
-
-	// Modified BFCL format for multi-turn agent (original BFCL is single-turn only)
-	// Make it VERY clear that tools are optional - only use when actually needed
-	result += "The following functions are available IF needed to answer the user's request:\n\n";
-	result += "IMPORTANT: Only call a function if you actually need external information or capabilities. ";
-	result += "For greetings, casual conversation, or questions you can answer directly - respond normally without calling any function.\n\n";
-	result += "When you DO need to call a function, respond with ONLY a JSON object in this format: ";
-	result += "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use variables.\n\n";
-
-	// Sort tools so memory tools appear first
-	std::vector<std::string> memory_tools = {"search_memory", "get_fact", "set_fact", "clear_fact"};
-	std::vector<std::string> other_tools;
-
-	// Separate memory tools from other tools
-	for (const auto& pair : tool_descriptions) {
-		if (std::find(memory_tools.begin(), memory_tools.end(), pair.first) == memory_tools.end()) {
-			other_tools.push_back(pair.first);
-		}
-	}
-
-	// Generate JSON schemas for each tool
-	// Memory tools first
-	for (const auto& tool_name : memory_tools) {
-		if (tool_descriptions.find(tool_name) != tool_descriptions.end()) {
-			Tool* tool = registry.get_tool(tool_name);
-			if (tool) {
-				auto params_schema = tool->get_parameters_schema();
-				if (!params_schema.empty()) {
-					result += generate_tool_json_schema(tool_name, tool_descriptions.at(tool_name), params_schema);
-					result += "\n\n";
-				}
-			}
-		}
-	}
-
-	// Other tools
-	for (const auto& tool_name : other_tools) {
-		Tool* tool = registry.get_tool(tool_name);
-		if (tool) {
-			auto params_schema = tool->get_parameters_schema();
-			if (!params_schema.empty()) {
-				result += generate_tool_json_schema(tool_name, tool_descriptions.at(tool_name), params_schema);
-				result += "\n\n";
-			}
-		}
-	}
-
-	return result;
-}
-
-/// @brief Format tools list based on model family
-/// @param config Model configuration
-/// @param tool_descriptions Map of tool names to descriptions
-/// @param registry Tool registry for accessing tool objects
-/// @return Formatted tools string for system prompt
-std::string format_tools_for_model(const ModelConfig& config,
-								   const std::map<std::string, std::string>& tool_descriptions,
-								   ToolRegistry& registry) {
-	std::string result;
-
-	// Sort tools so memory tools appear first
-	std::vector<std::string> memory_tools = {"search_memory", "get_fact", "set_fact", "clear_fact"};
-	std::vector<std::string> other_tools;
-
-	// Separate memory tools from other tools
-	for (const auto& pair : tool_descriptions) {
-		if (std::find(memory_tools.begin(), memory_tools.end(), pair.first) == memory_tools.end()) {
-			other_tools.push_back(pair.first);
-		}
-	}
-
-	// Llama 3.x uses JSON-based zero-shot tool calling (per PDF page 10-11)
-	// Per the spec, JSON schemas should go in the FIRST USER MESSAGE, not system message
-	// System message should be minimal - just context about handling tool responses
-	// Note: The chat template will add "Environment: ipython" automatically when builtin_tools is set
-	if (config.family == ModelFamily::LLAMA_3_X) {
-		// For Llama 3.x, return empty string - system message already set above
-		// JSON schemas are added to first user message, not system message
-		return "";
-	}
-
-	// Generic/fallback format (for other models)
-	result += "Here are the available tools:  \n\n";
-
-	// Add memory tools first
-	for (const auto& tool_name : memory_tools) {
-		if (tool_descriptions.find(tool_name) != tool_descriptions.end()) {
-			Tool* tool = registry.get_tool(tool_name);
-			if (tool) {
-				result += "- " + tool_name + ": " + tool_descriptions.at(tool_name) + " (parameters: " + tool->parameters() + ")\n";
-			}
-		}
-	}
-
-	// Add other tools
-	for (const auto& tool_name : other_tools) {
-		Tool* tool = registry.get_tool(tool_name);
-		if (tool) {
-			result += "- " + tool_name + ": " + tool_descriptions.at(tool_name) + " (parameters: " + tool->parameters() + ")\n";
-		}
-	}
-
-	return result;
-}
-#endif
-
 int main(int argc, char** argv) {
 	// Store original arguments for potential MPI re-exec
 	set_global_args(argc, argv);
@@ -946,12 +529,17 @@ int main(int argc, char** argv) {
 
 	// Handle MCP subcommand
 	if (argc >= 2 && std::string(argv[1]) == "mcp") {
-		return handle_mcp_command(argc, argv);
+		return handle_mcp_subcommand(argc, argv);
 	}
 
 	// Handle API subcommand
 	if (argc >= 2 && std::string(argv[1]) == "api") {
 		return handle_api_command(argc, argv);
+	}
+
+	// Handle sched subcommand
+	if (argc >= 2 && std::string(argv[1]) == "sched") {
+		return handle_sched_command(argc, argv);
 	}
 
 	bool debug_override = false;
@@ -982,6 +570,7 @@ int main(int argc, char** argv) {
 	int tp_override = -1;  // -1 means not specified
 	int pp_override = -1;  // -1 means not specified
 	int ubatch_override = -1;  // -1 means not specified
+	std::string frontend_mode = "cli";
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
@@ -998,10 +587,13 @@ int main(int argc, char** argv) {
 		{"memory-db", required_argument, 0, 1023},
 		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
+		{"nosched", no_argument, 0, 1037},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
 		{"template", required_argument, 0, 1006},
-		{"server", no_argument, 0, 1015},
+		{"apiserver", no_argument, 0, 1015},
+		{"server", no_argument, 0, 1015},  // Alias for --apiserver
+		{"cliserver", no_argument, 0, 1036},
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
 		{"truncate", required_argument, 0, 1019},
@@ -1068,6 +660,9 @@ int main(int argc, char** argv) {
 			case 1005: // --nomcp
 				no_mcp = true;
 				break;
+			case 1037: // --nosched
+				g_disable_scheduler = true;
+				break;
 			case 1027: // --notools
 				no_tools = true;
 				break;
@@ -1078,8 +673,11 @@ int main(int argc, char** argv) {
 			case 1006: // --template
 				template_override = optarg;
 				break;
-			case 1015: // --server
-				g_server_mode = true;
+			case 1015: // --apiserver
+				frontend_mode = "api-server";
+				break;
+			case 1036: // --cliserver
+				frontend_mode = "cli-server";
 				break;
 			case 1016: // --port
 				server_port = std::atoi(optarg);
@@ -1628,17 +1226,20 @@ int main(int argc, char** argv) {
 		// From here on, only rank 0 continues...
 		LOG_DEBUG("Rank 0 continuing to user input loop...");
 
-	// ============================================================================
-	// Server Mode - HTTP API via FastAPI
-	// ============================================================================
-	if (g_server_mode) {
-		return run_server(backend, server_host, server_port);
-	}
 
 	// ============================================================================
-	// CLI Mode - Interactive or Piped Input
+	// Create and Run Frontend
 	// ============================================================================
-	int cli_result = run_cli(backend, session);
+	std::unique_ptr<Frontend> frontend;
+	if (frontend_mode == "cli") {
+		frontend = std::make_unique<CLI>();
+	} else if (frontend_mode == "api-server") {
+		frontend = std::make_unique<APIServer>(server_host, server_port);
+	} else if (frontend_mode == "cli-server") {
+		frontend = std::make_unique<CLIServer>(server_host, server_port);
+	}
+
+	int result = frontend->run(backend, session);
 
 	// Clean shutdown for MPI
 	// Signal workers to exit via barrier, then all ranks exit together
@@ -1653,7 +1254,7 @@ int main(int argc, char** argv) {
 	}
 
 	// TensorRT-LLM registers MPI_Finalize as atexit handler (mpiUtils.cpp:186)
-	return cli_result;
+	return result;
 
 } catch (const std::exception& e) {
 	LOG_FATAL("Fatal error: " + std::string(e.what()));

@@ -6,6 +6,14 @@
 
 using json = nlohmann::json;
 
+// Server base class implementation
+Server::Server(const std::string& host, int port)
+    : Frontend(), host(host), port(port) {
+}
+
+Server::~Server() {
+}
+
 // Helper: Extract tool call from Response (handles both structured and text-based)
 static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
     // If backend already parsed tool calls, use them

@@ -106,6 +106,26 @@ public:
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };
 
+// GetTime - Get the current local time
+class GetTimeTool : public Tool {
+public:
+    std::string unsanitized_name() const override { return "get_time"; }
+    std::string description() const override { return "Get the current local time"; }
+    std::string parameters() const override { return "(no parameters)"; }
+    std::vector<ParameterDef> get_parameters_schema() const override;
+    std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
+};
+
+// GetDate - Get the current local date
+class GetDateTool : public Tool {
+public:
+    std::string unsanitized_name() const override { return "get_date"; }
+    std::string description() const override { return "Get the current local date"; }
+    std::string parameters() const override { return "(no parameters)"; }
+    std::vector<ParameterDef> get_parameters_schema() const override;
+    std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
+};
+
 // Background shell manager for Bash tool
 struct BackgroundShell {
     std::string id;

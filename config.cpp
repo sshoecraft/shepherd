@@ -413,3 +413,63 @@ void Config::validate() const {
 
     LOG_DEBUG("Configuration validation passed");
 }
+
+// Common config command implementation
+int handle_config_args(const std::vector<std::string>& args) {
+    Config cfg;
+    cfg.load();
+
+    // No args or "show" displays configuration
+    if (args.empty() || args[0] == "show") {
+        std::cout << "=== Shepherd Configuration ===\n";
+        std::cout << "warmup = " << (cfg.warmup ? "true" : "false") << "\n";
+        std::cout << "calibration = " << (cfg.calibration ? "true" : "false") << "\n";
+        std::cout << "streaming = " << (cfg.streaming ? "true" : "false") << "\n";
+        std::cout << "thinking = " << (cfg.thinking ? "true" : "false") << "\n";
+        std::cout << "truncate_limit = " << cfg.truncate_limit << "\n";
+        std::cout << "max_db_size = " << cfg.max_db_size_str << "\n";
+        std::cout << "web_search_provider = " << (cfg.web_search_provider.empty() ? "" : cfg.web_search_provider) << "\n";
+        std::cout << "web_search_api_key = " << (cfg.web_search_api_key.empty() ? "" : "(set)") << "\n";
+        std::cout << "web_search_instance_url = " << (cfg.web_search_instance_url.empty() ? "" : cfg.web_search_instance_url) << "\n";
+        std::cout << "memory_database = " << (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) << "\n";
+        return 0;
+    }
+
+    if (args[0] == "set" && args.size() >= 3) {
+        std::string key = args[1];
+        std::string value = args[2];
+
+        if (key == "warmup") {
+            cfg.warmup = (value == "true" || value == "1" || value == "on");
+        } else if (key == "calibration") {
+            cfg.calibration = (value == "true" || value == "1" || value == "on");
+        } else if (key == "streaming") {
+            cfg.streaming = (value == "true" || value == "1" || value == "on");
+        } else if (key == "thinking") {
+            cfg.thinking = (value == "true" || value == "1" || value == "on");
+        } else if (key == "truncate_limit") {
+            cfg.truncate_limit = std::stoi(value);
+        } else if (key == "max_db_size") {
+            cfg.set_max_db_size(value);
+        } else if (key == "web_search_provider") {
+            cfg.web_search_provider = value;
+        } else if (key == "web_search_api_key") {
+            cfg.web_search_api_key = value;
+        } else if (key == "web_search_instance_url") {
+            cfg.web_search_instance_url = value;
+        } else if (key == "memory_database") {
+            cfg.memory_database = value;
+        } else {
+            std::cerr << "Unknown config key: " << key << "\n";
+            return 1;
+        }
+
+        cfg.save();
+        std::cout << "Config updated: " << key << " = " << value << "\n";
+        return 0;
+    }
+
+    std::cerr << "Unknown config subcommand: " << args[0] << "\n";
+    std::cerr << "Available: show, set\n";
+    return 1;
+}

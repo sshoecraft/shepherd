@@ -803,3 +803,343 @@ std::unique_ptr<Backend> Provider::connect_next_provider(Session& session, size_
     LOG_ERROR("All providers failed to connect");
     return nullptr;
 }
+// Common provider command implementation
+int handle_provider_args(const std::vector<std::string>& args,
+                         std::unique_ptr<Backend>* backend,
+                         Session* session) {
+	Provider provider_manager;
+	provider_manager.load_providers();
+
+	// No args shows current provider (interactive mode only)
+	if (args.empty()) {
+		std::string current = provider_manager.get_current_provider();
+		if (current.empty()) {
+			std::cout << "No provider configured\n";
+		} else {
+			auto prov = provider_manager.get_provider(current);
+			if (prov) {
+				std::cout << "Current provider: " << prov->name << "\n";
+				std::cout << "  Type: " << prov->type << "\n";
+				std::cout << "  Model: " << prov->model << "\n";
+				if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+					if (!api->base_url.empty()) {
+						std::cout << "  Base URL: " << api->base_url << "\n";
+					}
+				}
+			}
+		}
+		return 0;
+	}
+
+	std::string subcmd = args[0];
+
+	if (subcmd == "list") {
+		auto providers = provider_manager.list_providers();
+		if (providers.empty()) {
+			std::cout << "No providers configured\n";
+		} else {
+			std::string current = provider_manager.get_current_provider();
+			std::cout << "Available providers:\n";
+			for (const auto& name : providers) {
+				if (name == current) {
+					std::cout << "  * " << name << " (current)\n";
+				} else {
+					std::cout << "    " << name << "\n";
+				}
+			}
+		}
+		return 0;
+	}
+
+	if (subcmd == "add") {
+		if (args.size() < 2) {
+			std::cerr << "Usage: provider add <type> --name <name> [options...]\n";
+			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
+			return 1;
+		}
+
+		std::string type = args[1];
+		std::vector<std::string> cmd_args(args.begin() + 2, args.end());
+
+		try {
+			auto new_config = provider_manager.parse_provider_args(type, cmd_args);
+
+			if (new_config->name.empty()) {
+				std::cerr << "Error: Provider name is required (use --name <name>)\n";
+				return 1;
+			}
+
+			provider_manager.save_provider(*new_config);
+			std::cout << "Provider '" << new_config->name << "' added successfully\n";
+			return 0;
+		} catch (const std::exception& e) {
+			std::cerr << "Error: " << e.what() << "\n";
+			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
+			return 1;
+		}
+	}
+
+	if (subcmd == "show") {
+		std::string name = (args.size() >= 2) ? args[1] : provider_manager.get_current_provider();
+		if (name.empty()) {
+			std::cout << "No provider specified\n";
+			return 1;
+		}
+
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found\n";
+			return 1;
+		}
+
+		std::cout << "Provider: " << prov->name << "\n";
+		std::cout << "  Type: " << prov->type << "\n";
+
+		if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+			std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << "\n";
+			if (!api->base_url.empty()) {
+				std::cout << "  Base URL: " << api->base_url << "\n";
+			}
+		} else if (auto* llama = dynamic_cast<LlamaProviderConfig*>(prov)) {
+			std::cout << "  Model Path: " << llama->model_path << "\n";
+			std::cout << "  TP: " << llama->tp << ", PP: " << llama->pp << "\n";
+			std::cout << "  GPU Layers: " << llama->gpu_layers << "\n";
+		}
+
+		std::cout << "  Model: " << prov->model << "\n";
+
+		if (prov->rate_limits.tokens_per_month > 0) {
+			std::cout << "  Monthly token limit: " << prov->rate_limits.tokens_per_month << "\n";
+		}
+		if (prov->rate_limits.max_cost_per_month > 0) {
+			std::cout << "  Monthly cost limit: $" << prov->rate_limits.max_cost_per_month << "\n";
+		}
+
+		if (prov->pricing.dynamic) {
+			std::cout << "  Pricing: dynamic (from API)\n";
+		} else if (prov->pricing.prompt_cost > 0 || prov->pricing.completion_cost > 0) {
+			std::cout << "  Pricing: $" << prov->pricing.prompt_cost << " / $"
+			          << prov->pricing.completion_cost << " per million tokens\n";
+		}
+		return 0;
+	}
+
+	if (subcmd == "edit") {
+		if (args.size() < 2) {
+			std::cerr << "Usage: provider edit <name>\n";
+			return 1;
+		}
+
+		std::string name = args[1];
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found\n";
+			return 1;
+		}
+
+		if (provider_manager.interactive_edit(*prov)) {
+			provider_manager.save_provider(*prov);
+			std::cout << "Provider '" << prov->name << "' updated\n";
+		} else {
+			std::cout << "Edit cancelled\n";
+		}
+		return 0;
+	}
+
+	if (subcmd == "set") {
+		if (args.size() < 3) {
+			std::cerr << "Usage: provider set <name> <field> <value>\n";
+			return 1;
+		}
+
+		std::string name = args[1];
+		std::string field = args[2];
+		std::string value = (args.size() >= 4) ? args[3] : "";
+
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found\n";
+			return 1;
+		}
+
+		// Update specific field
+		if (field == "model") {
+			prov->model = value;
+		} else if (field == "tokens_per_month") {
+			prov->rate_limits.tokens_per_month = std::stoi(value);
+		} else if (field == "max_cost") {
+			prov->rate_limits.max_cost_per_month = std::stof(value);
+		} else if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
+			if (field == "api_key" || field == "key") {
+				api->api_key = value;
+			} else if (field == "base_url" || field == "url") {
+				api->base_url = value;
+			} else {
+				std::cerr << "Unknown field: " << field << "\n";
+				return 1;
+			}
+		} else {
+			std::cerr << "Unknown field: " << field << "\n";
+			return 1;
+		}
+
+		provider_manager.save_provider(*prov);
+		std::cout << "Provider '" << name << "' updated\n";
+		return 0;
+	}
+
+	if (subcmd == "remove") {
+		if (args.size() < 2) {
+			std::cerr << "Usage: provider remove <name>\n";
+			return 1;
+		}
+
+		std::string name = args[1];
+		provider_manager.remove_provider(name);
+		std::cout << "Provider '" << name << "' removed\n";
+		return 0;
+	}
+
+	if (subcmd == "use") {
+		if (args.size() < 2) {
+			std::cerr << "Usage: provider use <name>\n";
+			return 1;
+		}
+
+		std::string name = args[1];
+		auto prov = provider_manager.get_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found\n";
+			return 1;
+		}
+
+		// Interactive mode - switch backend
+		if (backend && session) {
+			// Shutdown current backend first to free GPU memory
+			size_t old_context_size = (*backend)->context_size;
+			(*backend)->shutdown();
+
+			// Connect to the specified provider (creates and initializes)
+			auto new_backend = provider_manager.connect_provider(name, *session, old_context_size);
+			if (!new_backend) {
+				std::cerr << "Failed to connect to provider '" << name << "'\n";
+				return 1;
+			}
+
+			// Update backend ownership and session pointer
+			*backend = std::move(new_backend);
+			session->backend = (*backend).get();
+
+			std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
+		} else {
+			// Command-line mode - just set current
+			provider_manager.set_current_provider(name);
+			std::cout << "Current provider set to: " << name << "\n";
+		}
+		return 0;
+	}
+
+	if (subcmd == "next") {
+		auto next_name = provider_manager.get_next_provider();
+		if (!next_name) {
+			std::cout << "No available providers (all rate limited or none configured)\n";
+			return 1;
+		}
+
+		// Interactive mode - switch backend
+		if (backend && session) {
+			// Shutdown current backend first to free GPU memory
+			size_t old_context_size = (*backend)->context_size;
+			(*backend)->shutdown();
+
+			// Connect to the next provider (creates and initializes)
+			auto new_backend = provider_manager.connect_provider(*next_name, *session, old_context_size);
+			if (!new_backend) {
+				std::cerr << "Failed to connect to provider '" << *next_name << "'\n";
+				return 1;
+			}
+
+			// Get provider info for display
+			auto prov = provider_manager.get_provider(*next_name);
+
+			// Update backend ownership and session pointer
+			*backend = std::move(new_backend);
+			session->backend = (*backend).get();
+
+			std::cout << "Switched to provider '" << *next_name << "'";
+			if (prov) {
+				std::cout << " (" << prov->type << " / " << prov->model << ")";
+			}
+			std::cout << "\n";
+		} else {
+			std::cout << "Next provider: " << *next_name << "\n";
+		}
+		return 0;
+	}
+
+	std::cerr << "Unknown provider subcommand: " << subcmd << "\n";
+	std::cerr << "Available: list, add, show, edit, set, remove, use, next\n";
+	return 1;
+}
+
+// Common model command implementation
+int handle_model_args(const std::vector<std::string>& args,
+                      std::unique_ptr<Backend>* backend) {
+	Provider provider_manager;
+	provider_manager.load_providers();
+
+	// No args shows current model
+	if (args.empty()) {
+		std::string current_provider = provider_manager.get_current_provider();
+		if (current_provider.empty()) {
+			std::cout << "No provider configured\n";
+		} else {
+			auto prov = provider_manager.get_provider(current_provider);
+			if (prov) {
+				std::cout << "Current model: " << prov->model << "\n";
+			}
+		}
+		return 0;
+	}
+
+	std::string subcmd = args[0];
+
+	if (subcmd == "list") {
+		std::cout << "Available models depend on your provider.\n";
+		std::cout << "Refer to your provider's documentation for model list.\n";
+		std::cout << "Common models:\n";
+		std::cout << "  OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo\n";
+		std::cout << "  Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku\n";
+		std::cout << "  Google: gemini-pro, gemini-ultra\n";
+		std::cout << "  OpenRouter: anthropic/claude-3.5-sonnet, google/gemini-pro\n";
+		return 0;
+	}
+
+	if (subcmd == "set" && args.size() >= 2) {
+		std::string model = args[1];
+		std::string current_provider = provider_manager.get_current_provider();
+		if (current_provider.empty()) {
+			std::cout << "No provider configured\n";
+			return 1;
+		}
+
+		auto prov = provider_manager.get_provider(current_provider);
+		if (prov) {
+			prov->model = model;
+			provider_manager.save_provider(*prov);
+
+			// Update backend's model if available
+			if (backend && *backend) {
+				(*backend)->model_name = model;
+			}
+
+			std::cout << "Model updated to: " << model << "\n";
+			std::cout << "Note: Change takes effect on next message\n";
+		}
+		return 0;
+	}
+
+	std::cerr << "Unknown model subcommand: " << subcmd << "\n";
+	std::cerr << "Available: list, set\n";
+	return 1;
+}

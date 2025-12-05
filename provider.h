@@ -198,3 +198,16 @@ private:
     bool edit_api_config(ApiProviderConfig& cfg);
     bool edit_ollama_config(OllamaProviderConfig& cfg);
 };
+
+// Common provider command implementation (takes parsed args)
+// Returns 0 on success, 1 on error
+// backend and session are optional - needed for "use" and "next" commands
+int handle_provider_args(const std::vector<std::string>& args,
+                         std::unique_ptr<Backend>* backend = nullptr,
+                         Session* session = nullptr);
+
+// Common model command implementation (takes parsed args)
+// Returns 0 on success, 1 on error
+// backend is optional - needed for runtime model changes
+int handle_model_args(const std::vector<std::string>& args,
+                      std::unique_ptr<Backend>* backend = nullptr);

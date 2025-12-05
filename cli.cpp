@@ -8,6 +8,7 @@
 #include "message.h"
 #include "config.h"
 #include "provider.h"
+#include "scheduler.h"
 #include "backends/api.h"  // For ApiBackend::set_chars_per_token()
 #include "backends/factory.h"
 
@@ -38,10 +39,15 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
 }
 
 // CLI Implementation
-CLI::CLI() : eof_received(false), generation_cancelled(false) {
+CLI::CLI() : Frontend(), eof_received(false), generation_cancelled(false) {
 }
 
 CLI::~CLI() {
+}
+
+int CLI::run(std::unique_ptr<Backend>& backend, Session& session) {
+	// For now, just call the existing run_cli function
+	return run_cli(backend, session);
 }
 
 void CLI::show_tool_call(const std::string& name, const std::string& params) {
@@ -106,13 +112,17 @@ void CLI::show_cancelled() {
 	}
 }
 
-// Handle provider slash commands
-// Returns true if command was handled, false otherwise
-bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>& backend, Session& session) {
-	static Provider provider_manager;
-	// Reload providers to pick up any external changes
-	provider_manager.load_providers();
+void CLI::send_message(const std::string& message) {
+	tio.write(message.c_str(), message.length());
+}
 
+std::string CLI::receive_message(const std::string& prompt) {
+	return tio.read(prompt.c_str());
+}
+
+// Handle all slash commands
+// Returns true if command was handled, false otherwise
+bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backend>& backend, Session& session) {
 	// Tokenize the input
 	std::istringstream iss(input);
 	std::string cmd;
@@ -127,336 +137,30 @@ bool handle_provider_command(const std::string& input, std::unique_ptr<Backend>&
 
 	// /provider commands
 	if (cmd == "/provider") {
-		if (args.empty()) {
-			// Show current provider
-			std::string current = provider_manager.get_current_provider();
-			if (current.empty()) {
-				std::cout << "No provider configured\n";
-			} else {
-				auto prov = provider_manager.get_provider(current);
-				if (prov) {
-					std::cout << "Current provider: " << prov->name << "\n";
-					std::cout << "  Type: " << prov->type << "\n";
-					std::cout << "  Model: " << prov->model << "\n";
-					if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-						if (!api->base_url.empty()) {
-							std::cout << "  Base URL: " << api->base_url << "\n";
-						}
-					}
-				}
-			}
-			return true;
-		}
-
-		std::string subcmd = args[0];
-
-		if (subcmd == "list") {
-			auto providers = provider_manager.list_providers();
-			if (providers.empty()) {
-				std::cout << "No providers configured\n";
-			} else {
-				std::cout << "Available providers:\n";
-				for (const auto& name : providers) {
-					if (name == provider_manager.get_current_provider()) {
-						std::cout << "  * " << name << " (current)\n";
-					} else {
-						std::cout << "    " << name << "\n";
-					}
-				}
-			}
-			return true;
-		}
-
-		if (subcmd == "add") {
-			if (args.size() < 2) {
-				std::cout << "Usage: /provider add <type> --name <name> [options...]\n";
-				std::cout << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
-				return true;
-			}
-
-			// Command-line mode: /provider add <type> --name <name> ...
-			std::string type = args[1];
-			std::vector<std::string> cmd_args(args.begin() + 2, args.end());
-
-			try {
-				auto new_config = provider_manager.parse_provider_args(type, cmd_args);
-
-				if (new_config->name.empty()) {
-					std::cout << "Error: Provider name is required (use --name <name>)\n";
-				} else {
-					provider_manager.save_provider(*new_config);
-					std::cout << "Provider '" << new_config->name << "' added successfully\n";
-				}
-			} catch (const std::exception& e) {
-				std::cout << "Error: " << e.what() << "\n";
-				std::cout << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
-			}
-			return true;
-		}
-
-		if (subcmd == "edit" && args.size() >= 2) {
-			std::string name = args[1];
-			auto prov = provider_manager.get_provider(name);
-			if (!prov) {
-				std::cout << "Provider '" << name << "' not found\n";
-			} else {
-				if (provider_manager.interactive_edit(*prov)) {
-					provider_manager.save_provider(*prov);
-					std::cout << "Provider '" << prov->name << "' updated successfully\n";
-				} else {
-					std::cout << "Edit cancelled\n";
-				}
-			}
-			return true;
-		}
-
-		if (subcmd == "set" && args.size() >= 3) {
-			std::string name = args[1];
-			std::string field = args[2];
-			std::string value = (args.size() >= 4) ? args[3] : "";
-
-			auto prov = provider_manager.get_provider(name);
-			if (!prov) {
-				std::cout << "Provider '" << name << "' not found\n";
-			} else {
-				// Update specific field
-				if (field == "model") {
-					prov->model = value;
-				} else if (field == "tokens_per_month") {
-					prov->rate_limits.tokens_per_month = std::stoi(value);
-				} else if (field == "max_cost") {
-					prov->rate_limits.max_cost_per_month = std::stof(value);
-				} else if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-					if (field == "api_key" || field == "key") {
-						api->api_key = value;
-					} else if (field == "base_url" || field == "url") {
-						api->base_url = value;
-					} else {
-						std::cout << "Unknown field: " << field << "\n";
-						return true;
-					}
-				} else {
-					std::cout << "Unknown field: " << field << "\n";
-					return true;
-				}
-
-				provider_manager.save_provider(*prov);
-				std::cout << "Provider '" << name << "' updated\n";
-			}
-			return true;
-		}
-
-		if (subcmd == "remove" && args.size() >= 2) {
-			std::string name = args[1];
-			provider_manager.remove_provider(name);
-			std::cout << "Provider '" << name << "' removed\n";
-			return true;
-		}
-
-		if (subcmd == "use" && args.size() >= 2) {
-			std::string name = args[1];
-			auto prov = provider_manager.get_provider(name);
-			if (!prov) {
-				std::cout << "Provider '" << name << "' not found\n";
-			} else {
-				// Shutdown current backend first to free GPU memory
-				size_t old_context_size = backend->context_size;
-				backend->shutdown();
-
-				// Connect to the specified provider (creates and initializes)
-				auto new_backend = provider_manager.connect_provider(name, session, old_context_size);
-				if (!new_backend) {
-					std::cout << "Failed to connect to provider '" << name << "'\n";
-					return true;
-				}
-
-				// Update backend ownership and session pointer
-				backend = std::move(new_backend);
-				session.backend = backend.get();
-
-				std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
-			}
-			return true;
-		}
-
-		if (subcmd == "next") {
-			auto next_name = provider_manager.get_next_provider();
-			if (!next_name) {
-				std::cout << "No available providers (all rate limited or none configured)\n";
-			} else {
-				// Shutdown current backend first to free GPU memory
-				size_t old_context_size = backend->context_size;
-				backend->shutdown();
-
-				// Connect to the next provider (creates and initializes)
-				auto new_backend = provider_manager.connect_provider(*next_name, session, old_context_size);
-				if (!new_backend) {
-					std::cout << "Failed to connect to provider '" << *next_name << "'\n";
-					return true;
-				}
-
-				// Get provider info for display
-				auto prov = provider_manager.get_provider(*next_name);
-
-				// Update backend ownership and session pointer
-				backend = std::move(new_backend);
-				session.backend = backend.get();
-
-				std::cout << "Switched to provider '" << *next_name << "'";
-				if (prov) {
-					std::cout << " (" << prov->type << " / " << prov->model << ")";
-				}
-				std::cout << "\n";
-			}
-			return true;
-		}
-
-		if (subcmd == "show") {
-			std::string name = (args.size() >= 2) ? args[1] : provider_manager.get_current_provider();
-			if (name.empty()) {
-				std::cout << "No provider specified\n";
-			} else {
-				auto prov = provider_manager.get_provider(name);
-				if (!prov) {
-					std::cout << "Provider '" << name << "' not found\n";
-				} else {
-					std::cout << "Provider: " << prov->name << "\n";
-					std::cout << "  Type: " << prov->type << "\n";
-					if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-						std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << "\n";
-						if (!api->base_url.empty()) {
-							std::cout << "  Base URL: " << api->base_url << "\n";
-						}
-					}
-					std::cout << "  Model: " << prov->model << "\n";
-
-					if (prov->rate_limits.tokens_per_month > 0) {
-						std::cout << "  Monthly token limit: " << prov->rate_limits.tokens_per_month << "\n";
-					}
-					if (prov->rate_limits.max_cost_per_month > 0) {
-						std::cout << "  Monthly cost limit: $" << prov->rate_limits.max_cost_per_month << "\n";
-					}
-
-					if (prov->pricing.dynamic) {
-						std::cout << "  Pricing: dynamic (from API)\n";
-					} else if (prov->pricing.prompt_cost > 0 || prov->pricing.completion_cost > 0) {
-						std::cout << "  Pricing: $" << prov->pricing.prompt_cost << " / $"
-						          << prov->pricing.completion_cost << " per million tokens\n";
-					}
-				}
-			}
-			return true;
-		}
-
-		// Unknown subcommand
-		std::cout << "Unknown provider command: " << subcmd << "\n";
-		std::cout << "Available: list, add, edit, set, remove, use, next, show\n";
-		return true;
+		// Call common implementation with backend and session for "use"/"next" commands
+		int result = handle_provider_args(args, &backend, &session);
+		return true;  // Command was handled (even if it returned error)
 	}
 
 	// /model commands
 	if (cmd == "/model") {
-		if (args.empty()) {
-			// Show current model
-			std::string current_provider = provider_manager.get_current_provider();
-			if (current_provider.empty()) {
-				std::cout << "No provider configured\n";
-			} else {
-				auto prov = provider_manager.get_provider(current_provider);
-				if (prov) {
-					std::cout << "Current model: " << prov->model << "\n";
-				}
-			}
-			return true;
-		}
-
-		std::string subcmd = args[0];
-
-		if (subcmd == "list") {
-			std::cout << "Available models depend on your provider.\n";
-			std::cout << "Refer to your provider's documentation for model list.\n";
-			std::cout << "Common models:\n";
-			std::cout << "  OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo\n";
-			std::cout << "  Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku\n";
-			std::cout << "  Google: gemini-pro, gemini-ultra\n";
-			std::cout << "  OpenRouter: anthropic/claude-3.5-sonnet, google/gemini-pro\n";
-			return true;
-		}
-
-		if (subcmd == "set" && args.size() >= 2) {
-			std::string model = args[1];
-			std::string current_provider = provider_manager.get_current_provider();
-			if (current_provider.empty()) {
-				std::cout << "No provider configured\n";
-			} else {
-				auto prov = provider_manager.get_provider(current_provider);
-				if (prov) {
-					prov->model = model;
-					provider_manager.save_provider(*prov);
-
-					// Update backend's model
-					backend->model_name = model;
-
-					std::cout << "Model updated to: " << model << "\n";
-					std::cout << "Note: Change takes effect on next message\n";
-				}
-			}
-			return true;
-		}
-
-		// Unknown subcommand
-		std::cout << "Unknown model command: " << subcmd << "\n";
-		std::cout << "Available: list, set\n";
+		handle_model_args(args, &backend);
 		return true;
 	}
 
 	// /config command
 	if (cmd == "/config") {
-		if (args.empty() || args[0] == "show") {
-			// Show all configuration
-			std::cout << "=== Configuration ===\n";
-			std::cout << "Current provider: " << provider_manager.get_current_provider() << "\n";
-			std::cout << "Streaming: " << (config->streaming ? "enabled" : "disabled") << "\n";
-			std::cout << "Warmup: " << (config->warmup ? "enabled" : "disabled") << "\n";
-			std::cout << "Calibration: " << (config->calibration ? "enabled" : "disabled") << "\n";
-			std::cout << "Auto provider: " << (config->auto_provider ? "enabled" : "disabled") << "\n";
-			std::cout << "Truncate limit: " << config->truncate_limit << "\n";
-			return true;
-		}
-
-		if (args[0] == "set" && args.size() >= 3) {
-			std::string key = args[1];
-			std::string value = args[2];
-
-			// Update config fields
-			if (key == "streaming") {
-				config->streaming = (value == "true" || value == "1" || value == "on");
-				std::cout << "Streaming " << (config->streaming ? "enabled" : "disabled") << "\n";
-			} else if (key == "warmup") {
-				config->warmup = (value == "true" || value == "1" || value == "on");
-				std::cout << "Warmup " << (config->warmup ? "enabled" : "disabled") << "\n";
-			} else if (key == "calibration") {
-				config->calibration = (value == "true" || value == "1" || value == "on");
-				std::cout << "Calibration " << (config->calibration ? "enabled" : "disabled") << "\n";
-			} else if (key == "auto_provider") {
-				config->auto_provider = (value == "true" || value == "1" || value == "on");
-				std::cout << "Auto provider " << (config->auto_provider ? "enabled" : "disabled") << "\n";
-			} else if (key == "truncate_limit") {
-				config->truncate_limit = std::stoi(value);
-				std::cout << "Truncate limit set to: " << config->truncate_limit << "\n";
-			} else {
-				std::cout << "Unknown config key: " << key << "\n";
-			}
-
-			// Save config
-			config->save();
-			return true;
-		}
-
-		std::cout << "Usage: /config [show | set <key> <value>]\n";
+		handle_config_args(args);
 		return true;
 	}
 
+	// /sched commands
+	if (cmd == "/sched") {
+		handle_sched_args(args);
+		return true;
+	}
+
+	// /tools command
 	if (cmd == "/tools") {
 		auto& registry = ToolRegistry::instance();
 
@@ -566,6 +270,16 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 		tio.add_input(config->warmup_message);
 	}
 
+	// Initialize and start scheduler (unless disabled)
+	Scheduler scheduler;
+	if (!g_disable_scheduler) {
+		scheduler.load();
+		scheduler.start();
+		LOG_DEBUG("Scheduler initialized with " + std::to_string(scheduler.list().size()) + " schedules");
+	} else {
+		LOG_INFO("Scheduler disabled via --nosched flag");
+	}
+
 	std::string user_input;
 
 	// Main interaction loop
@@ -599,8 +313,7 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 		// Check for slash commands
 		if (!user_input.empty() && user_input[0] == '/') {
-			// Handle provider commands
-			if (handle_provider_command(user_input, backend, session)) {
+			if (CLI::handle_slash_commands(user_input, backend, session)) {
 				continue;  // Command handled, get next input
 			}
 			// If not a recognized command, treat as regular input
@@ -1045,6 +758,9 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 			LOG_ERROR("Error during generation: " + std::string(e.what()));
 		}
 	}
+
+	// Stop and cleanup scheduler
+	scheduler.stop();
 
 	LOG_DEBUG("CLI loop ended");
 	return 0;

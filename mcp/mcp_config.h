@@ -39,3 +39,7 @@ public:
     /// @brief Check if server exists
     static bool server_exists(const std::string& config_path, const std::string& name);
 };
+
+// Common MCP command implementation (takes parsed args)
+// Returns 0 on success, 1 on error
+int handle_mcp_args(const std::vector<std::string>& args);

@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
 #include <sys/wait.h>
 #include <signal.h>
 #include <curl/curl.h>
@@ -781,6 +783,44 @@ std::vector<std::string> BackgroundShellManager::list_shells() const {
     return shell_ids;
 }
 
+// GetTimeTool implementation
+std::vector<ParameterDef> GetTimeTool::get_parameters_schema() const {
+    return {};  // No parameters
+}
+
+std::map<std::string, std::any> GetTimeTool::execute(const std::map<std::string, std::any>& args) {
+    std::map<std::string, std::any> result;
+
+    auto now = std::time(nullptr);
+    std::tm tm = *std::localtime(&now);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%H:%M:%S");
+
+    result["content"] = oss.str();
+    result["success"] = true;
+    return result;
+}
+
+// GetDateTool implementation
+std::vector<ParameterDef> GetDateTool::get_parameters_schema() const {
+    return {};  // No parameters
+}
+
+std::map<std::string, std::any> GetDateTool::execute(const std::map<std::string, std::any>& args) {
+    std::map<std::string, std::any> result;
+
+    auto now = std::time(nullptr);
+    std::tm tm = *std::localtime(&now);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d");
+
+    result["content"] = oss.str();
+    result["success"] = true;
+    return result;
+}
+
 // Registration function
 void register_core_tools() {
     auto& registry = ToolRegistry::instance();
@@ -796,4 +836,6 @@ void register_core_tools() {
     registry.register_tool(std::make_unique<TodoWriteTool>());
     registry.register_tool(std::make_unique<BashOutputTool>());
     registry.register_tool(std::make_unique<KillShellTool>());
+    registry.register_tool(std::make_unique<GetTimeTool>());
+    registry.register_tool(std::make_unique<GetDateTool>());
 }

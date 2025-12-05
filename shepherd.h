@@ -57,6 +57,9 @@ extern bool g_server_mode;
 // Cancellation flag
 extern bool g_generation_cancelled;
 
+// Scheduler disable flag (--nosched)
+extern bool g_disable_scheduler;
+
 // ============================================================================
 // Common Utilities
 // ============================================================================

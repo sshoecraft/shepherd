@@ -29,6 +29,8 @@ set(SHEPHERD_SOURCES
     http_client.cpp
     rag.cpp
     sse_parser.cpp
+    scheduler.cpp
+    frontend.cpp
 
     # Backend sources (always included)
     backends/backend.cpp
@@ -63,6 +65,7 @@ set(SHEPHERD_SOURCES
     # Server sources
     server/server.cpp
     server/api_server.cpp
+    server/cli_server.cpp
 )
 
 # Add backend sources conditionally
@@ -277,7 +280,7 @@ if(ENABLE_TENSORRT)
         -ltorch_cuda
         -lc10
         -lc10_cuda
-        ${CMAKE_SOURCE_DIR}/lib/libtokenizers_c.a
+        ${CMAKE_SOURCE_DIR}/tokenizers/rust/target/release/libtokenizers_c.a
         dl
         pthread
     )

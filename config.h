@@ -85,3 +85,7 @@ private:
     // Internal state
     std::string custom_config_path_;  // Custom config file path (optional)
 };
+
+// Common config command implementation (takes parsed args)
+// Returns 0 on success, 1 on error
+int handle_config_args(const std::vector<std::string>& args);

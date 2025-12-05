@@ -19,6 +19,18 @@ using json = nlohmann::json;
 // External config
 extern std::unique_ptr<Config> config;
 
+// APIServer class implementation
+APIServer::APIServer(const std::string& host, int port)
+    : Server(host, port) {
+}
+
+APIServer::~APIServer() {
+}
+
+int APIServer::run(std::unique_ptr<Backend>& backend, Session& session) {
+    return run_api_server(backend.get(), host, port);
+}
+
 // Global mutex to serialize backend requests (single-threaded processing)
 static std::mutex backend_mutex;
 

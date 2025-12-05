@@ -31,7 +31,12 @@ git submodule update --init --recursive
 # Alternative: Clone with submodules in one step
 # git clone --recursive https://github.com/sshoecraft/shepherd.git
 
-# 3. Build llama.cpp (if using llamacpp backend)
+# 3. Apply replxx build fixes (C++20 compatibility and library naming)
+cd vendor/replxx
+git apply ../../patches/replxx-build-fixes.patch
+cd ../..
+
+# 4. Build llama.cpp (if using llamacpp backend)
 cd llama.cpp
 
 # Apply Shepherd patches (KV cache eviction callbacks + layer assignment fix)
@@ -49,8 +54,8 @@ cmake .. -DGGML_CUDA=ON
 make -j$(nproc)
 cd ../..
 
-# 4. Install TensorRT-LLM (ONLY needed for TensorRT backend)
-# Skip steps 4-5 if you're only using llama.cpp backend
+# 5. Install TensorRT-LLM (ONLY needed for TensorRT backend)
+# Skip steps 5-6 if you're only using llama.cpp backend
 
 # Create Python virtual environment
 python3 -m venv ~/venv
@@ -63,7 +68,7 @@ pip install tensorrt_llm
 # Verify installation
 python -c "import tensorrt_llm; print(tensorrt_llm.__version__)"
 
-# 5. Build tokenizers library (needed for TensorRT backend)
+# 6. Build tokenizers library (needed for TensorRT backend)
 cd tokenizers/tokenizers
 cargo build --release --features=capi
 
@@ -73,20 +78,20 @@ cp target/release/libtokenizers_c.a ../../lib/
 cp target/release/libtokenizers_cpp.a ../../lib/
 cd ../..
 
-# 6. Build Shepherd
+# 7. Build Shepherd
 mkdir -p build && cd build
 
 # For llama.cpp only (no TensorRT, no Rust/Python needed):
 cmake .. -DENABLE_LLAMACPP=ON -DENABLE_TENSORRT=OFF
 
-# For TensorRT (requires steps 4-5 completed):
+# For TensorRT (requires steps 5-6 completed):
 # Make sure virtual environment is activated!
 # source ~/venv/bin/activate
 # cmake .. -DENABLE_TENSORRT=ON -DENABLE_LLAMACPP=ON
 
 make -j$(nproc)
 
-# 6. Run
+# 8. Run
 ./shepherd --model /path/to/model.gguf
 ```
 

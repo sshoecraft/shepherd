@@ -1,13 +1,23 @@
 #pragma once
 
+#include "server.h"
 #include "../backends/backend.h"
+#include "../session.h"
 #include "../llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "nlohmann/json.hpp"
 #include <string>
 #include <atomic>
 #include <random>
 
-using json = nlohmann::json;
+/// @brief API Server - OpenAI-compatible HTTP API server
+class APIServer : public Server {
+public:
+    APIServer(const std::string& host, int port);
+    ~APIServer();
+
+    /// @brief Run the API server
+    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+};
 
 /// @brief Run API server
 /// @param backend The backend to use for generation

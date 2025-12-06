@@ -241,14 +241,75 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                     [&state, prompt](size_t offset, httplib::DataSink& sink) mutable {
                         std::string accumulated_response;
 
-                        // Streaming callback
+                        // Tool call filtering state
+                        std::vector<std::string> tool_markers = state.backend->get_tool_call_markers();
+                        std::string pending_buffer;
+                        bool in_tool_call = false;
+
+                        // Helper to check if buffer could be start of any marker
+                        auto could_be_marker_start = [&tool_markers](const std::string& buf) -> bool {
+                            for (const auto& marker : tool_markers) {
+                                if (marker.substr(0, buf.size()) == buf) {
+                                    return true;
+                                }
+                            }
+                            // Also check for raw JSON tool call pattern
+                            if (buf.size() > 0 && buf[0] == '{') {
+                                std::string json_pattern = "{\"name\"";
+                                if (json_pattern.substr(0, buf.size()) == buf) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        };
+
+                        // Helper to check if buffer matches any marker
+                        auto matches_marker = [&tool_markers](const std::string& buf) -> bool {
+                            for (const auto& marker : tool_markers) {
+                                if (buf.find(marker) != std::string::npos) {
+                                    return true;
+                                }
+                            }
+                            // Check for raw JSON tool call
+                            if (buf.find("{\"name\"") != std::string::npos) {
+                                return true;
+                            }
+                            return false;
+                        };
+
+                        // Streaming callback with tool call filtering
                         auto stream_callback = [&](const std::string& delta,
                                                    const std::string& accumulated,
                                                    const Response& partial) -> bool {
-                            if (!delta.empty()) {
+                            if (delta.empty()) return true;
+
+                            // Add delta to pending buffer
+                            pending_buffer += delta;
+
+                            // If we're in a tool call, just buffer it
+                            if (in_tool_call) {
+                                return true;
+                            }
+
+                            // Check if this could be the start of a tool call
+                            if (matches_marker(pending_buffer)) {
+                                // We've hit a tool call marker - stop streaming content
+                                in_tool_call = true;
+                                return true;
+                            }
+
+                            // Check if we might be starting a tool call
+                            if (could_be_marker_start(pending_buffer)) {
+                                // Keep buffering - might be a tool call
+                                return true;
+                            }
+
+                            // Safe to output the pending buffer
+                            if (!pending_buffer.empty()) {
                                 json chunk;
-                                chunk["delta"] = delta;
+                                chunk["delta"] = pending_buffer;
                                 std::string data = "data: " + chunk.dump() + "\n\n";
+                                pending_buffer.clear();
                                 if (!sink.write(data.c_str(), data.size())) {
                                     return false;
                                 }

@@ -270,7 +270,7 @@ std::unique_ptr<ProviderConfig> ProviderConfig::from_json(const json& j) {
     else if (type == "tensorrt") {
         return std::make_unique<TensorRTProviderConfig>(TensorRTProviderConfig::from_json(j));
     }
-    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok") {
+    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok" || type == "cli") {
         return std::make_unique<ApiProviderConfig>(ApiProviderConfig::from_json(j));
     }
     else if (type == "ollama") {
@@ -684,7 +684,7 @@ std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string&
     else if (type == "tensorrt") {
         config = std::make_unique<TensorRTProviderConfig>();
     }
-    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok") {
+    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok" || type == "cli") {
         config = std::make_unique<ApiProviderConfig>();
     }
     else if (type == "ollama") {
@@ -853,21 +853,50 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 	if (subcmd == "add") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider add <type> --name <name> [options...]\n";
+			std::cerr << "Usage: provider add <name> [--type <type>] [options...]\n";
 			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
 			return 1;
 		}
 
-		std::string type = args[1];
+		std::string name = args[1];
 		std::vector<std::string> cmd_args(args.begin() + 2, args.end());
 
-		try {
-			auto new_config = provider_manager.parse_provider_args(type, cmd_args);
+		// Check if provider already exists
+		if (provider_manager.get_provider(name)) {
+			std::cerr << "Provider '" << name << "' already exists. Use 'provider edit " << name << "' to modify.\n";
+			return 1;
+		}
 
-			if (new_config->name.empty()) {
-				std::cerr << "Error: Provider name is required (use --name <name>)\n";
-				return 1;
+		// If no additional args, create default and open interactive edit
+		if (cmd_args.empty()) {
+			// Create a default API provider config
+			auto new_config = std::make_unique<ApiProviderConfig>();
+			new_config->name = name;
+			new_config->type = "openai";  // Default type, user can change in editor
+
+			if (provider_manager.interactive_edit(*new_config)) {
+				provider_manager.save_provider(*new_config);
+				std::cout << "Provider '" << new_config->name << "' added successfully\n";
+			} else {
+				std::cout << "Add cancelled\n";
 			}
+			return 0;
+		}
+
+		// Parse --type from args
+		std::string type = "openai";  // Default
+		std::vector<std::string> remaining_args;
+		for (size_t i = 0; i < cmd_args.size(); i++) {
+			if (cmd_args[i] == "--type" && i + 1 < cmd_args.size()) {
+				type = cmd_args[++i];
+			} else {
+				remaining_args.push_back(cmd_args[i]);
+			}
+		}
+
+		try {
+			auto new_config = provider_manager.parse_provider_args(type, remaining_args);
+			new_config->name = name;
 
 			provider_manager.save_provider(*new_config);
 			std::cout << "Provider '" << new_config->name << "' added successfully\n";

@@ -3,6 +3,7 @@
 #include "../tools/tool.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
+#include "../mcp/mcp.h"
 #include "../llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "nlohmann/json.hpp"
 #include <mutex>
@@ -22,8 +23,40 @@ CLIServer::CLIServer(const std::string& host, int port)
 CLIServer::~CLIServer() {
 }
 
+void CLIServer::init(bool no_mcp, bool no_tools) {
+    if (no_tools) {
+        LOG_INFO("Tools disabled for CLI server");
+        return;
+    }
+
+    LOG_INFO("Initializing tools for CLI server...");
+
+    // Register all native tools
+    register_filesystem_tools(tools);
+    register_command_tools(tools);
+    register_json_tools(tools);
+    register_http_tools(tools);
+    register_memory_tools(tools);
+    register_mcp_resource_tools(tools);
+    register_core_tools(tools);
+
+    // Initialize MCP servers
+    if (!no_mcp) {
+        auto& mcp = MCP::instance();
+        mcp.initialize(tools);
+        LOG_INFO("MCP initialized with " + std::to_string(mcp.get_tool_count()) + " tools");
+    } else {
+        LOG_INFO("MCP system disabled");
+    }
+
+    // Build the combined tool list
+    tools.build_all_tools();
+
+    LOG_INFO("CLI server tools initialized: " + std::to_string(tools.all_tools.size()) + " total");
+}
+
 int CLIServer::run(std::unique_ptr<Backend>& backend, Session& session) {
-    return run_cli_server(backend, session, host, port);
+    return run_cli_server(backend, session, host, port, tools);
 }
 
 // Helper: Extract tool call from Response
@@ -44,6 +77,7 @@ struct CliRequest {
 struct CliServerState {
     Backend* backend;
     Session* session;
+    Tools* tools;
     std::mutex request_mutex;
     std::atomic<bool> processing{false};
     std::atomic<int> queue_depth{0};
@@ -54,10 +88,8 @@ struct CliServerState {
 static json process_request(CliServerState& state, const std::string& prompt) {
     json result;
     result["success"] = true;
-    result["prompt"] = prompt;
 
     std::string accumulated_response;
-    std::vector<json> tool_executions;
 
     // Add user message and generate initial response
     Response resp = state.session->add_message(Message::USER, prompt);
@@ -88,37 +120,24 @@ static json process_request(CliServerState& state, const std::string& prompt) {
         auto& tool_call = *tool_call_opt;
         std::string tool_name = tool_call.name;
 
-        // Log tool execution
-        json tool_exec;
-        tool_exec["name"] = tool_name;
-        tool_exec["parameters"] = tool_call.raw_json;
-
         // Execute the tool
-        ToolResult tool_result = execute_tool(tool_name, tool_call.parameters);
+        ToolResult tool_result = state.tools->execute(tool_name, tool_call.parameters);
 
-        tool_exec["success"] = tool_result.success;
         if (tool_result.success) {
             // Sanitize UTF-8 in result
             std::string sanitized = utf8_sanitizer::sanitize_utf8(tool_result.content);
-            tool_exec["result"] = sanitized;
 
             // Send tool result to model and get next response
             resp = state.session->add_message(Message::TOOL, sanitized, tool_name, tool_call.tool_call_id);
         } else {
-            tool_exec["error"] = tool_result.error;
-
             // Send error to model
             std::string error_msg = "Error: " + tool_result.error;
             resp = state.session->add_message(Message::TOOL, error_msg, tool_name, tool_call.tool_call_id);
         }
 
-        tool_executions.push_back(tool_exec);
-
         if (!resp.success) {
             result["success"] = false;
             result["error"] = resp.error;
-            result["partial_response"] = accumulated_response;
-            result["tool_executions"] = tool_executions;
             return result;
         }
 
@@ -126,18 +145,11 @@ static json process_request(CliServerState& state, const std::string& prompt) {
     }
 
     result["response"] = accumulated_response;
-    result["tool_executions"] = tool_executions;
-    result["iterations"] = iteration;
-    result["tokens"] = {
-        {"prompt", resp.prompt_tokens},
-        {"completion", resp.completion_tokens}
-    };
-
     return result;
 }
 
 int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
-                   const std::string& host, int port) {
+                   const std::string& host, int port, Tools& tools) {
 
     LOG_INFO("Starting CLI server on " + host + ":" + std::to_string(port));
 
@@ -146,6 +158,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
     CliServerState state;
     state.backend = backend.get();
     state.session = &session;
+    state.tools = &tools;
 
     // Health endpoint
     server.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
@@ -189,6 +202,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
             // Parse request
             json request_json;
             std::string prompt;
+            bool stream = false;
 
             if (!req.body.empty()) {
                 try {
@@ -196,6 +210,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                     if (request_json.contains("prompt")) {
                         prompt = request_json["prompt"].get<std::string>();
                     }
+                    stream = request_json.value("stream", false);
                 } catch (const json::exception&) {
                     // Not JSON, treat body as raw prompt
                     prompt = req.body;
@@ -215,10 +230,110 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
             state.current_request = prompt;
 
-            // Process the request
-            json response = process_request(state, prompt);
+            if (stream) {
+                // Streaming response using SSE
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("X-Accel-Buffering", "no");
 
-            res.set_content(response.dump(), "application/json");
+                res.set_content_provider(
+                    "text/event-stream",
+                    [&state, prompt](size_t offset, httplib::DataSink& sink) mutable {
+                        std::string accumulated_response;
+
+                        // Streaming callback
+                        auto stream_callback = [&](const std::string& delta,
+                                                   const std::string& accumulated,
+                                                   const Response& partial) -> bool {
+                            if (!delta.empty()) {
+                                json chunk;
+                                chunk["delta"] = delta;
+                                std::string data = "data: " + chunk.dump() + "\n\n";
+                                if (!sink.write(data.c_str(), data.size())) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+
+                        // Add user message with streaming
+                        Response resp = state.session->add_message_stream(
+                            Message::USER, prompt, stream_callback);
+
+                        if (!resp.success) {
+                            json error_chunk;
+                            error_chunk["error"] = resp.error;
+                            error_chunk["done"] = true;
+                            std::string data = "data: " + error_chunk.dump() + "\n\n";
+                            sink.write(data.c_str(), data.size());
+                            sink.done();
+                            return true;
+                        }
+
+                        accumulated_response = resp.content;
+
+                        // Tool execution loop
+                        const int max_tool_iterations = 50;
+                        int iteration = 0;
+
+                        while (iteration < max_tool_iterations) {
+                            iteration++;
+
+                            auto tool_call_opt = extract_tool_call(resp, state.backend);
+                            if (!tool_call_opt) {
+                                break;
+                            }
+
+                            auto& tool_call = *tool_call_opt;
+                            std::string tool_name = tool_call.name;
+
+                            // Send tool call notification
+                            json tool_chunk;
+                            tool_chunk["tool_call"] = tool_name;
+                            std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
+                            sink.write(tool_data.c_str(), tool_data.size());
+
+                            // Execute the tool
+                            ToolResult tool_result = state.tools->execute(tool_name, tool_call.parameters);
+
+                            if (tool_result.success) {
+                                std::string sanitized = utf8_sanitizer::sanitize_utf8(tool_result.content);
+                                resp = state.session->add_message_stream(
+                                    Message::TOOL, sanitized, stream_callback, tool_name, tool_call.tool_call_id);
+                            } else {
+                                std::string error_msg = "Error: " + tool_result.error;
+                                resp = state.session->add_message_stream(
+                                    Message::TOOL, error_msg, stream_callback, tool_name, tool_call.tool_call_id);
+                            }
+
+                            if (!resp.success) {
+                                json error_chunk;
+                                error_chunk["error"] = resp.error;
+                                error_chunk["done"] = true;
+                                std::string data = "data: " + error_chunk.dump() + "\n\n";
+                                sink.write(data.c_str(), data.size());
+                                sink.done();
+                                return true;
+                            }
+
+                            accumulated_response = resp.content;
+                        }
+
+                        // Send final done message
+                        json done_chunk;
+                        done_chunk["done"] = true;
+                        done_chunk["response"] = accumulated_response;
+                        std::string done_data = "data: " + done_chunk.dump() + "\n\n";
+                        sink.write(done_data.c_str(), done_data.size());
+                        sink.done();
+                        return false;  // Signal no more content
+                    }
+                );
+            } else {
+                // Non-streaming response
+                json response = process_request(state, prompt);
+                res.set_content(response.dump(), "application/json");
+            }
 
         } catch (const std::exception& e) {
             json error_response;

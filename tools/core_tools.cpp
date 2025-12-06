@@ -1,4 +1,5 @@
 #include "core_tools.h"
+#include "tools.h"
 #include "http_client.h"
 #include "tools/web_search.h"
 #include "nlohmann/json.hpp"
@@ -822,20 +823,18 @@ std::map<std::string, std::any> GetDateTool::execute(const std::map<std::string,
 }
 
 // Registration function
-void register_core_tools() {
-    auto& registry = ToolRegistry::instance();
-
+void register_core_tools(Tools& tools) {
     // TaskTool disabled - not implemented for stateful backends
-    // registry.register_tool(std::make_unique<TaskTool>());
-    registry.register_tool(std::make_unique<BashTool>());
-    registry.register_tool(std::make_unique<GlobTool>());
-    registry.register_tool(std::make_unique<GrepTool>());
-    registry.register_tool(std::make_unique<EditTool>());
-    registry.register_tool(std::make_unique<WebFetchTool>());
-    registry.register_tool(std::make_unique<WebSearchTool>());
-    registry.register_tool(std::make_unique<TodoWriteTool>());
-    registry.register_tool(std::make_unique<BashOutputTool>());
-    registry.register_tool(std::make_unique<KillShellTool>());
-    registry.register_tool(std::make_unique<GetTimeTool>());
-    registry.register_tool(std::make_unique<GetDateTool>());
+    // tools.register_tool(std::make_unique<TaskTool>());
+    tools.register_tool(std::make_unique<BashTool>());
+    tools.register_tool(std::make_unique<GlobTool>());
+    tools.register_tool(std::make_unique<GrepTool>());
+    tools.register_tool(std::make_unique<EditTool>());
+    tools.register_tool(std::make_unique<WebFetchTool>());
+    tools.register_tool(std::make_unique<WebSearchTool>());
+    tools.register_tool(std::make_unique<TodoWriteTool>());
+    tools.register_tool(std::make_unique<BashOutputTool>());
+    tools.register_tool(std::make_unique<KillShellTool>());
+    tools.register_tool(std::make_unique<GetTimeTool>());
+    tools.register_tool(std::make_unique<GetDateTool>());
 }

@@ -1,5 +1,7 @@
 #include "rag.h"
 #include "config.h"
+#include <thread>
+#include <mutex>
 #include "logger.h"
 #include <chrono>
 #include <filesystem>

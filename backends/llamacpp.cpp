@@ -19,64 +19,6 @@
 
 #include "terminal_io.h"
 
-
-// Helper function to convert ToolRegistry tools to Session::Tool format
-static std::vector<Session::Tool> convert_registry_to_session_tools(ToolRegistry& registry) {
-    std::vector<Session::Tool> session_tools;
-    for (const auto& tool_name : registry.list_tools()) {
-        Tool* tool = registry.get_tool(tool_name);
-        if (tool) {
-            Session::Tool session_tool;
-            session_tool.name = tool->name();
-            session_tool.description = tool->description();
-
-            // Try to get structured schema first
-            auto param_defs = tool->get_parameters_schema();
-            if (!param_defs.empty()) {
-                // Build JSON schema from ParameterDef structs
-                nlohmann::json schema;
-                schema["type"] = "object";
-                schema["properties"] = nlohmann::json::object();
-                nlohmann::json required_fields = nlohmann::json::array();
-
-                for (const auto& param : param_defs) {
-                    nlohmann::json prop;
-                    prop["type"] = param.type;
-                    if (!param.description.empty()) {
-                        prop["description"] = param.description;
-                    }
-                    schema["properties"][param.name] = prop;
-
-                    if (param.required) {
-                        required_fields.push_back(param.name);
-                    }
-                }
-
-                if (!required_fields.empty()) {
-                    schema["required"] = required_fields;
-                }
-
-                session_tool.parameters = schema;
-            } else {
-                // Fallback: try parsing legacy parameters()
-                try {
-                    session_tool.parameters = nlohmann::json::parse(tool->parameters());
-                } catch (const std::exception& e) {
-                    // Create basic empty schema
-                    session_tool.parameters = {
-                        {"type", "object"},
-                        {"properties", nlohmann::json::object()},
-                        {"required", nlohmann::json::array()}
-                    };
-                }
-            }
-
-            session_tools.push_back(session_tool);
-        }
-    }
-    return session_tools;
-}
-
 // LlamaCppBackend implementation
 LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
     : Backend(max_context_tokens),
@@ -478,10 +420,6 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
     if (!is_ready()) {
         throw std::runtime_error("LlamaCpp backend not initialized");
     }
-
-    LOG_DEBUG("Getting tools from registry");
-    auto& registry = ToolRegistry::instance();
-    auto available_tools = registry.list_tools();
 
     // Extract tool call markers from chat template on first call
     if (!have_tool_markers && chat_templates && current_session) {
@@ -1275,12 +1213,8 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
         LOG_DEBUG("Adding system message to KV cache");
 
         // Format system message with tools using chat template
-        // If session.tools is populated (API mode), use those; otherwise convert from ToolRegistry (CLI mode)
-        std::vector<Session::Tool> tools = session.tools.empty() ?
-            convert_registry_to_session_tools(ToolRegistry::instance()) : session.tools;
-
-        std::string formatted_system = chat_template->format_system_message(session.system_message, tools);
-        LOG_DEBUG("Formatted system prompt with " + std::to_string(tools.size()) + " tools");
+        std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
+        LOG_DEBUG("Formatted system prompt with " + std::to_string(session.tools.size()) + " tools");
 
         // Create system message
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
@@ -1754,11 +1688,8 @@ void LlamaCppBackend::initialize(Session& session) {
 
     // Add system message in cli mode
 	if (!g_server_mode) {
-        // Convert ToolRegistry to Session::Tool format
-        std::vector<Session::Tool> tools = convert_registry_to_session_tools(ToolRegistry::instance());
-
         // Format system message with tools using chat template
-        std::string formatted_system = chat_template->format_system_message(session.system_message, tools);
+        std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
 
         // Use add_message to properly decode and add system message
         // This ensures it's in KV cache before being added to session.messages
@@ -1800,10 +1731,8 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     int message_tokens = prompt_tokens;
     if (message_tokens == 0) {
         if (type == Message::SYSTEM && !session.tools.empty()) {
-            // Convert tools and format system message using chat template
-            std::vector<Session::Tool> tools = session.tools.empty() ?
-                convert_registry_to_session_tools(ToolRegistry::instance()) : session.tools;
-            std::string formatted_content = chat_template->format_system_message(content, tools);
+            // Format system message with tools using chat template
+            std::string formatted_content = chat_template->format_system_message(content, session.tools);
             message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
         } else {
             message_tokens = count_message_tokens(type, content, tool_name, tool_id);
@@ -1926,6 +1855,150 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     }
 
     LOG_DEBUG("add_message complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
+              ", completion_tokens=" + std::to_string(resp.completion_tokens) +
+              ", finish_reason=" + resp.finish_reason);
+
+    return resp;
+#else
+    Response err_resp;
+    err_resp.success = false;
+    err_resp.code = Response::ERROR;
+    err_resp.finish_reason = "error";
+    err_resp.error = "LlamaCpp backend not compiled in";
+    return err_resp;
+#endif
+}
+
+Response LlamaCppBackend::add_message_stream(Session& session, Message::Type type, const std::string& content,
+                                            StreamCallback callback,
+                                            const std::string& tool_name, const std::string& tool_id,
+                                            int prompt_tokens, int max_tokens) {
+#ifdef ENABLE_LLAMACPP
+    if (!is_ready()) {
+        Response err_resp;
+        err_resp.success = false;
+        err_resp.code = Response::ERROR;
+        err_resp.finish_reason = "error";
+        err_resp.error = "LlamaCpp backend not initialized";
+        return err_resp;
+    }
+
+    // Set current session for eviction callbacks
+    current_session = &session;
+
+    LOG_DEBUG("LlamaCpp add_message_stream called: type=" + std::to_string(type) +
+              ", content_len=" + std::to_string(content.length()));
+
+    // Count tokens for this message if not provided
+    int message_tokens = prompt_tokens;
+    if (message_tokens == 0) {
+        if (type == Message::SYSTEM && !session.tools.empty()) {
+            std::string formatted_content = chat_template->format_system_message(content, session.tools);
+            message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
+        } else {
+            message_tokens = count_message_tokens(type, content, tool_name, tool_id);
+        }
+    }
+
+    // Create the message object
+    Message msg(type, content, message_tokens);
+    msg.tool_name = tool_name;
+    msg.tool_call_id = tool_id;
+
+    // Decode to KV cache
+    if (!format_and_decode_message(msg)) {
+        LOG_ERROR("Failed to decode message to KV cache");
+        Response err_resp;
+        err_resp.success = false;
+        err_resp.code = Response::ERROR;
+        err_resp.finish_reason = "error";
+        err_resp.error = "Failed to decode message to KV cache";
+        return err_resp;
+    }
+
+    // Add message to session
+    session.messages.push_back(msg);
+    int new_message_index = static_cast<int>(session.messages.size()) - 1;
+    session.total_tokens += message_tokens;
+
+    if (type == Message::USER) {
+        session.last_user_message_index = new_message_index;
+        session.last_user_message_tokens = message_tokens;
+    }
+
+    // Generate response
+    Response resp;
+    resp.success = true;
+    resp.code = Response::SUCCESS;
+
+    if (type != Message::SYSTEM) {
+        // Update member variables for token calculations
+        if (!session.messages.empty() && session.messages[0].type == Message::SYSTEM) {
+            system_formatted_tokens = session.messages[0].tokens;
+        } else {
+            system_formatted_tokens = 0;
+        }
+
+        if (type == Message::USER) {
+            current_user_formatted_tokens = message_tokens;
+        } else if (session.last_user_message_index >= 0) {
+            current_user_formatted_tokens = session.last_user_message_tokens;
+        } else {
+            current_user_formatted_tokens = 0;
+        }
+
+        // Generate with streaming callback
+        std::string response_text = generate(max_tokens, callback);
+
+        // Add assistant message to session
+        Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
+        session.messages.push_back(assistant_msg);
+        session.total_tokens += last_assistant_kv_tokens;
+        session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
+        session.last_assistant_message_tokens = last_assistant_kv_tokens;
+
+        // Parse tool calls
+        std::vector<ToolParser::ToolCall> tool_calls;
+        if (!response_text.empty()) {
+            bool has_marker = false;
+            for (const auto& marker : tool_call_markers) {
+                if (response_text.find(marker) != std::string::npos) {
+                    has_marker = true;
+                    break;
+                }
+            }
+
+            if (has_marker || (response_text[0] == '{' && response_text.find("\"name\"") != std::string::npos)) {
+                auto tool_call = ToolParser::parse_tool_call(response_text, tool_call_markers);
+                if (tool_call.has_value()) {
+                    tool_calls.push_back(tool_call.value());
+                }
+            }
+        }
+
+        // Determine finish reason
+        std::string finish_reason = "stop";
+        if (g_generation_cancelled) {
+            finish_reason = "cancelled";
+        } else if (!tool_calls.empty()) {
+            finish_reason = "tool_calls";
+        } else if (last_generation_hit_length_limit) {
+            finish_reason = "length";
+        }
+
+        resp.content = response_text;
+        resp.tool_calls = tool_calls;
+        resp.prompt_tokens = last_prompt_tokens;
+        resp.completion_tokens = last_completion_tokens;
+        resp.finish_reason = finish_reason;
+        resp.was_streamed = (callback != nullptr);
+    } else {
+        resp.finish_reason = "system";
+        resp.prompt_tokens = message_tokens;
+        resp.completion_tokens = 0;
+    }
+
+    LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
               ", completion_tokens=" + std::to_string(resp.completion_tokens) +
               ", finish_reason=" + resp.finish_reason);
 

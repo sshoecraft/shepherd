@@ -1,6 +1,7 @@
 #include "gemini.h"
 #include "shepherd.h"
 #include "nlohmann/json.hpp"
+#include "sse_parser.h"
 #include <sstream>
 #include <algorithm>
 
@@ -515,4 +516,211 @@ std::map<std::string, std::string> GeminiBackend::get_api_headers() {
 std::string GeminiBackend::get_api_endpoint() {
     // Gemini endpoint format: base_url/{model}:generateContent
     return api_endpoint + model_name + ":generateContent";
+}
+
+std::string GeminiBackend::get_streaming_endpoint() {
+    // Gemini streaming endpoint format: base_url/{model}:streamGenerateContent?alt=sse
+    return api_endpoint + model_name + ":streamGenerateContent?alt=sse";
+}
+
+Response GeminiBackend::add_message_stream(Session& session,
+                                          Message::Type type,
+                                          const std::string& content,
+                                          StreamCallback callback,
+                                          const std::string& tool_name,
+                                          const std::string& tool_id,
+                                          int prompt_tokens,
+                                          int max_tokens) {
+    LOG_DEBUG("GeminiBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
+             ", max_tokens=" + std::to_string(max_tokens));
+
+    const int MAX_RETRIES = 3;
+    int retry = 0;
+
+    while (retry < MAX_RETRIES) {
+        // Build request with entire session + new message
+        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+
+        LOG_DEBUG("Sending streaming request to Gemini API");
+
+        // Get headers and endpoint
+        auto headers = get_api_headers();
+        std::string endpoint = get_streaming_endpoint();
+
+        // Enforce rate limits
+        enforce_rate_limits();
+
+        // Streaming state
+        Response accumulated_resp;
+        accumulated_resp.success = true;
+        accumulated_resp.code = Response::SUCCESS;
+        std::string accumulated_content;
+        SSEParser sse_parser;
+        bool stream_complete = false;
+
+        // Streaming callback to process SSE chunks
+        auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+            // Process SSE events from chunk
+            sse_parser.process_chunk(chunk,
+                [&](const std::string& event, const std::string& data, const std::string& id) -> bool {
+                    // Parse JSON data
+                    try {
+                        json delta_json = json::parse(data);
+
+                        // Gemini format: candidates[0].content.parts[0].text
+                        if (delta_json.contains("candidates") && !delta_json["candidates"].empty()) {
+                            const auto& candidate = delta_json["candidates"][0];
+
+                            // Get finish reason if present
+                            if (candidate.contains("finishReason") && !candidate["finishReason"].is_null()) {
+                                std::string reason = candidate["finishReason"].get<std::string>();
+                                if (reason == "STOP") {
+                                    accumulated_resp.finish_reason = "stop";
+                                } else if (reason == "MAX_TOKENS") {
+                                    accumulated_resp.finish_reason = "length";
+                                } else {
+                                    accumulated_resp.finish_reason = reason;
+                                }
+                            }
+
+                            // Get content
+                            if (candidate.contains("content") && candidate["content"].contains("parts")) {
+                                const auto& parts = candidate["content"]["parts"];
+                                if (!parts.empty() && parts[0].contains("text")) {
+                                    std::string delta_text = parts[0]["text"].get<std::string>();
+                                    accumulated_content += delta_text;
+                                    accumulated_resp.content = accumulated_content;
+
+                                    // Invoke user callback with delta
+                                    if (callback) {
+                                        if (!callback(delta_text, accumulated_content, accumulated_resp)) {
+                                            stream_complete = true;
+                                            return false;
+                                        }
+                                    }
+                                }
+
+                                // Handle function calls (tool calls)
+                                if (!parts.empty() && parts[0].contains("functionCall")) {
+                                    const auto& fc = parts[0]["functionCall"];
+                                    ToolParser::ToolCall tool_call;
+                                    tool_call.name = fc.value("name", "");
+                                    if (fc.contains("args")) {
+                                        tool_call.raw_json = fc["args"].dump();
+                                    }
+                                    tool_call.tool_call_id = "gemini_" + std::to_string(accumulated_resp.tool_calls.size());
+                                    accumulated_resp.tool_calls.push_back(tool_call);
+                                }
+                            }
+                        }
+
+                        // Extract usage metadata
+                        if (delta_json.contains("usageMetadata")) {
+                            const auto& usage = delta_json["usageMetadata"];
+                            accumulated_resp.prompt_tokens = usage.value("promptTokenCount", 0);
+                            accumulated_resp.completion_tokens = usage.value("candidatesTokenCount", 0);
+
+                            // Mark stream as complete when we get usage data (usually last chunk)
+                            stream_complete = true;
+                        }
+
+                    } catch (const std::exception& e) {
+                        LOG_WARN("Failed to parse Gemini SSE data: " + std::string(e.what()));
+                    }
+
+                    return true; // Continue processing
+                });
+
+            // Always return true to curl to avoid errors
+            return true;
+        };
+
+        // Make streaming HTTP call
+        HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                           stream_handler, nullptr);
+
+        // Check for HTTP errors
+        if (!http_response.is_success()) {
+            accumulated_resp.success = false;
+            accumulated_resp.code = Response::ERROR;
+            accumulated_resp.finish_reason = "error";
+            accumulated_resp.error = http_response.error_message;
+
+            // Check for context overflow
+            int tokens_to_evict = extract_tokens_to_evict(http_response);
+
+            if (tokens_to_evict > 0) {
+                auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
+                if (ranges.empty()) {
+                    accumulated_resp.code = Response::CONTEXT_FULL;
+                    accumulated_resp.error = "Context full, cannot evict enough messages";
+                    return accumulated_resp;
+                }
+
+                if (!session.evict_messages(ranges)) {
+                    accumulated_resp.error = "Failed to evict messages";
+                    return accumulated_resp;
+                }
+
+                retry++;
+                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + ")");
+                continue;
+            }
+
+            return accumulated_resp;
+        }
+
+        // Success - update session with messages
+        if (stream_complete && accumulated_resp.success) {
+            // Estimate token counts if not provided by API
+            int new_message_tokens = prompt_tokens > 0 ? prompt_tokens : estimate_message_tokens(content);
+
+            // Add user message to session
+            Message user_msg(type, content, new_message_tokens);
+            user_msg.tool_name = tool_name;
+            user_msg.tool_call_id = tool_id;
+            session.messages.push_back(user_msg);
+            session.total_tokens += new_message_tokens;
+
+            if (type == Message::USER) {
+                session.last_user_message_index = session.messages.size() - 1;
+                session.last_user_message_tokens = new_message_tokens;
+            }
+
+            // Add assistant response to session
+            int asst_tokens = accumulated_resp.completion_tokens > 0 ?
+                             accumulated_resp.completion_tokens :
+                             estimate_message_tokens(accumulated_resp.content);
+
+            Message asst_msg(Message::ASSISTANT, accumulated_resp.content, asst_tokens);
+            session.messages.push_back(asst_msg);
+            session.total_tokens += asst_tokens;
+            session.last_assistant_message_index = session.messages.size() - 1;
+            session.last_assistant_message_tokens = asst_tokens;
+            session.last_prompt_tokens = accumulated_resp.prompt_tokens;
+
+            accumulated_resp.was_streamed = true;
+
+            // Set finish reason based on tool calls
+            if (!accumulated_resp.tool_calls.empty()) {
+                accumulated_resp.finish_reason = "tool_calls";
+            } else if (accumulated_resp.finish_reason.empty()) {
+                accumulated_resp.finish_reason = "stop";
+            }
+        }
+
+        LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
+                  ", completion_tokens=" + std::to_string(accumulated_resp.completion_tokens) +
+                  ", finish_reason=" + accumulated_resp.finish_reason);
+
+        return accumulated_resp;
+    }
+
+    // Max retries reached
+    Response error_resp;
+    error_resp.success = false;
+    error_resp.code = Response::ERROR;
+    error_resp.error = "Max retries reached";
+    return error_resp;
 }

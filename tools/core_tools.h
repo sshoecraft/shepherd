@@ -154,5 +154,8 @@ private:
     int next_id_ = 1;
 };
 
+// Forward declaration
+class Tools;
+
 // Function to register all core tools
-void register_core_tools();
+void register_core_tools(Tools& tools);

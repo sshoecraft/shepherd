@@ -30,4 +30,5 @@ public:
 };
 
 // Function to register all HTTP tools
-void register_http_tools();
+class Tools;
+void register_http_tools(Tools& tools);

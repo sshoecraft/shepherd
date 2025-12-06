@@ -30,4 +30,5 @@ public:
 };
 
 // Function to register all JSON tools
-void register_json_tools();
+class Tools;
+void register_json_tools(Tools& tools);

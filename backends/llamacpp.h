@@ -28,6 +28,10 @@ public:
     Response add_message(Session& session, Message::Type type, const std::string& content,
                         const std::string& tool_name = "", const std::string& tool_id = "",
                         int prompt_tokens = 0, int max_tokens = 0) override;
+    Response add_message_stream(Session& session, Message::Type type, const std::string& content,
+                               StreamCallback callback,
+                               const std::string& tool_name = "", const std::string& tool_id = "",
+                               int prompt_tokens = 0, int max_tokens = 0) override;
     Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
 
     std::vector<std::string> get_tool_call_markers() const override;

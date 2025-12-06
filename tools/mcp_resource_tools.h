@@ -22,4 +22,5 @@ public:
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };
 
-void register_mcp_resource_tools();
+class Tools;
+void register_mcp_resource_tools(Tools& tools);

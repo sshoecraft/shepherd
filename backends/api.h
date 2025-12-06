@@ -71,25 +71,32 @@ public:
     void set_chars_per_token(float ratio) { chars_per_token = ratio; }
 
     // Override to provide default tool call filtering for API backends
-    // Include common formats used by various models
-    // Use partial markers (without closing >) to match tags with attributes
+    // Include common formats used by various models:
+    // - XML-style tags (Claude, etc.)
+    // - JSON format (when model outputs raw JSON tool calls)
     std::vector<std::string> get_tool_call_markers() const override {
         return {
+            // XML-style markers
             "<tool_call", "<function_call", "<tools",
             "<execute_command", "<.execute_command",
             "<read", "<.read", "<write", "<.write",
             "<bash", "<.bash", "<edit", "<.edit",
-            "<glob", "<.glob", "<grep", "<.grep"
+            "<glob", "<.glob", "<grep", "<.grep",
+            // JSON-style markers (for models that output raw JSON)
+            "{\"name\"", "{ \"name\""
         };
     }
 
     std::vector<std::string> get_tool_call_end_markers() const override {
         return {
+            // XML-style end markers
             "</tool_call>", "</function_call>", "</tools>",
             "</execute_command>", "</.execute_command>",
             "</read>", "</.read>", "</write>", "</.write>",
             "</bash>", "</.bash>", "</edit>", "</.edit>",
-            "</glob>", "</.glob>", "</grep>", "</.grep>"
+            "</glob>", "</.glob>", "</grep>", "</.grep>",
+            // JSON ends with closing brace (but need to match balanced braces)
+            "}\n", "} ", "}$"
         };
     }
 
@@ -352,16 +359,11 @@ protected:
     std::unique_ptr<HttpClient> http_client_;
 #endif
 
-    /// @brief Parsed tool information from ToolRegistry
+    /// @brief Parsed tool information from session.tools
     std::vector<ToolInfo> tools_data_;
 
-    /// @brief Flag to track if tools have been built from registry
+    /// @brief Flag to track if tools have been built
     bool tools_built_ = false;
-
-    /// @brief Build tools data from ToolRegistry
-    /// Populates tools_data_ with tool info from registry
-    /// Should be called once during first generate() call
-    void build_tools_from_registry();
 
     /// @brief Adaptive token estimation using EMA
     /// Starts at 2.5 chars/token (conservative for code-heavy content), refines based on API responses

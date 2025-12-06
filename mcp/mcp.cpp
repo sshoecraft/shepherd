@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "mcp/mcp.h"
 #include "tools/tool.h"
+#include "tools/tools.h"
 #include "logger.h"
 #include "nlohmann/json.hpp"
 
@@ -10,7 +11,7 @@ MCP& MCP::instance() {
     return manager;
 }
 
-bool MCP::initialize() {
+bool MCP::initialize(Tools& tools) {
     LOG_INFO("Initializing MCP Manager...");
 
     std::string mcp_json = config->mcp_config;
@@ -45,7 +46,7 @@ bool MCP::initialize() {
             server_configs.push_back(sc);
         }
 
-        return initialize(server_configs);
+        return initialize(tools, server_configs);
 
     } catch (const nlohmann::json::exception& e) {
         LOG_ERROR("Failed to parse MCP configuration: " + std::string(e.what()));
@@ -53,14 +54,14 @@ bool MCP::initialize() {
     }
 }
 
-bool MCP::initialize(const std::vector<ServerConfig>& server_configs) {
+bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_configs) {
     LOG_INFO("Initializing MCP Manager with " + std::to_string(server_configs.size()) + " servers");
 
     bool any_success = false;
 
     for (const auto& sconfig : server_configs) {
         LOG_INFO("Connecting to MCP server: " + sconfig.name);
-        if (connect_server(sconfig)) {
+        if (connect_server(tools, sconfig)) {
             any_success = true;
             LOG_INFO("Successfully connected to MCP server: " + sconfig.name);
         } else {
@@ -79,7 +80,7 @@ bool MCP::initialize(const std::vector<ServerConfig>& server_configs) {
     return any_success;
 }
 
-bool MCP::connect_server(const ServerConfig& sconfig) {
+bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
     try {
         // Create server config
         MCPServer::Config server_config;
@@ -102,9 +103,7 @@ bool MCP::connect_server(const ServerConfig& sconfig) {
         auto mcp_tools = client->list_tools();
         LOG_DEBUG("Discovered " + std::to_string(mcp_tools.size()) + " tools from " + server_config.name);
 
-        // Register tools with ToolRegistry
-        auto& registry = ToolRegistry::instance();
-
+        // Register tools with Tools instance
         for (const auto& mcp_tool : mcp_tools) {
             // Skip deprecated tools
             if (mcp_tool.description.find("DEPRECATED") != std::string::npos) {
@@ -112,11 +111,11 @@ bool MCP::connect_server(const ServerConfig& sconfig) {
                 continue;
             }
 
-            // Create adapter and register
+            // Create adapter and register as MCP tool
             auto adapter = std::make_unique<MCPToolAdapter>(client, mcp_tool);
             std::string tool_name = adapter->unsanitized_name();
 
-            registry.register_tool(std::move(adapter));
+            tools.register_tool(std::move(adapter), "mcp");
             LOG_DEBUG("Registered MCP tool: " + tool_name + " (sanitized)");
             total_tools_++;
         }

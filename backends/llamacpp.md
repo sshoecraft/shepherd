@@ -167,6 +167,41 @@ if (g_generation_cancelled) {
 
 This enables responsive Ctrl+C handling.
 
+## Streaming Support
+
+### add_message_stream()
+
+The LlamaCpp backend implements `add_message_stream()` to support token-by-token streaming through the CLI server:
+
+```cpp
+Response add_message_stream(Session& session, Message::Type type,
+                           const std::string& content,
+                           StreamCallback callback,
+                           const std::string& tool_name = "",
+                           const std::string& tool_id = "",
+                           int prompt_tokens = 0,
+                           int max_tokens = 0) override;
+```
+
+The implementation:
+1. Adds the message to the session and decodes to KV cache
+2. Calls `generate(max_tokens, callback)` passing the streaming callback
+3. The callback is invoked for each generated token
+4. Returns the complete Response after generation finishes
+
+### generate() with Callback
+
+The internal `generate()` method accepts an optional callback:
+
+```cpp
+std::string generate(int max_tokens = 0, StreamCallback callback = nullptr);
+```
+
+When a callback is provided:
+- Each token is decoded and passed to the callback as a delta
+- The callback can return `false` to stop generation early
+- Streaming output to tio is suppressed when callback is active
+
 ## Shutdown
 
 The `shutdown()` method properly cleans up resources:

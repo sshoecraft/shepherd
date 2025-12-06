@@ -46,6 +46,7 @@ set(SHEPHERD_SOURCES
     tools/mcp_resource_tools.cpp
     tools/memory_tools.cpp
     tools/tool.cpp
+    tools/tools.cpp
     tools/tool_parser.cpp
     tools/utf8_sanitizer.cpp
     tools/web_search.cpp
@@ -58,9 +59,7 @@ set(SHEPHERD_SOURCES
     mcp/mcp_tool.cpp
 
     # API tools sources
-    api_tools/api_tool_config.cpp
-    api_tools/api_tool_adapter.cpp
-    api_tools/api_tools.cpp
+    tools/api_tools.cpp
 
     # Server sources
     server/server.cpp
@@ -78,6 +77,9 @@ if(ENABLE_API_BACKENDS)
         backends/gemini.cpp
     )
 endif()
+
+# CLI client backend (always available - simple HTTP)
+list(APPEND SHEPHERD_SOURCES backends/cli_client.cpp)
 
 if(ENABLE_TENSORRT)
     list(APPEND SHEPHERD_SOURCES backends/tensorrt.cpp)

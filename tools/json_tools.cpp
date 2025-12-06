@@ -1,4 +1,5 @@
 #include "json_tools.h"
+#include "tools.h"
 #include "../logger.h"
 #include <iostream>
 #include <sstream>
@@ -360,12 +361,10 @@ std::map<std::string, std::any> QueryJSONTool::execute(const std::map<std::strin
     return result;
 }
 
-void register_json_tools() {
-    auto& registry = ToolRegistry::instance();
-
-    registry.register_tool(std::make_unique<ParseJSONTool>());
-    registry.register_tool(std::make_unique<SerializeJSONTool>());
-    registry.register_tool(std::make_unique<QueryJSONTool>());
+void register_json_tools(Tools& tools) {
+    tools.register_tool(std::make_unique<ParseJSONTool>());
+    tools.register_tool(std::make_unique<SerializeJSONTool>());
+    tools.register_tool(std::make_unique<QueryJSONTool>());
 
     LOG_DEBUG("Registered JSON tools: parse_json, serialize_json, query_json");
 }

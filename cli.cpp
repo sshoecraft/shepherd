@@ -5,10 +5,18 @@
 #include "tools/tool.h"
 #include "tools/tool_parser.h"
 #include "tools/utf8_sanitizer.h"
+#include "tools/filesystem_tools.h"
+#include "tools/command_tools.h"
+#include "tools/json_tools.h"
+#include "tools/http_tools.h"
+#include "tools/memory_tools.h"
+#include "tools/mcp_resource_tools.h"
+#include "tools/core_tools.h"
 #include "message.h"
 #include "config.h"
 #include "provider.h"
 #include "scheduler.h"
+#include "mcp/mcp.h"
 #include "backends/api.h"  // For ApiBackend::set_chars_per_token()
 #include "backends/factory.h"
 
@@ -26,6 +34,9 @@
 extern int g_debug_level;
 extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
+
+// Forward declaration
+static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& session);
 
 // Helper: Extract tool call from Response (handles both structured and text-based)
 static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
@@ -46,8 +57,11 @@ CLI::~CLI() {
 }
 
 int CLI::run(std::unique_ptr<Backend>& backend, Session& session) {
-	// For now, just call the existing run_cli function
-	return run_cli(backend, session);
+	// Populate session.tools from our tools instance
+	tools.populate_session_tools(session);
+
+	// Run the main CLI loop using this instance
+	return run_cli_impl(*this, backend, session);
 }
 
 void CLI::show_tool_call(const std::string& name, const std::string& params) {
@@ -120,6 +134,38 @@ std::string CLI::receive_message(const std::string& prompt) {
 	return tio.read(prompt.c_str());
 }
 
+void CLI::init(bool no_mcp, bool no_tools) {
+	if (no_tools) {
+		LOG_INFO("Tools disabled via --notools flag");
+		return;
+	}
+
+	LOG_INFO("Initializing tools system...");
+
+	// Register all native tools
+	register_filesystem_tools(tools);
+	register_command_tools(tools);
+	register_json_tools(tools);
+	register_http_tools(tools);
+	register_memory_tools(tools);
+	register_mcp_resource_tools(tools);
+	register_core_tools(tools);
+
+	// Initialize MCP servers (registers additional tools)
+	if (!no_mcp) {
+		auto& mcp = MCP::instance();
+		mcp.initialize(tools);
+		LOG_INFO("MCP initialized with " + std::to_string(mcp.get_tool_count()) + " tools");
+	} else {
+		LOG_INFO("MCP system disabled");
+	}
+
+	// Build the combined tool list
+	tools.build_all_tools();
+
+	LOG_INFO("Tools initialized: " + std::to_string(tools.all_tools.size()) + " total");
+}
+
 // Handle all slash commands
 // Returns true if command was handled, false otherwise
 bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backend>& backend, Session& session) {
@@ -162,63 +208,7 @@ bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backen
 
 	// /tools command
 	if (cmd == "/tools") {
-		auto& registry = ToolRegistry::instance();
-
-		if (args.empty() || args[0] == "list") {
-			auto tool_descriptions = registry.list_tools_with_descriptions();
-
-			std::cout << "\n=== Available Tools (" << tool_descriptions.size() << ") ===\n\n";
-
-			size_t enabled_count = 0;
-			size_t disabled_count = 0;
-
-			for (const auto& pair : tool_descriptions) {
-				bool is_enabled = registry.enabled(pair.first);
-				if (is_enabled) {
-					enabled_count++;
-				} else {
-					disabled_count++;
-				}
-
-				std::string status = is_enabled ? "[enabled]" : "[DISABLED]";
-				std::cout << "  " << status << " " << pair.first << "\n";
-				std::cout << "    " << pair.second << "\n\n";
-			}
-
-			std::cout << "Total: " << tool_descriptions.size() << " tools";
-			std::cout << " (" << enabled_count << " enabled, " << disabled_count << " disabled)\n";
-			return true;
-		}
-
-		if (args[0] == "enable" && args.size() >= 2) {
-			std::string tool_name = args[1];
-			Tool* tool = registry.get_tool(tool_name);
-
-			if (!tool) {
-				std::cout << "Tool not found: " << tool_name << "\n";
-				return true;
-			}
-
-			registry.enable_tool(tool_name);
-			std::cout << "Tool '" << tool_name << "' enabled\n";
-			return true;
-		}
-
-		if (args[0] == "disable" && args.size() >= 2) {
-			std::string tool_name = args[1];
-			Tool* tool = registry.get_tool(tool_name);
-
-			if (!tool) {
-				std::cout << "Tool not found: " << tool_name << "\n";
-				return true;
-			}
-
-			registry.disable_tool(tool_name);
-			std::cout << "Tool '" << tool_name << "' disabled\n";
-			return true;
-		}
-
-		std::cout << "Usage: /tools [list | enable <tool_name> | disable <tool_name>]\n";
+		tools.handle_tools_args(args);
 		return true;
 	}
 
@@ -226,10 +216,8 @@ bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backen
 	return false;
 }
 
-// Main CLI loop - handles all user interaction
-int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
-	CLI cli;
-
+// Main CLI loop implementation - handles all user interaction
+static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& session) {
 	LOG_DEBUG("Starting CLI mode (interactive: " + std::string(tio.interactive_mode ? "yes" : "no") + ")");
 
 	// Configure TerminalIO output filtering for this session
@@ -313,7 +301,7 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 		// Check for slash commands
 		if (!user_input.empty() && user_input[0] == '/') {
-			if (CLI::handle_slash_commands(user_input, backend, session)) {
+			if (cli.handle_slash_commands(user_input, backend, session)) {
 				continue;  // Command handled, get next input
 			}
 			// If not a recognized command, treat as regular input
@@ -373,30 +361,18 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 
 			LOG_DEBUG("Got response, length: " + std::to_string(resp.content.length()));
 
-#if 0
-			// For API backends, always process through ModelOutput (they don't stream)
-			// For local backends with tools, also process through ModelOutput (streaming was suppressed)
-			// For local backends without tools, ModelOutput was already called during streaming
-			auto& registry = ToolRegistry::instance();
-			auto available_tools = registry.list_tools();
-			bool local_with_tools = backend->is_local && !available_tools.empty();
-
-			if (!backend->is_local || local_with_tools) {
-				tio.write(resp.content.c_str(), resp.content.length());
-			}
-#else
 			// API backends now stream - only output if it wasn't already streamed
 			// Local backends with tools suppress streaming and output here instead
-			auto& registry = ToolRegistry::instance();
-			auto available_tools = registry.list_tools();
-			bool local_with_tools = backend->is_local && !available_tools.empty();
+			// But don't output if the response is a tool call - we'll show the tool indicator instead
+			bool local_with_tools = backend->is_local && !cli.tools.all_tools.empty();
+			bool is_tool_call = !resp.tool_calls.empty() ||
+				ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers()).has_value();
 
-			if (!resp.was_streamed && (!backend->is_local || local_with_tools)) {
+			if (!resp.was_streamed && (!backend->is_local || local_with_tools) && !is_tool_call) {
 				tio.begin_response();
 				tio.write(resp.content.c_str(), resp.content.length());
 				tio.end_response();
 			}
-#endif
 
 			// Tool execution loop - orchestrated by CLI
 			int tool_loop_iteration = 0;
@@ -523,9 +499,9 @@ int run_cli(std::unique_ptr<Backend>& backend, Session& session) {
 					// Just show the tool call indicator for user feedback
 					cli.show_tool_call(tool_name, params_str);
 
-					// Execute tool using utility function
+					// Execute tool using CLI's Tools instance
 					LOG_DEBUG("Executing tool: " + tool_name);
-					ToolResult tool_result = execute_tool(tool_name, tool_call.parameters);
+					ToolResult tool_result = cli.tools.execute(tool_name, tool_call.parameters);
 
 					// Determine what to show and send
 					std::string result_content;

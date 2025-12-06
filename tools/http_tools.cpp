@@ -1,6 +1,7 @@
 
 #include "shepherd.h"
 #include "http_tools.h"
+#include "tools.h"
 #include <map>
 
 // Simple HTTP client using curl command (for cross-platform compatibility)
@@ -251,12 +252,10 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
     return result;
 }
 
-void register_http_tools() {
-    auto& registry = ToolRegistry::instance();
-
-    registry.register_tool(std::make_unique<HTTPRequestTool>());
-    registry.register_tool(std::make_unique<HTTPGetTool>());
-    registry.register_tool(std::make_unique<HTTPPostTool>());
+void register_http_tools(Tools& tools) {
+    tools.register_tool(std::make_unique<HTTPRequestTool>());
+    tools.register_tool(std::make_unique<HTTPGetTool>());
+    tools.register_tool(std::make_unique<HTTPPostTool>());
 
     LOG_DEBUG("Registered HTTP tools: http_request, http_get, http_post");
 }

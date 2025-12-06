@@ -209,6 +209,42 @@ last_decoded_len = full_decoded.length();
 
 This ensures the tokenizer has full context to correctly place spaces.
 
+## Streaming Support
+
+### add_message_stream()
+
+The TensorRT backend implements `add_message_stream()` to support token-by-token streaming through the CLI server:
+
+```cpp
+Response add_message_stream(Session& session, Message::Type type,
+                           const std::string& content,
+                           StreamCallback callback,
+                           const std::string& tool_name = "",
+                           const std::string& tool_id = "",
+                           int prompt_tokens = 0,
+                           int max_tokens = 0) override;
+```
+
+The implementation:
+1. Tokenizes and accumulates the message
+2. Calls `generate(session, max_tokens, callback)` passing the streaming callback
+3. The callback is invoked for each generated token
+4. Returns the complete Response after generation finishes
+
+### generate() with Callback
+
+The internal `generate()` method accepts an optional callback:
+
+```cpp
+std::string generate(const Session& session, int max_tokens = 0,
+                    StreamCallback callback = nullptr);
+```
+
+When a callback is provided:
+- Each token batch is decoded and passed to the callback
+- The callback can return `false` to stop generation early
+- Uses cumulative decoding to preserve whitespace (see Streaming Token Decoding section)
+
 ## Model Family Detection
 
 The backend detects model family from `config.json` in the engine directory:

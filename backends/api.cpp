@@ -377,9 +377,16 @@ Response ApiBackend::add_message_stream(Session& session,
                                        const std::string& tool_id,
                                        int prompt_tokens,
                                        int max_tokens) {
-    // Base implementation: just call non-streaming version
-    // Derived classes override this for true streaming
+    // Base implementation: temporarily disable streaming and call add_message
+    // This prevents infinite recursion when derived class doesn't override this method
+    // The streaming_enabled flag is checked at the start of add_message
+
+    bool was_streaming_enabled = streaming_enabled;
+    streaming_enabled = false;  // Prevent recursion
+
     Response resp = add_message(session, type, content, tool_name, tool_id, prompt_tokens, max_tokens);
+
+    streaming_enabled = was_streaming_enabled;  // Restore
 
     // Invoke callback once with full response to simulate streaming
     if (resp.success && callback) {

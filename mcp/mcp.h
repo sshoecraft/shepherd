@@ -12,8 +12,11 @@
 #include <memory>
 #include <string>
 
+// Forward declaration
+class Tools;
+
 /// @brief Manages multiple MCP servers and their tools
-/// Loads MCP servers from config and registers their tools with Shepherd's ToolRegistry
+/// Loads MCP servers from config and registers their tools with Tools instance
 class MCP {
 public:
     /// @brief Server configuration structure
@@ -27,14 +30,15 @@ public:
     static MCP& instance();
 
     /// @brief Initialize MCP servers from config
-    /// @param config Shepherd configuration
+    /// @param tools Tools instance to register MCP tools with
     /// @return True if at least one server initialized successfully
-    bool initialize();
+    bool initialize(Tools& tools);
 
     /// @brief Initialize from explicit server configs (for testing)
+    /// @param tools Tools instance to register MCP tools with
     /// @param server_configs List of server configurations
     /// @return True if at least one server initialized successfully
-    bool initialize(const std::vector<ServerConfig>& server_configs);
+    bool initialize(Tools& tools, const std::vector<ServerConfig>& server_configs);
 
     /// @brief Shutdown all MCP servers
     void shutdown();
@@ -72,9 +76,10 @@ private:
     MCP& operator=(const MCP&) = delete;
 
     /// @brief Connect to a single MCP server
+    /// @param tools Tools instance to register MCP tools with
     /// @param config Server configuration
     /// @return True if successful
-    bool connect_server(const ServerConfig& config);
+    bool connect_server(Tools& tools, const ServerConfig& config);
 
     std::vector<std::shared_ptr<MCPClient>> clients_;
     std::map<std::string, std::shared_ptr<MCPClient>> servers_by_name_;

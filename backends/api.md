@@ -76,6 +76,49 @@ Concrete backends must implement:
 - `get_api_endpoint()` - Return full endpoint URL
 - `query_model_context_size()` - Query context size from API
 
+## Streaming Support
+
+### add_message_stream()
+
+API backends can override `add_message_stream()` to provide token-by-token streaming:
+
+```cpp
+Response add_message_stream(Session& session, Message::Type type,
+                           const std::string& content,
+                           StreamCallback callback,
+                           const std::string& tool_name = "",
+                           const std::string& tool_id = "",
+                           int prompt_tokens = 0,
+                           int max_tokens = 0) override;
+```
+
+The callback is invoked for each token/chunk received:
+
+```cpp
+using StreamCallback = std::function<bool(const std::string& delta,
+                                          const std::string& accumulated,
+                                          const Response& partial)>;
+```
+
+Return `false` from the callback to stop generation early.
+
+### Implementation by Backend
+
+| Backend | Streaming Format | Notes |
+|---------|-----------------|-------|
+| Anthropic | SSE | Uses content_block_delta events |
+| OpenAI | SSE | Uses choices[0].delta.content |
+| Gemini | SSE | Uses streamGenerateContent?alt=sse endpoint |
+| Ollama | NDJSON | Newline-delimited JSON with message.content |
+
+### Default Behavior
+
+The base `Backend::add_message_stream()` falls back to:
+1. Call `add_message()` (non-streaming)
+2. Invoke callback once with the complete response
+
+This ensures compatibility with backends that don't implement native streaming.
+
 ## Configuration Loading
 
 Backend-specific config is loaded via `parse_backend_config()`:
@@ -89,3 +132,4 @@ Backend-specific config is loaded via `parse_backend_config()`:
 - v2.5.0: Added adaptive token counting with EMA
 - v2.5.1: Improved error parsing for multiple API formats
 - v2.5.2: Added OAuth 2.0 support and SSL configuration
+- v2.6.1: Added add_message_stream() for Gemini and Ollama backends

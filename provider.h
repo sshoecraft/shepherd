@@ -40,6 +40,9 @@ public:
 
     virtual ~ProviderConfig() = default;
 
+    // Check if this is an API provider (vs local GPU)
+    virtual bool is_api() const { return false; }
+
     // Pure virtual - each subclass implements its own serialization
     virtual nlohmann::json to_json() const = 0;
 
@@ -83,9 +86,11 @@ public:
     static TensorRTProviderConfig from_json(const nlohmann::json& j);
 };
 
-// API provider configuration (OpenAI, Anthropic, Gemini, Grok)
+// API provider configuration (OpenAI, Anthropic, Gemini, Grok, Ollama)
 class ApiProviderConfig : public ProviderConfig {
 public:
+    bool is_api() const override { return true; }
+
     std::string api_key;
     std::string base_url;           // Empty = use default
     float temperature = 0.7f;
@@ -114,15 +119,15 @@ public:
 };
 
 // Ollama provider configuration
-class OllamaProviderConfig : public ProviderConfig {
+class OllamaProviderConfig : public ApiProviderConfig {
 public:
-    std::string base_url = "http://localhost:11434";
-    float temperature = 0.7f;
-    float top_p = 1.0f;
-    int top_k = 40;
     float repeat_penalty = 1.1f;
     int num_ctx = 0;                // Context window (0=auto)
     int num_predict = -1;           // Max tokens (-1=unlimited)
+
+    OllamaProviderConfig() {
+        base_url = "http://localhost:11434";
+    }
 
     nlohmann::json to_json() const override;
     static OllamaProviderConfig from_json(const nlohmann::json& j);

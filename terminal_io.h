@@ -39,6 +39,7 @@ public:
     std::string buffered_tool_call;     // Tool call content if detected
     std::string buffered_thinking;      // Thinking content (if show_thinking=true)
     bool last_char_was_newline;         // Track if last output char was newline
+    int json_brace_depth;               // Track brace depth for JSON tool calls
 
     // Constructor/Destructor
     TerminalIO();

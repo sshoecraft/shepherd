@@ -1,5 +1,6 @@
 #if 1
 #include "memory_tools.h"
+#include "tools.h"
 #include "../rag.h"
 #include "../logger.h"
 #include <sstream>
@@ -353,15 +354,14 @@ std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::str
     return result;
 }
 
-void register_memory_tools() {
-    auto& registry = ToolRegistry::instance();
+void register_memory_tools(Tools& tools) {
     // Register memory tools FIRST so they appear at top of tool list
-    registry.register_tool(std::make_unique<SearchMemoryTool>());
-    registry.register_tool(std::make_unique<StoreMemoryTool>());
-    registry.register_tool(std::make_unique<ClearMemoryTool>());
-    registry.register_tool(std::make_unique<SetFactTool>());
-    registry.register_tool(std::make_unique<GetFactTool>());
-    registry.register_tool(std::make_unique<ClearFactTool>());
+    tools.register_tool(std::make_unique<SearchMemoryTool>());
+    tools.register_tool(std::make_unique<StoreMemoryTool>());
+    tools.register_tool(std::make_unique<ClearMemoryTool>());
+    tools.register_tool(std::make_unique<SetFactTool>());
+    tools.register_tool(std::make_unique<GetFactTool>());
+    tools.register_tool(std::make_unique<ClearFactTool>());
     LOG_DEBUG("Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact, clear_fact");
 }
 #endif

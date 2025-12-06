@@ -292,8 +292,16 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
     }
 
     // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
-    request["temperature"] = temperature;
-    request["top_p"] = top_p;
+    // Note: Anthropic doesn't allow both temperature and top_p to be set
+    // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
+    bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
+    bool top_p_is_default = (top_p >= 0.99f);
+
+    if (temp_is_default && !top_p_is_default) {
+        request["top_p"] = top_p;
+    } else {
+        request["temperature"] = temperature;
+    }
     if (top_k > 0) {
         request["top_k"] = top_k;
     }
@@ -412,8 +420,16 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
     }
 
     // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
-    request["temperature"] = temperature;
-    request["top_p"] = top_p;
+    // Note: Anthropic doesn't allow both temperature and top_p to be set
+    // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
+    bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
+    bool top_p_is_default = (top_p >= 0.99f);
+
+    if (temp_is_default && !top_p_is_default) {
+        request["top_p"] = top_p;
+    } else {
+        request["temperature"] = temperature;
+    }
     if (top_k > 0) {
         request["top_k"] = top_k;
     }
@@ -533,10 +549,21 @@ Response AnthropicBackend::add_message_stream(Session& session,
         bool stream_complete = false;
         bool message_started = false;
 
+        // Tool use streaming state
+        struct ToolUseBlock {
+            std::string id;
+            std::string name;
+            std::string partial_json;
+        };
+        std::optional<ToolUseBlock> current_tool_block;
+        nlohmann::json content_blocks = nlohmann::json::array();  // Accumulate all content blocks
+
         // Streaming callback to process SSE chunks
         auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
             // Process SSE events from chunk
-            return sse_parser.process_chunk(chunk,
+            // We ignore the return value - always return true to curl to avoid "Failed writing" error
+            // We track completion via stream_complete flag instead
+            sse_parser.process_chunk(chunk,
                 [&](const std::string& event_type, const std::string& data, const std::string& id) -> bool {
                     // Parse JSON data
                     try {
@@ -560,8 +587,13 @@ Response AnthropicBackend::add_message_stream(Session& session,
                                 std::string block_type = block.value("type", "");
 
                                 if (block_type == "tool_use") {
-                                    // Tool use block starting
-                                    LOG_DEBUG("Tool use block starting in stream");
+                                    // Tool use block starting - capture name and id
+                                    current_tool_block = ToolUseBlock{
+                                        block.value("id", ""),
+                                        block.value("name", ""),
+                                        ""
+                                    };
+                                    LOG_DEBUG("Tool use block starting: " + current_tool_block->name);
                                 }
                             }
                         }
@@ -585,13 +617,64 @@ Response AnthropicBackend::add_message_stream(Session& session,
                                 }
                                 else if (delta.contains("partial_json")) {
                                     // Tool use parameters being streamed
-                                    LOG_DEBUG("Tool parameters streaming not fully implemented yet");
+                                    if (current_tool_block) {
+                                        current_tool_block->partial_json += delta["partial_json"].get<std::string>();
+                                    }
                                 }
                             }
                         }
                         else if (event_type == "content_block_stop") {
                             // Content block finished
-                            LOG_DEBUG("Content block finished");
+                            if (current_tool_block) {
+                                // Parse accumulated JSON and create tool call
+                                try {
+                                    nlohmann::json input = current_tool_block->partial_json.empty() ?
+                                        nlohmann::json::object() :
+                                        nlohmann::json::parse(current_tool_block->partial_json);
+
+                                    // Add to content blocks for response.content
+                                    content_blocks.push_back({
+                                        {"type", "tool_use"},
+                                        {"id", current_tool_block->id},
+                                        {"name", current_tool_block->name},
+                                        {"input", input}
+                                    });
+
+                                    // Create tool call
+                                    ToolParser::ToolCall tool_call;
+                                    tool_call.name = current_tool_block->name;
+                                    tool_call.tool_call_id = current_tool_block->id;
+                                    tool_call.raw_json = input.dump();
+
+                                    // Parse parameters like non-streaming code does
+                                    for (auto it = input.begin(); it != input.end(); ++it) {
+                                        if (it.value().is_string()) {
+                                            tool_call.parameters[it.key()] = it.value().get<std::string>();
+                                        } else if (it.value().is_number_integer()) {
+                                            tool_call.parameters[it.key()] = it.value().get<int>();
+                                        } else if (it.value().is_number_float()) {
+                                            tool_call.parameters[it.key()] = it.value().get<double>();
+                                        } else if (it.value().is_boolean()) {
+                                            tool_call.parameters[it.key()] = it.value().get<bool>();
+                                        } else {
+                                            tool_call.parameters[it.key()] = it.value().dump();
+                                        }
+                                    }
+
+                                    accumulated_resp.tool_calls.push_back(tool_call);
+
+                                    LOG_DEBUG("Tool use block complete: " + current_tool_block->name);
+                                } catch (const std::exception& e) {
+                                    LOG_WARN("Failed to parse tool use JSON: " + std::string(e.what()));
+                                }
+                                current_tool_block.reset();
+                            } else if (!accumulated_content.empty()) {
+                                // Text block finished - add to content blocks
+                                content_blocks.push_back({
+                                    {"type", "text"},
+                                    {"text", accumulated_content}
+                                });
+                            }
                         }
                         else if (event_type == "message_delta") {
                             // Message metadata updates
@@ -609,6 +692,10 @@ Response AnthropicBackend::add_message_stream(Session& session,
                         else if (event_type == "message_stop") {
                             // Message complete
                             stream_complete = true;
+                            // If we have tool calls, set content as JSON array
+                            if (!accumulated_resp.tool_calls.empty()) {
+                                accumulated_resp.content = content_blocks.dump();
+                            }
                             return false; // Stop processing
                         }
                         else if (event_type == "error") {

@@ -18,6 +18,7 @@ TerminalIO::TerminalIO()
     , colors_enabled(false)
     , show_thinking(false)
     , last_char_was_newline(true)  // Start as if on new line
+    , json_brace_depth(0)
     , replxx(nullptr)
     , term_raw_mode(false)
     , filter_state(NORMAL)
@@ -163,8 +164,12 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
         switch (filter_state) {
             case NORMAL:
                 if (c == '<' && !in_code_block) {
-                    // Detect potential tag start (but not inside code blocks)
+                    // Detect potential XML tag start (but not inside code blocks)
                     tag_buffer = "<";
+                    filter_state = DETECTING_TAG;
+                } else if (c == '{' && !in_code_block) {
+                    // Detect potential JSON tool call start
+                    tag_buffer = "{";
                     filter_state = DETECTING_TAG;
                 } else {
                     if (!suppress_output) {
@@ -198,7 +203,8 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
                             // We have marker + one more char
                             char boundary = tag_buffer.back();
                             if (boundary == '>' || boundary == ' ' || boundary == '/' ||
-                                boundary == '\n' || boundary == '\t' || boundary == '\r') {
+                                boundary == '\n' || boundary == '\t' || boundary == '\r' ||
+                                boundary == ':') {  // : for JSON like {"name":
                                 matched_marker = marker;
                                 is_tool_call = true;
                                 break;
@@ -215,6 +221,10 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
                     filter_state = IN_TOOL_CALL;
                     suppress_output = true;  // Always suppress tool calls
                     buffered_tool_call = tag_buffer;  // Include opening tag
+                    // For JSON tool calls, initialize brace depth (we've already seen the opening {)
+                    if (matched_marker.length() > 0 && matched_marker[0] == '{') {
+                        json_brace_depth = 1;
+                    }
                     tag_buffer.clear();
                     break;
                 }
@@ -254,6 +264,20 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
                     filter_state = CHECKING_CLOSE;
                 } else {
                     buffered_tool_call += c;
+                    // For JSON tool calls, check if we've reached the end
+                    // JSON tool calls end with } followed by newline or end of content
+                    if (current_tag.length() > 0 && current_tag[0] == '{') {
+                        // Track brace depth for JSON
+                        if (c == '{') json_brace_depth++;
+                        if (c == '}') json_brace_depth--;
+
+                        // When we reach balanced braces, the JSON is complete
+                        if (json_brace_depth == 0) {
+                            in_tool_call = false;
+                            suppress_output = false;
+                            filter_state = NORMAL;
+                        }
+                    }
                 }
                 break;
 

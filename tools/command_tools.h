@@ -30,4 +30,5 @@ public:
 };
 
 // Function to register all command tools
-void register_command_tools();
+class Tools;
+void register_command_tools(Tools& tools);

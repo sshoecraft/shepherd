@@ -32,6 +32,13 @@ public:
     int extract_tokens_to_evict(const HttpResponse& response) override;
     std::map<std::string, std::string> get_api_headers() override;
     std::string get_api_endpoint() override;
+    std::string get_streaming_endpoint();
+
+    // Override to provide streaming support
+    Response add_message_stream(Session& session, Message::Type type, const std::string& content,
+                               StreamCallback callback,
+                               const std::string& tool_name = "", const std::string& tool_id = "",
+                               int prompt_tokens = 0, int max_tokens = 0) override;
 
     // Override initialize to add Gemini-specific setup
     void initialize(Session& session) override;

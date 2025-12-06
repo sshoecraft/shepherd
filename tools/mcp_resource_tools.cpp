@@ -1,5 +1,6 @@
 
 #include "mcp_resource_tools.h"
+#include "tools.h"
 #include "mcp/mcp.h"
 #include "logger.h"
 #include <sstream>
@@ -135,8 +136,7 @@ std::map<std::string, std::any> ReadMcpResourcesTool::execute(const std::map<std
     return result;
 }
 
-void register_mcp_resource_tools() {
-    auto& registry = ToolRegistry::instance();
-    registry.register_tool(std::make_unique<ListMcpResourcesTool>());
-    registry.register_tool(std::make_unique<ReadMcpResourcesTool>());
+void register_mcp_resource_tools(Tools& tools) {
+    tools.register_tool(std::make_unique<ListMcpResourcesTool>());
+    tools.register_tool(std::make_unique<ReadMcpResourcesTool>());
 }

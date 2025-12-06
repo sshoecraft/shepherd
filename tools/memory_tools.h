@@ -69,4 +69,5 @@ public:
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };
 
-void register_memory_tools();
+class Tools;
+void register_memory_tools(Tools& tools);

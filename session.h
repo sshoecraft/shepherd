@@ -46,7 +46,7 @@ public:
 
     /// Tool definitions available in this session
     /// This is the single source of truth for tools in a session
-    /// - CLI mode: populated from ToolRegistry at startup
+    /// - CLI mode: populated from CLI's Tools instance at startup
     /// - Server mode: populated from client request
     struct Tool {
         std::string name;           // Tool name (sanitized)

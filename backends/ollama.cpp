@@ -546,6 +546,217 @@ std::string OllamaBackend::get_api_endpoint() {
     return api_endpoint;
 }
 
+Response OllamaBackend::add_message_stream(Session& session,
+                                          Message::Type type,
+                                          const std::string& content,
+                                          StreamCallback callback,
+                                          const std::string& tool_name,
+                                          const std::string& tool_id,
+                                          int prompt_tokens,
+                                          int max_tokens) {
+    LOG_DEBUG("OllamaBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
+             ", max_tokens=" + std::to_string(max_tokens));
+
+    const int MAX_RETRIES = 3;
+    int retry = 0;
+
+    while (retry < MAX_RETRIES) {
+        // Build request with entire session + new message
+        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+
+        // Ensure streaming is enabled (default for Ollama)
+        request["stream"] = true;
+
+        LOG_DEBUG("Sending streaming request to Ollama API");
+
+        // Get headers and endpoint
+        auto headers = get_api_headers();
+        std::string endpoint = get_api_endpoint();
+
+        // Enforce rate limits
+        enforce_rate_limits();
+
+        // Streaming state
+        Response accumulated_resp;
+        accumulated_resp.success = true;
+        accumulated_resp.code = Response::SUCCESS;
+        std::string accumulated_content;
+        bool stream_complete = false;
+        std::string line_buffer;
+
+        // Streaming callback to process NDJSON chunks
+        auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+            // Ollama uses NDJSON - newline-delimited JSON
+            // Accumulate data and process complete lines
+            line_buffer += chunk;
+
+            size_t pos;
+            while ((pos = line_buffer.find('\n')) != std::string::npos) {
+                std::string line = line_buffer.substr(0, pos);
+                line_buffer = line_buffer.substr(pos + 1);
+
+                if (line.empty()) continue;
+
+                try {
+                    json delta_json = json::parse(line);
+
+                    // Ollama format: message.content contains the delta
+                    if (delta_json.contains("message") && delta_json["message"].contains("content")) {
+                        std::string delta_text = delta_json["message"]["content"].get<std::string>();
+                        if (!delta_text.empty()) {
+                            accumulated_content += delta_text;
+                            accumulated_resp.content = accumulated_content;
+
+                            // Invoke user callback with delta
+                            if (callback) {
+                                if (!callback(delta_text, accumulated_content, accumulated_resp)) {
+                                    stream_complete = true;
+                                    return true;
+                                }
+                            }
+                        }
+
+                        // Handle tool calls
+                        if (delta_json["message"].contains("tool_calls") &&
+                            delta_json["message"]["tool_calls"].is_array()) {
+                            for (const auto& tc : delta_json["message"]["tool_calls"]) {
+                                ToolParser::ToolCall tool_call;
+                                if (tc.contains("function")) {
+                                    tool_call.name = tc["function"].value("name", "");
+                                    if (tc["function"].contains("arguments")) {
+                                        tool_call.raw_json = tc["function"]["arguments"].dump();
+                                    }
+                                }
+                                tool_call.tool_call_id = "ollama_" + std::to_string(accumulated_resp.tool_calls.size());
+                                accumulated_resp.tool_calls.push_back(tool_call);
+                            }
+                        }
+                    }
+
+                    // Check for completion
+                    if (delta_json.contains("done") && delta_json["done"].get<bool>()) {
+                        stream_complete = true;
+
+                        // Get finish reason
+                        if (delta_json.contains("done_reason")) {
+                            std::string reason = delta_json["done_reason"].get<std::string>();
+                            if (reason == "stop") {
+                                accumulated_resp.finish_reason = "stop";
+                            } else if (reason == "length") {
+                                accumulated_resp.finish_reason = "length";
+                            } else {
+                                accumulated_resp.finish_reason = reason;
+                            }
+                        }
+
+                        // Extract token counts
+                        if (delta_json.contains("prompt_eval_count")) {
+                            accumulated_resp.prompt_tokens = delta_json["prompt_eval_count"].get<int>();
+                        }
+                        if (delta_json.contains("eval_count")) {
+                            accumulated_resp.completion_tokens = delta_json["eval_count"].get<int>();
+                        }
+                    }
+
+                } catch (const std::exception& e) {
+                    LOG_WARN("Failed to parse Ollama NDJSON line: " + std::string(e.what()));
+                }
+            }
+
+            // Always return true to curl to avoid errors
+            return true;
+        };
+
+        // Make streaming HTTP call
+        HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                           stream_handler, nullptr);
+
+        // Check for HTTP errors
+        if (!http_response.is_success()) {
+            accumulated_resp.success = false;
+            accumulated_resp.code = Response::ERROR;
+            accumulated_resp.finish_reason = "error";
+            accumulated_resp.error = http_response.error_message;
+
+            // Check for context overflow
+            int tokens_to_evict = extract_tokens_to_evict(http_response);
+
+            if (tokens_to_evict > 0) {
+                auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
+                if (ranges.empty()) {
+                    accumulated_resp.code = Response::CONTEXT_FULL;
+                    accumulated_resp.error = "Context full, cannot evict enough messages";
+                    return accumulated_resp;
+                }
+
+                if (!session.evict_messages(ranges)) {
+                    accumulated_resp.error = "Failed to evict messages";
+                    return accumulated_resp;
+                }
+
+                retry++;
+                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + ")");
+                continue;
+            }
+
+            return accumulated_resp;
+        }
+
+        // Success - update session with messages
+        if (stream_complete && accumulated_resp.success) {
+            // Estimate token counts if not provided by API
+            int new_message_tokens = prompt_tokens > 0 ? prompt_tokens : estimate_message_tokens(content);
+
+            // Add user message to session
+            Message user_msg(type, content, new_message_tokens);
+            user_msg.tool_name = tool_name;
+            user_msg.tool_call_id = tool_id;
+            session.messages.push_back(user_msg);
+            session.total_tokens += new_message_tokens;
+
+            if (type == Message::USER) {
+                session.last_user_message_index = session.messages.size() - 1;
+                session.last_user_message_tokens = new_message_tokens;
+            }
+
+            // Add assistant response to session
+            int asst_tokens = accumulated_resp.completion_tokens > 0 ?
+                             accumulated_resp.completion_tokens :
+                             estimate_message_tokens(accumulated_resp.content);
+
+            Message asst_msg(Message::ASSISTANT, accumulated_resp.content, asst_tokens);
+            session.messages.push_back(asst_msg);
+            session.total_tokens += asst_tokens;
+            session.last_assistant_message_index = session.messages.size() - 1;
+            session.last_assistant_message_tokens = asst_tokens;
+            session.last_prompt_tokens = accumulated_resp.prompt_tokens;
+
+            accumulated_resp.was_streamed = true;
+
+            // Set finish reason based on tool calls
+            if (!accumulated_resp.tool_calls.empty()) {
+                accumulated_resp.finish_reason = "tool_calls";
+            } else if (accumulated_resp.finish_reason.empty()) {
+                accumulated_resp.finish_reason = "stop";
+            }
+        }
+
+        LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
+                  ", completion_tokens=" + std::to_string(accumulated_resp.completion_tokens) +
+                  ", finish_reason=" + accumulated_resp.finish_reason);
+
+        return accumulated_resp;
+    }
+
+    // Max retries reached
+    Response error_resp;
+    error_resp.success = false;
+    error_resp.code = Response::ERROR;
+    error_resp.error = "Max retries reached";
+    return error_resp;
+}
+
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
     const size_t DEFAULT_CONTEXT_SIZE = 8192;  // Conservative default for Ollama models
 

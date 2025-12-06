@@ -1,4 +1,5 @@
 #include "filesystem_tools.h"
+#include "tools.h"
 #include "../logger.h"
 #include <filesystem>
 #include <fstream>
@@ -327,13 +328,11 @@ std::map<std::string, std::any> ListTool::execute(const std::map<std::string, st
     return list_dir.execute(args);
 }
 
-void register_filesystem_tools() {
-    auto& registry = ToolRegistry::instance();
-
-    registry.register_tool(std::make_unique<ReadFileTool>());
-    registry.register_tool(std::make_unique<WriteFileTool>());
-    registry.register_tool(std::make_unique<ListDirectoryTool>());
-    registry.register_tool(std::make_unique<ListTool>());  // Register alias
+void register_filesystem_tools(Tools& tools) {
+    tools.register_tool(std::make_unique<ReadFileTool>());
+    tools.register_tool(std::make_unique<WriteFileTool>());
+    tools.register_tool(std::make_unique<ListDirectoryTool>());
+    tools.register_tool(std::make_unique<ListTool>());  // Register alias
 
     LOG_DEBUG("Registered filesystem tools: Read, Write, list_directory, List");
 }

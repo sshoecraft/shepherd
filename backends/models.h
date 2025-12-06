@@ -332,9 +332,6 @@ struct ModelConfig {
     }
 };
 
-// Forward declarations
-class ToolRegistry;
-
 /// @brief Model detection and configuration
 /// Centralizes model family detection logic that was previously scattered across backends
 class Models {
@@ -417,14 +414,6 @@ public:
     static bool load_models_database(const std::string& path);
 
     /// @brief Format system message with tools for specific model family
-    /// Each model family has different tool formatting requirements
-    /// @param config Model configuration (family, version, etc.)
-    /// @param custom_system_prompt User's custom system prompt from config
-    /// @param registry Tool registry to get available tools
-    /// @param template_node Minja template node (void* to shared_ptr<TemplateNode>*), can be nullptr
-    /// @return Fully formatted system message content with tools embedded
-    static std::string format_system_message(const ModelConfig& config, const std::string& custom_system_prompt, ToolRegistry& registry, void* template_node = nullptr);
-
 private:
     /// @brief Helper to detect from template text (primary method)
     static ModelConfig detect_from_template_content(const std::string& template_text, const std::string& model_path);

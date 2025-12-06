@@ -1,4 +1,5 @@
 #include "command_tools.h"
+#include "tools.h"
 #include "../logger.h"
 #include <cstdlib>
 #include <iostream>
@@ -209,12 +210,10 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
     return result;
 }
 
-void register_command_tools() {
-    auto& registry = ToolRegistry::instance();
-
-    registry.register_tool(std::make_unique<ExecuteCommandTool>());
-    registry.register_tool(std::make_unique<GetEnvironmentVariableTool>());
-    registry.register_tool(std::make_unique<ListProcessesTool>());
+void register_command_tools(Tools& tools) {
+    tools.register_tool(std::make_unique<ExecuteCommandTool>());
+    tools.register_tool(std::make_unique<GetEnvironmentVariableTool>());
+    tools.register_tool(std::make_unique<ListProcessesTool>());
 
     LOG_DEBUG("Registered command tools: execute_command, get_env, list_processes");
 }

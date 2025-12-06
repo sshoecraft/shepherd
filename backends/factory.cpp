@@ -8,6 +8,7 @@
 #include "backends/ollama.h"
 #include "backends/anthropic.h"
 #include "backends/gemini.h"
+#include "backends/cli_client.h"
 
 std::unique_ptr<Backend> BackendFactory::create_from_provider(ProviderConfig* provider, size_t context_size) {
     LOG_DEBUG("Creating backend from provider: " + provider->name + " (type: " + provider->type + ")");
@@ -156,6 +157,11 @@ std::unique_ptr<Backend> BackendFactory::create_backend(std::string &name, size_
         throw std::runtime_error("Gemini backend not available (API backends not compiled in)");
 #endif
     }
+    else if (name == "cli") {
+        extern std::unique_ptr<Config> config;
+        std::string base_url = config->api_base.empty() ? "http://localhost:8000" : config->api_base;
+        backend = std::make_unique<CLIClientBackend>(base_url);
+    }
     else {
         throw std::runtime_error("Unknown backend: " + name);
     }
@@ -182,6 +188,7 @@ std::vector<std::string> BackendFactory::get_available_backends() {
     backends.push_back("grok");
     backends.push_back("ollama");
 #endif
+    backends.push_back("cli");
 
     return backends;
 }

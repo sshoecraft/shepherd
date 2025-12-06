@@ -889,6 +889,130 @@ Response TensorRTBackend::add_message(Session& session, Message::Type type,
     return resp;
 }
 
+Response TensorRTBackend::add_message_stream(Session& session, Message::Type type,
+                                            const std::string& content,
+                                            StreamCallback callback,
+                                            const std::string& tool_name,
+                                            const std::string& tool_id,
+                                            int prompt_tokens,
+                                            int max_tokens) {
+    if (!is_ready()) {
+        Response err_resp;
+        err_resp.success = false;
+        err_resp.code = Response::ERROR;
+        err_resp.finish_reason = "error";
+        err_resp.error = "TensorRT backend not initialized";
+        return err_resp;
+    }
+
+    // Set current session for eviction callbacks
+    current_session = &session;
+
+    LOG_DEBUG("TensorRT add_message_stream called: type=" + std::to_string(type) +
+              ", content_len=" + std::to_string(content.length()));
+
+    // Count tokens if needed
+    int message_tokens = prompt_tokens;
+    if (message_tokens == 0) {
+        if (type == Message::SYSTEM && !session.tools.empty()) {
+            std::string formatted = chat_template_->format_system_message(content, session.tools);
+            message_tokens = count_message_tokens(type, formatted, tool_name, tool_id);
+        } else {
+            message_tokens = count_message_tokens(type, content, tool_name, tool_id);
+        }
+    }
+
+    // Create message
+    Message msg(type, content, message_tokens);
+    msg.tool_name = tool_name;
+    msg.tool_call_id = tool_id;
+
+    // Tokenize and accumulate
+    bool will_generate = (type != Message::SYSTEM);
+    if (!tokenize_and_accumulate_message(msg, will_generate)) {
+        Response err;
+        err.success = false;
+        err.code = Response::ERROR;
+        err.error = "Failed to tokenize message";
+        return err;
+    }
+
+    // Add to session
+    session.messages.push_back(msg);
+    session.total_tokens += message_tokens;
+
+    if (type == Message::USER) {
+        session.last_user_message_index = session.messages.size() - 1;
+        session.last_user_message_tokens = message_tokens;
+    }
+
+    Response resp;
+    resp.success = true;
+    resp.code = Response::SUCCESS;
+
+    if (type != Message::SYSTEM) {
+        // Generate response with streaming callback
+        std::string response_text = generate(session, max_tokens, callback);
+
+        // Parse tool calls
+        std::vector<ToolParser::ToolCall> tool_calls;
+        if (!response_text.empty()) {
+            bool has_marker = false;
+            std::vector<std::string> tool_call_markers = {"<tool_call>", "```json", "{\"name\":"};
+            for (const auto& marker : tool_call_markers) {
+                if (response_text.find(marker) != std::string::npos) {
+                    has_marker = true;
+                    break;
+                }
+            }
+
+            if (has_marker || (response_text[0] == '{' && response_text.find("\"name\"") != std::string::npos)) {
+                auto tool_call = ToolParser::parse_tool_call(response_text, tool_call_markers);
+                if (tool_call.has_value()) {
+                    tool_calls.push_back(tool_call.value());
+                }
+            }
+        }
+
+        // Add assistant message
+        int asst_tokens = tokenizer_->count_tokens(response_text);
+        Message asst_msg(Message::ASSISTANT, response_text, asst_tokens);
+
+        if (!tokenize_and_accumulate_message(asst_msg)) {
+            LOG_WARN("Failed to accumulate assistant message tokens");
+        }
+
+        session.messages.push_back(asst_msg);
+        session.total_tokens += asst_tokens;
+
+        session.last_assistant_message_index = session.messages.size() - 1;
+        session.last_assistant_message_tokens = asst_tokens;
+
+        resp.content = response_text;
+        resp.prompt_tokens = message_tokens;
+        resp.completion_tokens = asst_tokens;
+        resp.was_streamed = (callback != nullptr);
+        resp.tool_calls = tool_calls;
+
+        if (!tool_calls.empty()) {
+            resp.finish_reason = "tool_calls";
+        } else if (last_generation_hit_length_limit) {
+            resp.finish_reason = "length";
+        } else {
+            resp.finish_reason = "stop";
+        }
+    } else {
+        resp.finish_reason = "system";
+        resp.prompt_tokens = message_tokens;
+    }
+
+    LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
+              ", completion_tokens=" + std::to_string(resp.completion_tokens) +
+              ", finish_reason=" + resp.finish_reason);
+
+    return resp;
+}
+
 Response TensorRTBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
     LOG_DEBUG("generate_from_session CALLED - accumulated_tokens.size=" + std::to_string(accumulated_tokens.size()));
 

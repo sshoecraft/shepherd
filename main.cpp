@@ -1,11 +1,11 @@
 
 #include "shepherd.h"
 #include "tools/tools.h"
+#include "tools/api_tools.h"
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
 #include "mcp/mcp.h"
 #include "mcp/mcp_config.h"
 #include "provider.h"
-#include "api_tools/api_tools.h"
 #include "rag.h"
 #include "cli.h"
 #include "server/api_server.h"
@@ -84,11 +84,10 @@ static void print_usage(int, char** argv) {
 	printf("\nUsage:\n");
 	printf("	%s [OPTIONS]\n", argv[0]);
 	printf("	%s edit-system				Edit system prompt in $EDITOR\n", argv[0]);
-	printf("	%s list-tools				List all available tools\n", argv[0]);
+	printf("	%s tools [list|enable|disable] [args...]	Manage tools\n", argv[0]);
 	printf("	%s provider <add|list|show|remove|use> [args...]\n", argv[0]);
 	printf("	%s config <show|set> [args...]\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
-	printf("	%s api <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
@@ -200,121 +199,6 @@ static int handle_mcp_subcommand(int argc, char** argv) {
 
 	// Call common implementation
 	return handle_mcp_args(args);
-}
-
-static int handle_api_command(int argc, char** argv) {
-	if (argc < 3) {
-		std::cerr << "Usage: shepherd api <add|remove|list> [args...]" << std::endl;
-		return 1;
-	}
-
-	std::string subcommand = argv[2];
-	std::string config_path = Config::get_default_config_path();
-
-	if (subcommand == "list") {
-		APIToolConfig::list_tools(config_path, false);
-		return 0;
-	}
-
-	if (subcommand == "add") {
-		if (argc < 5) {
-			std::cerr << "Usage: shepherd api add <name> <backend> --model <model> [options]" << std::endl;
-			std::cerr << "\nOptions:" << std::endl;
-			std::cerr << "  --model <model>         Model name (required)" << std::endl;
-			std::cerr << "  --api-key <key>         API key" << std::endl;
-			std::cerr << "  --api-base <url>        Custom API base URL" << std::endl;
-			std::cerr << "  --context-size <size>   Context window size" << std::endl;
-			std::cerr << "  --max-tokens <tokens>   Max generation tokens" << std::endl;
-			std::cerr << "\nExamples:" << std::endl;
-			std::cerr << "  shepherd api add ask_claude anthropic --model claude-sonnet-4 --api-key sk-ant-..." << std::endl;
-			std::cerr << "  shepherd api add ask_gpt openai --model gpt-4 --api-key sk-... --max-tokens 8000" << std::endl;
-			std::cerr << "  shepherd api add local_llama ollama --model llama3 --api-base http://localhost:11434" << std::endl;
-			return 1;
-		}
-
-		APIToolEntry tool;
-		tool.name = argv[3];
-		tool.backend = argv[4];
-		tool.context_size = 0;
-		tool.max_tokens = 0;
-
-		// Parse options
-		for (int i = 5; i < argc; i++) {
-			std::string arg = argv[i];
-
-			if (arg == "--model") {
-				if (i + 1 < argc) {
-					tool.model = argv[++i];
-				} else {
-					std::cerr << "Error: --model requires an argument" << std::endl;
-					return 1;
-				}
-			} else if (arg == "--api-key") {
-				if (i + 1 < argc) {
-					tool.api_key = argv[++i];
-				} else {
-					std::cerr << "Error: --api-key requires an argument" << std::endl;
-					return 1;
-				}
-			} else if (arg == "--api-base") {
-				if (i + 1 < argc) {
-					tool.api_base = argv[++i];
-				} else {
-					std::cerr << "Error: --api-base requires an argument" << std::endl;
-					return 1;
-				}
-			} else if (arg == "--context-size") {
-				if (i + 1 < argc) {
-					tool.context_size = std::stoull(argv[++i]);
-				} else {
-					std::cerr << "Error: --context-size requires an argument" << std::endl;
-					return 1;
-				}
-			} else if (arg == "--max-tokens") {
-				if (i + 1 < argc) {
-					tool.max_tokens = std::stoi(argv[++i]);
-				} else {
-					std::cerr << "Error: --max-tokens requires an argument" << std::endl;
-					return 1;
-				}
-			} else {
-				std::cerr << "Error: Unknown option: " << arg << std::endl;
-				std::cerr << "Use 'shepherd api add' without arguments to see usage and examples" << std::endl;
-				return 1;
-			}
-		}
-
-		// Validate required fields
-		if (tool.model.empty()) {
-			std::cerr << "Error: --model is required" << std::endl;
-			std::cerr << "Use 'shepherd api add' without arguments to see usage and examples" << std::endl;
-			return 1;
-		}
-
-		if (APIToolConfig::add_tool(config_path, tool)) {
-			std::cout << "Added API tool '" << tool.name << "'" << std::endl;
-			return 0;
-		}
-		return 1;
-	}
-
-	if (subcommand == "remove") {
-		if (argc < 4) {
-			std::cerr << "Usage: shepherd api remove <name>" << std::endl;
-			return 1;
-		}
-
-		std::string name = argv[3];
-		if (APIToolConfig::remove_tool(config_path, name)) {
-			std::cout << "Removed API tool '" << name << "'" << std::endl;
-			return 0;
-		}
-		return 1;
-	}
-
-	std::cerr << "Unknown api subcommand: " << subcommand << std::endl;
-	std::cerr << "Available: add, remove, list" << std::endl;
-	return 1;
 }
 
 static int handle_sched_command(int argc, char** argv) {
@@ -472,49 +356,27 @@ int main(int argc, char** argv) {
 		return handle_edit_system_command(argc, argv);
 	}
 
-	// Handle list-tools subcommand
-	if (argc >= 2 && std::string(argv[1]) == "list-tools") {
+	// Handle tools subcommand
+	if (argc >= 2 && std::string(argv[1]) == "tools") {
 		// Initialize tools system
-		register_filesystem_tools();
-		register_command_tools();
-		register_json_tools();
-		register_http_tools();
-		register_memory_tools();
-		register_mcp_resource_tools();
-		register_core_tools();
+		Tools tools;
+		register_filesystem_tools(tools);
+		register_command_tools(tools);
+		register_json_tools(tools);
+		register_http_tools(tools);
+		register_memory_tools(tools);
+		register_mcp_resource_tools(tools);
+		register_core_tools(tools);
 
-		// Initialize API tools
-		auto& api_tools = APITools::instance();
-		api_tools.initialize();
+		tools.build_all_tools();
 
-		auto& registry = ToolRegistry::instance();
-		auto tool_descriptions = registry.list_tools_with_descriptions();
-
-		printf("\n=== Available Tools (%zu) ===\n\n", tool_descriptions.size());
-		for (const auto& pair : tool_descriptions) {
-			Tool* tool = registry.get_tool(pair.first);
-			if (tool) {
-				printf("• %s\n", pair.first.c_str());
-				printf("  %s\n", pair.second.c_str());
-
-				// Show parameters if available
-				auto params = tool->get_parameters_schema();
-				if (!params.empty()) {
-					printf("  Parameters:\n");
-					for (const auto& param : params) {
-						printf("	- %s (%s)%s: %s\n",
-							   param.name.c_str(),
-							   param.type.c_str(),
-							   param.required ? ", required" : "",
-							   param.description.c_str());
-					}
-				} else {
-					printf("  Parameters: %s\n", tool->parameters().c_str());
-				}
-				printf("\n");
-			}
+		// Build args vector from argv[2] onwards
+		std::vector<std::string> args;
+		for (int i = 2; i < argc; i++) {
+			args.push_back(argv[i]);
 		}
-		return 0;
+
+		return tools.handle_tools_args(args);
 	}
 
 	// Handle provider subcommand
@@ -530,11 +392,6 @@ int main(int argc, char** argv) {
 	// Handle MCP subcommand
 	if (argc >= 2 && std::string(argv[1]) == "mcp") {
 		return handle_mcp_subcommand(argc, argv);
-	}
-
-	// Handle API subcommand
-	if (argc >= 2 && std::string(argv[1]) == "api") {
-		return handle_api_command(argc, argv);
 	}
 
 	// Handle sched subcommand
@@ -984,111 +841,36 @@ int main(int argc, char** argv) {
 		Session session;
 		session.system_message = system_prompt_was_set ? system_prompt_override : config->system_message;
 
-		// Initialize tools system (skip in server mode - tools handled by client)
+		// Create frontend early so we can call init() for tools
+		std::unique_ptr<Frontend> frontend;
+		if (frontend_mode == "cli") {
+			frontend = std::make_unique<CLI>();
+		} else if (frontend_mode == "api-server") {
+			frontend = std::make_unique<APIServer>(server_host, server_port);
+		} else if (frontend_mode == "cli-server") {
+			frontend = std::make_unique<CLIServer>(server_host, server_port);
+		}
+
+		// Initialize tools via frontend (skip in server mode - tools handled by client)
 		if (!g_server_mode) {
+			frontend->init(no_mcp, no_tools);
+
+			// Populate session.tools from frontend's Tools instance
 			if (!no_tools) {
-				LOG_INFO("Initializing tools system...");
-				try {
-					// Register all native tools including memory search
-					register_filesystem_tools();
-					register_command_tools();
-					register_json_tools();
-					register_http_tools();
-					register_memory_tools();
-					register_mcp_resource_tools();
-					register_core_tools();	// IMPORTANT: Register core tools (Bash, Glob, Grep, Edit, WebSearch, etc.)
-
-				auto& registry = ToolRegistry::instance();
-				auto tools = registry.list_tools();
-				LOG_INFO("Native tools initialized with " + std::to_string(tools.size()) + " tools");
-				if (g_debug_level) {
-					for (const auto& tool_name : tools) {
-						LOG_DEBUG("Registered tool: " + tool_name);
+				CLI* cli = dynamic_cast<CLI*>(frontend.get());
+				if (cli) {
+					cli->tools.populate_session_tools(session);
+					LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools from CLI");
+				} else {
+					CLIServer* cli_server = dynamic_cast<CLIServer*>(frontend.get());
+					if (cli_server) {
+						cli_server->tools.populate_session_tools(session);
+						LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools from CLIServer");
 					}
 				}
-
-				// Initialize MCP servers (will register additional tools)
-				size_t mcp_count = 0;
-				if (!no_mcp) {
-					auto& mcp = MCP::instance();
-					mcp.initialize();
-					mcp_count = mcp.get_tool_count();
-				} else {
-					LOG_INFO("MCP system disabled via --nomcp flag");
-				}
-
-				// Initialize API tools (will register additional tools)
-				auto& api_tools = APITools::instance();
-				api_tools.initialize();
-				size_t api_tool_count = api_tools.get_tool_count();
-
-				// Show total tool count after MCP and API tools
-				tools = registry.list_tools();
-				if (mcp_count > 0 || api_tool_count > 0) {
-					LOG_INFO("Total tools available: " + std::to_string(tools.size()) +
-							 " (native + " + std::to_string(mcp_count) + " MCP + " +
-							 std::to_string(api_tool_count) + " API)");
-				} else {
-					LOG_INFO("Total tools available: " + std::to_string(tools.size()) + " (native only)");
-				}
-
-				// Populate session.tools from ToolRegistry for API backends
-				for (const auto& tool_name : tools) {
-					Tool* tool_ptr = registry.get_tool(tool_name);
-					if (tool_ptr) {
-						Session::Tool session_tool;
-						session_tool.name = tool_ptr->name();
-						session_tool.description = tool_ptr->description();
-
-						// Build JSON schema from parameter definitions
-						auto params = tool_ptr->get_parameters_schema();
-						nlohmann::json schema;
-						schema["type"] = "object";
-						schema["properties"] = nlohmann::json::object();
-						nlohmann::json required = nlohmann::json::array();
-
-						for (const auto& param : params) {
-							nlohmann::json param_schema;
-							param_schema["type"] = param.type;
-							if (!param.description.empty()) {
-								param_schema["description"] = param.description;
-							}
-							schema["properties"][param.name] = param_schema;
-
-							if (param.required) {
-								required.push_back(param.name);
-							}
-						}
-
-						if (!required.empty()) {
-							schema["required"] = required;
-						}
-
-						session_tool.parameters = schema;
-						session.tools.push_back(session_tool);
-					}
-				}
-				LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools");
-
-				} catch (const std::exception& e) {
-					LOG_ERROR("Failed to initialize tools system: " + std::string(e.what()));
-					return 1;
-				}
-			} else {
-				LOG_INFO("Tools disabled via --notools flag");
 			}
 		} else {
 			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
-		}
-
-		// Get registry and tool descriptions AFTER all tools are registered
-		// (needed for both interactive and server modes)
-		auto& registry = ToolRegistry::instance();
-		std::map<std::string, std::string> tool_descriptions;
-
-		// Only get tool descriptions if tools are enabled
-		if (!no_tools) {
-			tool_descriptions = registry.list_tools_with_descriptions();
 		}
 
 		// Now that session/tools are ready, connect to provider (if using provider mode)
@@ -1108,6 +890,20 @@ int main(int argc, char** argv) {
 		} else {
 			// Legacy mode: initialize the backend we created earlier
 			backend->initialize(session);
+		}
+
+		// Register non-active providers as tools (ask_<provider_name>)
+		if (!g_server_mode && !no_tools && use_provider_mode) {
+			std::string active_provider = provider_mgr.get_current_provider();
+			if (!active_provider.empty()) {
+				// Cast frontend to CLI to access tools
+				CLI* cli = dynamic_cast<CLI*>(frontend.get());
+				if (cli) {
+					register_provider_tools(cli->tools, active_provider);
+					// Re-populate session.tools with the new provider tools
+					cli->tools.populate_session_tools(session);
+				}
+			}
 		}
 
 		LOG_INFO("Shepherd initialization complete");
@@ -1133,60 +929,8 @@ int main(int argc, char** argv) {
 			return run_server(backend, server_host, server_port);
 		}
 
-		// Populate tools from registry (all ranks need this for Session creation)
-		// This converts from ToolRegistry format to Session::Tool format
-		// Skip if tools were already added during initialization above
-		if (session.tools.empty()) {
-		for (const auto& [tool_name, tool_desc] : tool_descriptions) {
-			Session::Tool st;
-			st.name = tool_name;
-			st.description = tool_desc;
-
-			// Get parameters schema from the actual tool
-			Tool* tool = registry.get_tool(tool_name);
-			if (tool) {
-				auto params_schema = tool->get_parameters_schema();
-				if (!params_schema.empty()) {
-					// Build proper JSON schema from ParameterDef vector
-					nlohmann::json params_json;
-					params_json["type"] = "object";
-					params_json["properties"] = nlohmann::json::object();
-
-					std::vector<std::string> required_fields;
-					for (const auto& param : params_schema) {
-						nlohmann::json prop;
-						prop["type"] = param.type;
-						if (!param.description.empty()) {
-							prop["description"] = param.description;
-						}
-						if (!param.default_value.empty()) {
-							prop["default"] = param.default_value;
-						}
-						params_json["properties"][param.name] = prop;
-
-						if (param.required) {
-							required_fields.push_back(param.name);
-						}
-					}
-
-					if (!required_fields.empty()) {
-						params_json["required"] = required_fields;
-					}
-
-					st.parameters = params_json;
-				} else {
-					// Legacy tools without structured schema - create minimal schema
-					st.parameters = nlohmann::json::object();
-					st.parameters["type"] = "object";
-					st.parameters["properties"] = nlohmann::json::object();
-				}
-			}
-
-			session.tools.push_back(st);
-		}
-		} // end if (session.tools.empty())
-
-		LOG_DEBUG("Session created with " + std::to_string(session.tools.size()) + " tools");
+		// Session tools already populated during frontend->init() above
+		LOG_DEBUG("Session has " + std::to_string(session.tools.size()) + " tools");
 
 		// Backend already initialized above via connect_provider or legacy init
 		session.backend = backend.get();
@@ -1228,17 +972,8 @@ int main(int argc, char** argv) {
 
 
 	// ============================================================================
-	// Create and Run Frontend
+	// Run Frontend (created earlier during tool initialization)
 	// ============================================================================
-	std::unique_ptr<Frontend> frontend;
-	if (frontend_mode == "cli") {
-		frontend = std::make_unique<CLI>();
-	} else if (frontend_mode == "api-server") {
-		frontend = std::make_unique<APIServer>(server_host, server_port);
-	} else if (frontend_mode == "cli-server") {
-		frontend = std::make_unique<CLIServer>(server_host, server_port);
-	}
-
 	int result = frontend->run(backend, session);
 
 	// Clean shutdown for MPI

@@ -40,4 +40,5 @@ public:
 };
 
 // Function to register all filesystem tools
-void register_filesystem_tools();
+class Tools;
+void register_filesystem_tools(Tools& tools);

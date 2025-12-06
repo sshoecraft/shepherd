@@ -5,6 +5,7 @@
 #include "tools/tool_parser.h"
 #include "nlohmann/json.hpp"
 #include "models.h"
+#include "debug.h"
 #include <sstream>
 #include <fstream>
 #include <regex>
@@ -803,7 +804,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
 
         int32_t n_vocab = llama_vocab_n_tokens(vocab);
-        LOG_DEBUG("Sampled token: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")");
+        dprintf(3, "Sampled token: %d (vocab size: %d)", next_token, n_vocab);
         if (next_token < 0 || next_token >= n_vocab) {
             LOG_ERROR("Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")");
             break;
@@ -822,7 +823,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Convert token to text (filter special tokens with false parameter)
         char token_str[256];
         int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, false);
-        LOG_DEBUG("Token " + std::to_string(next_token) + " -> len=" + std::to_string(token_len));
+        dprintf(3, "Token %d -> len=%d", next_token, token_len);
 
         if (token_len > 0) {
             // Accumulate for final response

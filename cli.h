@@ -18,8 +18,11 @@ public:
     ~CLI();
 
     // Frontend interface
-    void init(bool no_mcp = false, bool no_tools = false) override;
-    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+    void init(Session& session,
+              bool no_mcp = false,
+              bool no_tools = false,
+              const std::string& provider_name = "") override;
+    int run(Session& session) override;
 
     // Tool management
     Tools tools;
@@ -35,9 +38,7 @@ public:
     std::string receive_message(const std::string& prompt = ">");
 
     // Slash command handler
-    bool handle_slash_commands(const std::string& input,
-                               std::unique_ptr<Backend>& backend,
-                               Session& session);
+    bool handle_slash_commands(const std::string& input, Session& session);
 
     // Public state - direct access, no getters
     bool eof_received;

@@ -57,7 +57,7 @@ CLI::CLI() : Frontend(), eof_received(false), generation_cancelled(false) {
 CLI::~CLI() {
 }
 
-int CLI::run(std::unique_ptr<Backend>& backend, Session& session) {
+int CLI::run(Session& session) {
 	// Populate session.tools from our tools instance
 	tools.populate_session_tools(session);
 
@@ -135,7 +135,7 @@ std::string CLI::receive_message(const std::string& prompt) {
 	return tio.read(prompt.c_str());
 }
 
-void CLI::init(bool no_mcp, bool no_tools) {
+void CLI::init(Session& session, bool no_mcp, bool no_tools, const std::string& provider_name) {
 	// Initialize RAG system using global config
 	std::string db_path = config->memory_database;
 	if (db_path.empty()) {
@@ -184,11 +184,17 @@ void CLI::init(bool no_mcp, bool no_tools) {
 	tools.build_all_tools();
 
 	LOG_INFO("Tools initialized: " + std::to_string(tools.all_tools.size()) + " total");
+
+	// Populate session.tools from Tools instance
+	if (!no_tools) {
+		tools.populate_session_tools(session);
+		LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools");
+	}
 }
 
 // Handle all slash commands
 // Returns true if command was handled, false otherwise
-bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backend>& backend, Session& session) {
+bool CLI::handle_slash_commands(const std::string& input, Session& session) {
 	// Tokenize the input
 	std::istringstream iss(input);
 	std::string cmd;
@@ -203,14 +209,14 @@ bool CLI::handle_slash_commands(const std::string& input, std::unique_ptr<Backen
 
 	// /provider commands
 	if (cmd == "/provider") {
-		// Call common implementation with backend and session for "use"/"next" commands
-		int result = handle_provider_args(args, &backend, &session);
+		// Call common implementation with backend, session, and providers from frontend
+		int result = handle_provider_args(args, &backend, &session, &providers, &current_provider);
 		return true;  // Command was handled (even if it returned error)
 	}
 
 	// /model commands
 	if (cmd == "/model") {
-		handle_model_args(args, &backend);
+		handle_model_args(args, &backend, &providers, &current_provider);
 		return true;
 	}
 
@@ -321,7 +327,7 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 
 		// Check for slash commands
 		if (!user_input.empty() && user_input[0] == '/') {
-			if (cli.handle_slash_commands(user_input, backend, session)) {
+			if (cli.handle_slash_commands(user_input, session)) {
 				continue;  // Command handled, get next input
 			}
 			// If not a recognized command, treat as regular input

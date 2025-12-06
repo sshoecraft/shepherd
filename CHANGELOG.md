@@ -5,6 +5,22 @@ All notable changes to Shepherd will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2025-12-06
+
+### Added
+- Unified provider system: command-line overrides now create ephemeral `_cmdline` provider
+- CliProviderConfig class for CLI client backend (connects to shepherd server)
+- Provider priority validation: user providers clamped to 1-100, priority 0 reserved for ephemeral
+- CLI backend now properly listed as available backend
+
+### Changed
+- Command-line overrides applied directly to config after load (cleaner code path)
+- RAG initialization moved from main.cpp to frontend init() methods
+- Ephemeral providers (priority 0) filtered from tool registration
+
+### Removed
+- Grok backend references (was never implemented)
+
 ## [2.2.8] - 2025-11-03
 
 ### Fixed
@@ -210,7 +226,7 @@ For developers extending Shepherd:
 
 ### Initial Release
 
-- Multi-backend LLM system (llama.cpp, TensorRT-LLM, OpenAI, Anthropic, Gemini, Grok, Ollama)
+- Multi-backend LLM system (llama.cpp, TensorRT-LLM, OpenAI, Anthropic, Gemini, Ollama)
 - KV cache eviction with RAG archival
 - Tool/function calling system
 - Model Context Protocol (MCP) integration

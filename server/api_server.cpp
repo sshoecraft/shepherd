@@ -27,7 +27,7 @@ APIServer::APIServer(const std::string& host, int port)
 APIServer::~APIServer() {
 }
 
-int APIServer::run(std::unique_ptr<Backend>& backend, Session& session) {
+int APIServer::run(Session& session) {
     return run_api_server(backend.get(), host, port);
 }
 

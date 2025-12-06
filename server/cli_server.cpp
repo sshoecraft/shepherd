@@ -25,7 +25,7 @@ CLIServer::CLIServer(const std::string& host, int port)
 CLIServer::~CLIServer() {
 }
 
-void CLIServer::init(bool no_mcp, bool no_tools) {
+void CLIServer::init(Session& session, bool no_mcp, bool no_tools, const std::string& provider_name) {
     // Initialize RAG system using global config
     std::string db_path = config->memory_database;
     if (db_path.empty()) {
@@ -74,9 +74,15 @@ void CLIServer::init(bool no_mcp, bool no_tools) {
     tools.build_all_tools();
 
     LOG_INFO("CLI server tools initialized: " + std::to_string(tools.all_tools.size()) + " total");
+
+    // Populate session.tools from Tools instance
+    if (!no_tools) {
+        tools.populate_session_tools(session);
+        LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools");
+    }
 }
 
-int CLIServer::run(std::unique_ptr<Backend>& backend, Session& session) {
+int CLIServer::run(Session& session) {
     return run_cli_server(backend, session, host, port, tools);
 }
 
@@ -377,6 +383,10 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
                             // Execute the tool
                             ToolResult tool_result = state.tools->execute(tool_name, tool_call.parameters);
+
+                            // Reset filtering state for next generation
+                            in_tool_call = false;
+                            pending_buffer.clear();
 
                             if (tool_result.success) {
                                 std::string sanitized = utf8_sanitizer::sanitize_utf8(tool_result.content);

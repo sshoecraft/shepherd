@@ -297,25 +297,19 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
 // Provider tool registration functions
 // ============================================================================
 
-APIToolEntry provider_to_tool_entry(const ProviderConfig* config, const std::string& provider_name) {
+APIToolEntry provider_to_tool_entry(const Provider& provider) {
     APIToolEntry entry;
-    entry.name = "ask_" + provider_name;
-    entry.backend = config->type;
-    entry.model = config->model;
-    entry.context_size = config->context_size;
+    entry.name = "ask_" + provider.name;
+    entry.backend = provider.type;
+    entry.model = provider.model;
+    entry.context_size = provider.context_size;
+    entry.api_key = provider.api_key;
+    entry.api_base = provider.base_url;
+    entry.max_tokens = provider.max_tokens;
 
-    // Get API-specific fields
-    auto* api_config = dynamic_cast<const ApiProviderConfig*>(config);
-    if (api_config) {
-        entry.api_key = api_config->api_key;
-        entry.api_base = api_config->base_url;
-        entry.max_tokens = api_config->max_tokens;
-
-        // Ollama uses num_predict instead of max_tokens
-        auto* ollama_config = dynamic_cast<const OllamaProviderConfig*>(config);
-        if (ollama_config) {
-            entry.max_tokens = ollama_config->num_predict;
-        }
+    // Ollama uses num_predict instead of max_tokens
+    if (provider.type == "ollama" && provider.num_predict > 0) {
+        entry.max_tokens = provider.num_predict;
     }
 
     return entry;
@@ -325,32 +319,26 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
     // Clear existing API tools first
     tools.api_tools.clear();
 
-    Provider provider_mgr;
-    provider_mgr.load_providers();
+    auto providers = Provider::load_providers();
 
-    auto provider_names = provider_mgr.list_providers();
-
-    for (const auto& name : provider_names) {
+    for (const auto& p : providers) {
         // Skip the active provider - don't want to call ourselves
-        if (name == active_provider) {
+        if (p.name == active_provider) {
             continue;
         }
 
-        auto* config = provider_mgr.get_provider(name);
-        if (!config) continue;
-
         // Skip ephemeral providers (priority 0 is reserved for command-line providers)
-        if (config->priority == 0) {
+        if (p.priority == 0) {
             continue;
         }
 
         // Only register API providers (not local models)
-        if (!config->is_api()) {
+        if (!p.is_api()) {
             continue;
         }
 
-        // Create APIToolEntry from provider config
-        APIToolEntry entry = provider_to_tool_entry(config, name);
+        // Create APIToolEntry from provider
+        APIToolEntry entry = provider_to_tool_entry(p);
 
         // Create adapter and register directly (pass tools pointer for sub-session population)
         auto adapter = std::make_unique<APIToolAdapter>(entry, &tools);
@@ -362,22 +350,29 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
 }
 
 void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
-    Provider provider_mgr;
-    provider_mgr.load_providers();
+    auto providers = Provider::load_providers();
 
-    auto* config = provider_mgr.get_provider(provider_name);
-    if (!config) {
+    // Find the provider by name
+    const Provider* found = nullptr;
+    for (const auto& p : providers) {
+        if (p.name == provider_name) {
+            found = &p;
+            break;
+        }
+    }
+
+    if (!found) {
         LOG_WARN("Provider not found: " + provider_name);
         return;
     }
 
-    if (!config->is_api()) {
+    if (!found->is_api()) {
         LOG_DEBUG("Skipping non-API provider: " + provider_name);
         return;
     }
 
-    // Create APIToolEntry from provider config
-    APIToolEntry entry = provider_to_tool_entry(config, provider_name);
+    // Create APIToolEntry from provider
+    APIToolEntry entry = provider_to_tool_entry(*found);
 
     // Create adapter and register directly (pass tools pointer for sub-session population)
     auto adapter = std::make_unique<APIToolAdapter>(entry, &tools);

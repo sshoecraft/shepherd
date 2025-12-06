@@ -780,70 +780,54 @@ int main(int argc, char** argv) {
 		Models::init(config->models_file);
 	}
 
-	// Create and initialize backend (needed for both CLI and server mode)
+	// Create and initialize frontend/backend
 	try {
-		std::unique_ptr<Backend> backend;
-		Provider provider;
-		provider.load_providers();
-
 		// If command-line overrides were provided, create ephemeral provider
 		bool has_cmdline_override = !override.backend.empty() || !override.model.empty() || !override.api_key.empty();
+		Provider* cmdline_provider_ptr = nullptr;
+		Provider cmdline_provider;
 		if (has_cmdline_override) {
-			auto cmdline_provider = create_provider_from_config();
-			cmdline_provider->name = "_cmdline";
-			cmdline_provider->priority = 0;  // Highest priority (reserved for ephemeral)
-			provider.add_ephemeral_provider(std::move(cmdline_provider));
+			cmdline_provider = Provider::from_config();
+			cmdline_provider.name = "_cmdline";
+			cmdline_provider.priority = 0;  // Highest priority (reserved for ephemeral)
+			cmdline_provider_ptr = &cmdline_provider;
 		}
 
 		// Create the session that will be used throughout (not in server mode)
 		Session session;
 		session.system_message = config->system_message;
 
-		// Create frontend early so we can call init() for tools
-		auto frontend = Frontend::create(frontend_mode, server_host, server_port);
+		// Create frontend - this loads providers and adds cmdline provider if provided
+		auto frontend = Frontend::create(frontend_mode, server_host, server_port, cmdline_provider_ptr);
 
 		// Initialize frontend (RAG, tools, MCP) - skip in server mode, clients handle their own
 		if (!g_server_mode) {
-			frontend->init(no_mcp, no_tools);
-
-			// Populate session.tools from frontend's Tools instance
-			if (!no_tools) {
-				CLI* cli = dynamic_cast<CLI*>(frontend.get());
-				if (cli) {
-					cli->tools.populate_session_tools(session);
-					LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools from CLI");
-				} else {
-					CLIServer* cli_server = dynamic_cast<CLIServer*>(frontend.get());
-					if (cli_server) {
-						cli_server->tools.populate_session_tools(session);
-						LOG_DEBUG("Session initialized with " + std::to_string(session.tools.size()) + " tools from CLIServer");
-					}
-				}
-			}
+			frontend->init(session, no_mcp, no_tools);
 		} else {
 			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
 		}
 
-		// Connect to provider (always uses provider system now)
+		// Connect to provider (stores backend in frontend)
+		bool connected = false;
 		if (!override.provider.empty()) {
 			// Specific provider requested via --provider
-			backend = provider.connect_provider(override.provider, session, config->context_size);
+			connected = frontend->connect_provider(override.provider, session);
 		} else if (has_cmdline_override) {
 			// Command-line overrides → use ephemeral _cmdline provider
-			backend = provider.connect_provider("_cmdline", session, config->context_size);
+			connected = frontend->connect_provider("_cmdline", session);
 		} else {
 			// No overrides → try providers in priority order
-			backend = provider.connect_next_provider(session, config->context_size);
+			connected = frontend->connect_next_provider(session);
 		}
 
-		if (!backend) {
+		if (!connected) {
 			fprintf(stderr, "Failed to connect to provider. Use 'shepherd provider add' to configure providers.\n");
 			return 1;
 		}
 
 		// Register non-active providers as tools (ask_<provider_name>)
 		if (!g_server_mode && !no_tools) {
-			std::string active_provider = provider.get_current_provider();
+			std::string active_provider = frontend->current_provider;
 			if (!active_provider.empty()) {
 				CLI* cli = dynamic_cast<CLI*>(frontend.get());
 				if (cli) {
@@ -873,29 +857,26 @@ int main(int argc, char** argv) {
 			}
 
 			// Only rank 0 continues to run server
-			return run_server(backend, server_host, server_port);
+			return frontend->run(session);
 		}
 
 		// Session tools already populated during frontend->init() above
 		LOG_DEBUG("Session has " + std::to_string(session.tools.size()) + " tools");
 
-		// Backend already initialized above via connect_provider or legacy init
-		session.backend = backend.get();
-
 		// Calculate desired completion tokens once (used throughout session lifetime)
 		// Must be calculated AFTER backend initialization when context_size is finalized
 		session.desired_completion_tokens = calculate_desired_completion_tokens(
-			backend->context_size,
-			backend->max_output_tokens
+			frontend->backend->context_size,
+			frontend->backend->max_output_tokens
 		);
 
 		// Enable auto-eviction ONLY for API backends in CLI mode
 		// In server mode, never auto-evict - return 400 error and let client handle cleanup
 		// Local backends (llamacpp) handle eviction through reactive callbacks
 		// Must be set AFTER initialization when backend->context_size is finalized
-		session.auto_evict = (!g_server_mode && backend->context_size > 0 && !backend->is_local);
+		session.auto_evict = (!g_server_mode && frontend->backend->context_size > 0 && !frontend->backend->is_local);
 		if (session.auto_evict) {
-			LOG_INFO("Auto-eviction enabled (context_size=" + std::to_string(backend->context_size) +
+			LOG_INFO("Auto-eviction enabled (context_size=" + std::to_string(frontend->backend->context_size) +
 			         ", desired_completion=" + std::to_string(session.desired_completion_tokens) + ")");
 		}
 
@@ -921,7 +902,7 @@ int main(int argc, char** argv) {
 	// ============================================================================
 	// Run Frontend (created earlier during tool initialization)
 	// ============================================================================
-	int result = frontend->run(backend, session);
+	int result = frontend->run(session);
 
 	// Clean shutdown for MPI
 	// Signal workers to exit via barrier, then all ranks exit together

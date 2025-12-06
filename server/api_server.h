@@ -16,7 +16,7 @@ public:
     ~APIServer();
 
     /// @brief Run the API server
-    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+    int run(Session& session) override;
 };
 
 /// @brief Run API server

@@ -14,10 +14,13 @@ public:
     ~CLIServer();
 
     /// @brief Initialize tools and RAG
-    void init(bool no_mcp = false, bool no_tools = false) override;
+    void init(Session& session,
+              bool no_mcp = false,
+              bool no_tools = false,
+              const std::string& provider_name = "") override;
 
     /// @brief Run the CLI server
-    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+    int run(Session& session) override;
 
     /// Tool management
     Tools tools;

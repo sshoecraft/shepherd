@@ -15,299 +15,12 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// Helper: Serialize common fields
-static void serialize_common(json& j, const ProviderConfig& cfg) {
-    j["type"] = cfg.type;
-    j["name"] = cfg.name;
-    j["model"] = cfg.model;
-    j["priority"] = cfg.priority;
-    j["context_size"] = cfg.context_size;
+// ============================================================================
+// New Provider class implementation
+// ============================================================================
 
-    // Rate limits
-    if (cfg.rate_limits.requests_per_second > 0 ||
-        cfg.rate_limits.requests_per_minute > 0 ||
-        cfg.rate_limits.tokens_per_minute > 0 ||
-        cfg.rate_limits.tokens_per_day > 0 ||
-        cfg.rate_limits.tokens_per_month > 0 ||
-        cfg.rate_limits.max_cost_per_month > 0) {
-
-        json rl;
-        if (cfg.rate_limits.requests_per_second > 0) rl["requests_per_second"] = cfg.rate_limits.requests_per_second;
-        if (cfg.rate_limits.requests_per_minute > 0) rl["requests_per_minute"] = cfg.rate_limits.requests_per_minute;
-        if (cfg.rate_limits.tokens_per_minute > 0) rl["tokens_per_minute"] = cfg.rate_limits.tokens_per_minute;
-        if (cfg.rate_limits.tokens_per_day > 0) rl["tokens_per_day"] = cfg.rate_limits.tokens_per_day;
-        if (cfg.rate_limits.tokens_per_month > 0) rl["tokens_per_month"] = cfg.rate_limits.tokens_per_month;
-        if (cfg.rate_limits.max_cost_per_month > 0) rl["max_cost_per_month"] = cfg.rate_limits.max_cost_per_month;
-        rl["warning_threshold"] = cfg.rate_limits.warning_threshold;
-        j["rate_limits"] = rl;
-    }
-
-    // Pricing
-    if (cfg.pricing.prompt_cost > 0 || cfg.pricing.completion_cost > 0 || cfg.pricing.dynamic) {
-        json p;
-        if (cfg.pricing.dynamic) {
-            p["mode"] = "dynamic";
-        } else {
-            p["mode"] = "static";
-            p["prompt_per_million"] = cfg.pricing.prompt_cost;
-            p["completion_per_million"] = cfg.pricing.completion_cost;
-        }
-        j["pricing"] = p;
-    }
-}
-
-// Helper: Deserialize common fields
-static void deserialize_common(ProviderConfig& cfg, const json& j) {
-    cfg.type = j.value("type", "");
-    cfg.name = j.value("name", "");
-    cfg.model = j.value("model", "");
-    cfg.priority = j.value("priority", 100);
-    // Clamp user-created provider priorities to 1-100 (0 is reserved for ephemeral _cmdline)
-    if (cfg.priority < 1 || cfg.priority > 100) {
-        cfg.priority = 100;
-    }
-    cfg.context_size = j.value("context_size", 0);
-
-    // Rate limits
-    if (j.contains("rate_limits")) {
-        const auto& rl = j["rate_limits"];
-        cfg.rate_limits.requests_per_second = rl.value("requests_per_second", 0);
-        cfg.rate_limits.requests_per_minute = rl.value("requests_per_minute", 0);
-        cfg.rate_limits.tokens_per_minute = rl.value("tokens_per_minute", 0);
-        cfg.rate_limits.tokens_per_day = rl.value("tokens_per_day", 0);
-        cfg.rate_limits.tokens_per_month = rl.value("tokens_per_month", 0);
-        cfg.rate_limits.max_cost_per_month = rl.value("max_cost_per_month", 0.0f);
-        cfg.rate_limits.warning_threshold = rl.value("warning_threshold", 0.85f);
-    }
-
-    // Pricing
-    if (j.contains("pricing")) {
-        const auto& p = j["pricing"];
-        std::string mode = p.value("mode", "static");
-        cfg.pricing.dynamic = (mode == "dynamic");
-        if (!cfg.pricing.dynamic) {
-            cfg.pricing.prompt_cost = p.value("prompt_per_million", 0.0f);
-            cfg.pricing.completion_cost = p.value("completion_per_million", 0.0f);
-        }
-    }
-}
-
-// LlamaProviderConfig serialization
-json LlamaProviderConfig::to_json() const {
-    json j;
-    serialize_common(j, *this);
-
-    j["model_path"] = model_path;
-    j["tp"] = tp;
-    j["pp"] = pp;
-    j["gpu_layers"] = gpu_layers;
-    j["temperature"] = temperature;
-    j["top_p"] = top_p;
-    j["top_k"] = top_k;
-    j["repeat_penalty"] = repeat_penalty;
-    j["n_batch"] = n_batch;
-    j["n_threads"] = n_threads;
-
-    return j;
-}
-
-LlamaProviderConfig LlamaProviderConfig::from_json(const json& j) {
-    LlamaProviderConfig cfg;
-    deserialize_common(cfg, j);
-
-    cfg.model_path = j.value("model_path", "~/models");
-    cfg.tp = j.value("tp", 1);
-    cfg.pp = j.value("pp", 1);
-    cfg.gpu_layers = j.value("gpu_layers", -1);
-    cfg.temperature = j.value("temperature", 0.7f);
-    cfg.top_p = j.value("top_p", 1.0f);
-    cfg.top_k = j.value("top_k", 40);
-    cfg.repeat_penalty = j.value("repeat_penalty", 1.1f);
-    cfg.n_batch = j.value("n_batch", 512);
-    cfg.n_threads = j.value("n_threads", 0);
-
-    return cfg;
-}
-
-// TensorRTProviderConfig serialization
-json TensorRTProviderConfig::to_json() const {
-    json j;
-    serialize_common(j, *this);
-
-    j["model_path"] = model_path;
-    j["tp"] = tp;
-    j["pp"] = pp;
-    j["gpu_id"] = gpu_id;
-    j["temperature"] = temperature;
-    j["top_p"] = top_p;
-    j["top_k"] = top_k;
-    j["repeat_penalty"] = repeat_penalty;
-    j["frequency_penalty"] = frequency_penalty;
-    j["presence_penalty"] = presence_penalty;
-
-    return j;
-}
-
-TensorRTProviderConfig TensorRTProviderConfig::from_json(const json& j) {
-    TensorRTProviderConfig cfg;
-    deserialize_common(cfg, j);
-
-    cfg.model_path = j.value("model_path", "~/models");
-    cfg.tp = j.value("tp", 1);
-    cfg.pp = j.value("pp", 1);
-    cfg.gpu_id = j.value("gpu_id", 0);
-    cfg.temperature = j.value("temperature", 0.7f);
-    cfg.top_p = j.value("top_p", 1.0f);
-    cfg.top_k = j.value("top_k", 40);
-    cfg.repeat_penalty = j.value("repeat_penalty", 1.1f);
-    cfg.frequency_penalty = j.value("frequency_penalty", 0.0f);
-    cfg.presence_penalty = j.value("presence_penalty", 0.0f);
-
-    return cfg;
-}
-
-// ApiProviderConfig serialization
-json ApiProviderConfig::to_json() const {
-    json j;
-    serialize_common(j, *this);
-
-    j["api_key"] = api_key;
-    if (!base_url.empty()) {
-        j["base_url"] = base_url;
-    }
-    j["temperature"] = temperature;
-    j["top_p"] = top_p;
-    if (top_k > 0) j["top_k"] = top_k;
-    if (frequency_penalty != 0.0f) j["frequency_penalty"] = frequency_penalty;
-    if (presence_penalty != 0.0f) j["presence_penalty"] = presence_penalty;
-    if (max_tokens > 0) j["max_tokens"] = max_tokens;
-    if (!stop_sequences.empty()) j["stop_sequences"] = stop_sequences;
-    if (!extra_headers.empty()) j["extra_headers"] = extra_headers;
-    if (!ssl_verify) j["ssl_verify"] = ssl_verify;  // Only write if false
-    if (!ca_bundle_path.empty()) j["ca_bundle_path"] = ca_bundle_path;
-
-    // OAuth 2.0 fields
-    if (!client_id.empty()) j["client_id"] = client_id;
-    if (!client_secret.empty()) j["client_secret"] = client_secret;
-    if (!token_url.empty()) j["token_url"] = token_url;
-    if (!token_scope.empty()) j["token_scope"] = token_scope;
-
-    // Azure OpenAI fields
-    if (!deployment_name.empty()) j["deployment_name"] = deployment_name;
-    if (!api_version.empty()) j["api_version"] = api_version;
-
-    return j;
-}
-
-ApiProviderConfig ApiProviderConfig::from_json(const json& j) {
-    ApiProviderConfig cfg;
-    deserialize_common(cfg, j);
-
-    cfg.api_key = j.value("api_key", "");
-    cfg.base_url = j.value("base_url", "");
-    cfg.temperature = j.value("temperature", 0.7f);
-    cfg.top_p = j.value("top_p", 1.0f);
-    cfg.top_k = j.value("top_k", 0);
-    cfg.frequency_penalty = j.value("frequency_penalty", 0.0f);
-    cfg.presence_penalty = j.value("presence_penalty", 0.0f);
-    cfg.max_tokens = j.value("max_tokens", 0);
-    if (j.contains("stop_sequences")) {
-        cfg.stop_sequences = j["stop_sequences"].get<std::vector<std::string>>();
-    }
-    if (j.contains("extra_headers")) {
-        cfg.extra_headers = j["extra_headers"].get<std::map<std::string, std::string>>();
-    }
-    cfg.ssl_verify = j.value("ssl_verify", true);
-    cfg.ca_bundle_path = j.value("ca_bundle_path", "");
-
-    // OAuth 2.0 fields
-    cfg.client_id = j.value("client_id", "");
-    cfg.client_secret = j.value("client_secret", "");
-    cfg.token_url = j.value("token_url", "");
-    cfg.token_scope = j.value("token_scope", "");
-
-    // Azure OpenAI fields
-    cfg.deployment_name = j.value("deployment_name", "");
-    cfg.api_version = j.value("api_version", "");
-
-    return cfg;
-}
-
-// OllamaProviderConfig serialization
-json OllamaProviderConfig::to_json() const {
-    json j;
-    serialize_common(j, *this);
-
-    j["base_url"] = base_url;
-    j["temperature"] = temperature;
-    j["top_p"] = top_p;
-    j["top_k"] = top_k;
-    j["repeat_penalty"] = repeat_penalty;
-    if (num_ctx > 0) j["num_ctx"] = num_ctx;
-    if (num_predict != -1) j["num_predict"] = num_predict;
-
-    return j;
-}
-
-OllamaProviderConfig OllamaProviderConfig::from_json(const json& j) {
-    OllamaProviderConfig cfg;
-    deserialize_common(cfg, j);
-
-    cfg.base_url = j.value("base_url", "http://localhost:11434");
-    cfg.temperature = j.value("temperature", 0.7f);
-    cfg.top_p = j.value("top_p", 1.0f);
-    cfg.top_k = j.value("top_k", 40);
-    cfg.repeat_penalty = j.value("repeat_penalty", 1.1f);
-    cfg.num_ctx = j.value("num_ctx", 0);
-    cfg.num_predict = j.value("num_predict", -1);
-
-    return cfg;
-}
-
-json CliProviderConfig::to_json() const {
-    json j;
-    serialize_common(j, *this);
-    j["base_url"] = base_url;
-    return j;
-}
-
-CliProviderConfig CliProviderConfig::from_json(const json& j) {
-    CliProviderConfig cfg;
-    deserialize_common(cfg, j);
-    cfg.base_url = j.value("base_url", "http://localhost:8000");
-    return cfg;
-}
-
-// ProviderConfig factory
-std::unique_ptr<ProviderConfig> ProviderConfig::from_json(const json& j) {
-    std::string type = j.value("type", "");
-
-    if (type == "llamacpp") {
-        return std::make_unique<LlamaProviderConfig>(LlamaProviderConfig::from_json(j));
-    }
-    else if (type == "tensorrt") {
-        return std::make_unique<TensorRTProviderConfig>(TensorRTProviderConfig::from_json(j));
-    }
-    else if (type == "openai" || type == "anthropic" || type == "gemini") {
-        return std::make_unique<ApiProviderConfig>(ApiProviderConfig::from_json(j));
-    }
-    else if (type == "ollama") {
-        return std::make_unique<OllamaProviderConfig>(OllamaProviderConfig::from_json(j));
-    }
-    else if (type == "cli") {
-        return std::make_unique<CliProviderConfig>(CliProviderConfig::from_json(j));
-    }
-
-    throw std::runtime_error("Unknown provider type: " + type);
-}
-
-// Provider implementation
-Provider::Provider() {
-    providers_dir = get_providers_dir();
-    load_providers();
-}
-
-Provider::~Provider() {
+bool Provider::is_api() const {
+    return type == "openai" || type == "anthropic" || type == "gemini" || type == "ollama";
 }
 
 std::string Provider::get_providers_dir() {
@@ -321,13 +34,15 @@ std::string Provider::get_providers_dir() {
     return config_home + "/shepherd/providers";
 }
 
-void Provider::load_providers() {
-    providers.clear();
+std::vector<Provider> Provider::load_providers() {
+    std::vector<Provider> result;
+    std::string providers_dir = get_providers_dir();
 
-    // Create directory if it doesn't exist
-    fs::create_directories(providers_dir);
+    if (!fs::exists(providers_dir)) {
+        fs::create_directories(providers_dir);
+        return result;
+    }
 
-    // Load all JSON files from providers directory
     for (const auto& entry : fs::directory_iterator(providers_dir)) {
         if (entry.path().extension() == ".json") {
             try {
@@ -335,651 +50,344 @@ void Provider::load_providers() {
                 json j;
                 file >> j;
 
-                auto config = ProviderConfig::from_json(j);
-                if (config->name.empty()) {
-                    // Use filename without extension as name
-                    config->name = entry.path().stem().string();
+                Provider p = Provider::from_json(j);
+                if (p.name.empty()) {
+                    p.name = entry.path().stem().string();
                 }
-
-                std::string name = config->name;
-                providers[name] = std::move(config);
-                LOG_DEBUG("Loaded provider: " + name);
-
+                result.push_back(std::move(p));
             } catch (const std::exception& e) {
-                LOG_ERROR("Failed to load provider from " + entry.path().string() + ": " + e.what());
+                LOG_ERROR("Failed to load provider " + entry.path().string() + ": " + e.what());
             }
         }
     }
 
-    // current_provider will be set at startup by priority selection
-    // Not loaded from config file
+    // Sort by priority (lower = higher priority)
+    std::sort(result.begin(), result.end(), [](const Provider& a, const Provider& b) {
+        return a.priority < b.priority;
+    });
+
+    return result;
 }
 
-void Provider::save_provider(const ProviderConfig& config) {
-    if (config.name.empty()) {
-        throw std::runtime_error("Provider name cannot be empty");
+Provider Provider::from_json(const json& j) {
+    Provider p;
+
+    p.name = j.value("name", "");
+    p.type = j.value("type", "");
+    p.model = j.value("model", "");
+    p.priority = j.value("priority", 100);
+    p.context_size = j.value("context_size", 0);
+
+    // Rate limits
+    if (j.contains("rate_limits")) {
+        auto& rl = j["rate_limits"];
+        p.rate_limits.requests_per_second = rl.value("requests_per_second", 0);
+        p.rate_limits.requests_per_minute = rl.value("requests_per_minute", 0);
+        p.rate_limits.tokens_per_minute = rl.value("tokens_per_minute", 0);
+        p.rate_limits.tokens_per_day = rl.value("tokens_per_day", 0);
+        p.rate_limits.tokens_per_month = rl.value("tokens_per_month", 0);
+        p.rate_limits.max_cost_per_month = rl.value("max_cost_per_month", 0.0f);
+        p.rate_limits.warning_threshold = rl.value("warning_threshold", 0.85f);
     }
 
-    fs::create_directories(providers_dir);
-
-    std::string filename = get_provider_file(config.name);
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to create provider file: " + filename);
+    // Pricing
+    if (j.contains("pricing")) {
+        auto& pr = j["pricing"];
+        p.pricing.prompt_cost = pr.value("prompt_per_million", 0.0f);
+        p.pricing.completion_cost = pr.value("completion_per_million", 0.0f);
+        p.pricing.dynamic = pr.value("dynamic", false);
     }
 
-    file << config.to_json().dump(4) << std::endl;
-    LOG_INFO("Saved provider: " + config.name);
+    // Local backend fields
+    p.model_path = j.value("model_path", "~/models");
+    p.tp = j.value("tp", 1);
+    p.pp = j.value("pp", 1);
+    p.gpu_layers = j.value("gpu_layers", -1);
+    p.gpu_id = j.value("gpu_id", 0);
+    p.n_batch = j.value("n_batch", 512);
+    p.n_threads = j.value("n_threads", 0);
 
-    // Reload providers to update in-memory map with correct type
-    load_providers();
+    // Sampling parameters
+    p.temperature = j.value("temperature", 0.7f);
+    p.top_p = j.value("top_p", 1.0f);
+    p.top_k = j.value("top_k", 40);
+    p.repeat_penalty = j.value("repeat_penalty", 1.1f);
+    p.frequency_penalty = j.value("frequency_penalty", 0.0f);
+    p.presence_penalty = j.value("presence_penalty", 0.0f);
+    p.max_tokens = j.value("max_tokens", 0);
+
+    if (j.contains("stop_sequences")) {
+        p.stop_sequences = j["stop_sequences"].get<std::vector<std::string>>();
+    }
+
+    // API fields
+    p.api_key = j.value("api_key", "");
+    p.base_url = j.value("base_url", "");
+    if (j.contains("extra_headers")) {
+        p.extra_headers = j["extra_headers"].get<std::map<std::string, std::string>>();
+    }
+    p.ssl_verify = j.value("ssl_verify", true);
+    p.ca_bundle_path = j.value("ca_bundle_path", "");
+
+    // OAuth
+    p.client_id = j.value("client_id", "");
+    p.client_secret = j.value("client_secret", "");
+    p.token_url = j.value("token_url", "");
+    p.token_scope = j.value("token_scope", "");
+
+    // Azure
+    p.deployment_name = j.value("deployment_name", "");
+    p.api_version = j.value("api_version", "");
+
+    // Ollama
+    p.num_ctx = j.value("num_ctx", 0);
+    p.num_predict = j.value("num_predict", -1);
+
+    return p;
 }
 
-void Provider::add_ephemeral_provider(std::unique_ptr<ProviderConfig> config) {
-    if (!config || config->name.empty()) {
-        throw std::runtime_error("Ephemeral provider must have a name");
-    }
-    LOG_INFO("Adding ephemeral provider: " + config->name);
-    providers[config->name] = std::move(config);
-}
+json Provider::to_json() const {
+    json j;
 
-void Provider::remove_provider(const std::string& name) {
-    std::string filename = get_provider_file(name);
-    if (fs::exists(filename)) {
-        fs::remove(filename);
-        LOG_INFO("Removed provider: " + name);
-    }
+    j["name"] = name;
+    j["type"] = type;
+    j["model"] = model;
+    j["priority"] = priority;
+    if (context_size > 0) j["context_size"] = context_size;
 
-    providers.erase(name);
-
-    if (current_provider == name) {
-        current_provider.clear();
-    }
-}
-
-ProviderConfig* Provider::get_provider(const std::string& name) {
-    auto it = providers.find(name);
-    if (it != providers.end()) {
-        return it->second.get();
-    }
-    return nullptr;
-}
-
-std::vector<std::string> Provider::list_providers() const {
-    std::vector<std::pair<int, std::string>> sorted_providers;
-    for (const auto& [name, config] : providers) {
-        sorted_providers.push_back({config->priority, name});
+    // Rate limits
+    if (rate_limits.requests_per_second > 0 || rate_limits.requests_per_minute > 0 ||
+        rate_limits.tokens_per_minute > 0 || rate_limits.tokens_per_day > 0 ||
+        rate_limits.tokens_per_month > 0 || rate_limits.max_cost_per_month > 0) {
+        json rl;
+        if (rate_limits.requests_per_second > 0) rl["requests_per_second"] = rate_limits.requests_per_second;
+        if (rate_limits.requests_per_minute > 0) rl["requests_per_minute"] = rate_limits.requests_per_minute;
+        if (rate_limits.tokens_per_minute > 0) rl["tokens_per_minute"] = rate_limits.tokens_per_minute;
+        if (rate_limits.tokens_per_day > 0) rl["tokens_per_day"] = rate_limits.tokens_per_day;
+        if (rate_limits.tokens_per_month > 0) rl["tokens_per_month"] = rate_limits.tokens_per_month;
+        if (rate_limits.max_cost_per_month > 0) rl["max_cost_per_month"] = rate_limits.max_cost_per_month;
+        rl["warning_threshold"] = rate_limits.warning_threshold;
+        j["rate_limits"] = rl;
     }
 
-    // Sort by priority (lower number = higher priority), then alphabetically
-    std::sort(sorted_providers.begin(), sorted_providers.end());
-
-    std::vector<std::string> names;
-    for (const auto& [priority, name] : sorted_providers) {
-        names.push_back(name);
-    }
-    return names;
-}
-
-void Provider::set_current_provider(const std::string& name) {
-    if (providers.find(name) == providers.end()) {
-        throw std::runtime_error("Provider not found: " + name);
+    // Pricing
+    if (pricing.prompt_cost > 0 || pricing.completion_cost > 0 || pricing.dynamic) {
+        json pr;
+        pr["prompt_per_million"] = pricing.prompt_cost;
+        pr["completion_per_million"] = pricing.completion_cost;
+        pr["dynamic"] = pricing.dynamic;
+        j["pricing"] = pr;
     }
 
-    current_provider = name;
-    // current_provider is runtime state only, not persisted
-}
-
-std::optional<std::string> Provider::get_highest_priority_provider() const {
-    if (providers.empty()) {
-        return std::nullopt;
-    }
-
-    // Build sorted list of providers by priority
-    std::vector<std::pair<int, std::string>> sorted_providers;
-    for (const auto& [name, config] : providers) {
-        sorted_providers.push_back({config->priority, name});
-    }
-    std::sort(sorted_providers.begin(), sorted_providers.end());
-
-    // Find first available (not rate-limited) provider
-    for (const auto& [priority, name] : sorted_providers) {
-        if (!is_rate_limited(name)) {
-            return name;
+    // Type-specific fields
+    if (type == "llamacpp" || type == "tensorrt") {
+        j["model_path"] = model_path;
+        j["tp"] = tp;
+        j["pp"] = pp;
+        j["gpu_layers"] = gpu_layers;
+        if (type == "tensorrt") j["gpu_id"] = gpu_id;
+        if (type == "llamacpp") {
+            j["n_batch"] = n_batch;
+            if (n_threads > 0) j["n_threads"] = n_threads;
         }
     }
 
-    return std::nullopt;  // All providers are rate limited
+    if (is_api()) {
+        if (!api_key.empty()) j["api_key"] = api_key;
+        if (!base_url.empty()) j["base_url"] = base_url;
+        if (!extra_headers.empty()) j["extra_headers"] = extra_headers;
+        if (!ssl_verify) j["ssl_verify"] = ssl_verify;
+        if (!ca_bundle_path.empty()) j["ca_bundle_path"] = ca_bundle_path;
+
+        if (!client_id.empty()) j["client_id"] = client_id;
+        if (!client_secret.empty()) j["client_secret"] = client_secret;
+        if (!token_url.empty()) j["token_url"] = token_url;
+        if (!token_scope.empty()) j["token_scope"] = token_scope;
+
+        if (!deployment_name.empty()) j["deployment_name"] = deployment_name;
+        if (!api_version.empty()) j["api_version"] = api_version;
+    }
+
+    if (type == "ollama") {
+        if (num_ctx > 0) j["num_ctx"] = num_ctx;
+        if (num_predict != -1) j["num_predict"] = num_predict;
+    }
+
+    // Sampling (for backends that use it)
+    j["temperature"] = temperature;
+    j["top_p"] = top_p;
+    j["top_k"] = top_k;
+    j["repeat_penalty"] = repeat_penalty;
+    if (frequency_penalty != 0.0f) j["frequency_penalty"] = frequency_penalty;
+    if (presence_penalty != 0.0f) j["presence_penalty"] = presence_penalty;
+    if (max_tokens > 0) j["max_tokens"] = max_tokens;
+    if (!stop_sequences.empty()) j["stop_sequences"] = stop_sequences;
+
+    return j;
 }
 
-std::optional<std::string> Provider::get_next_provider() const {
-    if (providers.empty()) {
-        return std::nullopt;
-    }
-
-    // Build ordered list of providers
-    std::vector<std::string> provider_names;
-    for (const auto& [name, config] : providers) {
-        provider_names.push_back(name);
-    }
-    std::sort(provider_names.begin(), provider_names.end());
-
-    // Find current provider index
-    size_t current_idx = 0;
-    if (!current_provider.empty()) {
-        auto it = std::find(provider_names.begin(), provider_names.end(), current_provider);
-        if (it != provider_names.end()) {
-            current_idx = std::distance(provider_names.begin(), it);
-        }
-    }
-
-    // Try each provider starting from next index
-    size_t attempts = 0;
-    size_t idx = (current_idx + 1) % provider_names.size();
-
-    while (attempts < provider_names.size()) {
-        const std::string& name = provider_names[idx];
-        if (!is_rate_limited(name)) {
-            return name;
-        }
-        idx = (idx + 1) % provider_names.size();
-        attempts++;
-    }
-
-    return std::nullopt;  // All providers are rate limited
-}
-
-bool Provider::is_rate_limited(const std::string& name) const {
-    auto it = providers.find(name);
-    if (it == providers.end()) {
-        return false;
-    }
-
-    return check_rate_limits(*it->second);
-}
-
-std::string Provider::get_provider_file(const std::string& name) const {
-    // Sanitize name for filesystem
-    std::string safe_name = name;
-    std::replace(safe_name.begin(), safe_name.end(), '/', '-');
-    std::replace(safe_name.begin(), safe_name.end(), '\\', '-');
-    return providers_dir + "/" + safe_name + ".json";
-}
-
-bool Provider::check_rate_limits(const ProviderConfig& config) const {
-    // Rate limit checking implementation
-    // Usage tracking files would be at: ~/.local/share/shepherd/usage/<provider-name>.json
-    // For now, providers are never considered rate limited
-    // This allows all configured providers to be used without implementing
-    // complex usage file I/O. Can be enhanced later without API changes.
-    return false;
-}
-
-bool Provider::interactive_edit(ProviderConfig& config) {
-    std::cout << "\n=== Provider Configuration ===\n\n";
-
-    std::string input;
-
-    // Edit common fields
-    std::cout << "Provider name [" << config.name << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) config.name = input;
-
-    if (config.name.empty()) {
-        std::cout << "Error: Provider name is required\n";
-        return false;
-    }
-
-    std::cout << "Backend type [" << config.type << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) config.type = input;
-
-    std::cout << "Model [" << config.model << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) config.model = input;
-
-    std::cout << "Priority (1-100, lower = higher priority) [" << config.priority << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) {
-        config.priority = std::stoi(input);
-        if (config.priority < 1 || config.priority > 100) {
-            config.priority = 100;
-        }
-    }
-
-    std::cout << "Context size (0=auto) [" << config.context_size << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) config.context_size = std::stoi(input);
-
-    // Dispatch to type-specific editor
-    // Note: order matters for inheritance - check derived classes before base classes
-    bool is_api = false;
-    if (auto* llama = dynamic_cast<LlamaProviderConfig*>(&config)) {
-        if (!edit_llama_config(*llama)) return false;
-    }
-    else if (auto* tensorrt = dynamic_cast<TensorRTProviderConfig*>(&config)) {
-        if (!edit_tensorrt_config(*tensorrt)) return false;
-    }
-    else if (auto* ollama = dynamic_cast<OllamaProviderConfig*>(&config)) {
-        if (!edit_ollama_config(*ollama)) return false;
-        is_api = true;
-    }
-    else if (auto* cli = dynamic_cast<CliProviderConfig*>(&config)) {
-        if (!edit_cli_config(*cli)) return false;
-    }
-    else if (auto* api = dynamic_cast<ApiProviderConfig*>(&config)) {
-        if (!edit_api_config(*api)) return false;
-        is_api = true;
-    }
-
-    // Rate limits and pricing only for API providers
-    if (is_api) {
-        // Rate limits
-        std::cout << "\n--- Rate Limits (press Enter to skip) ---\n";
-        std::cout << "Monthly token limit [" << config.rate_limits.tokens_per_month << "]: ";
-        std::getline(std::cin, input);
-        if (!input.empty()) config.rate_limits.tokens_per_month = std::stoi(input);
-
-        std::cout << "Monthly cost limit ($) [" << config.rate_limits.max_cost_per_month << "]: ";
-        std::getline(std::cin, input);
-        if (!input.empty()) config.rate_limits.max_cost_per_month = std::stof(input);
-
-        // Pricing
-        std::cout << "\n--- Pricing ---\n";
-        std::cout << "Use dynamic pricing? (y/n) [" << (config.pricing.dynamic ? "y" : "n") << "]: ";
-        std::getline(std::cin, input);
-        if (!input.empty()) {
-            config.pricing.dynamic = (input[0] == 'y' || input[0] == 'Y');
-        }
-
-        if (!config.pricing.dynamic) {
-            std::cout << "Prompt cost per million tokens [" << config.pricing.prompt_cost << "]: ";
-            std::getline(std::cin, input);
-            if (!input.empty()) config.pricing.prompt_cost = std::stof(input);
-
-            std::cout << "Completion cost per million tokens [" << config.pricing.completion_cost << "]: ";
-            std::getline(std::cin, input);
-            if (!input.empty()) config.pricing.completion_cost = std::stof(input);
-        }
-    }
-
-    // Confirm
-    std::cout << "\nSave configuration? (y/n): ";
-    std::getline(std::cin, input);
-    return !input.empty() && (input[0] == 'y' || input[0] == 'Y');
-}
-
-bool Provider::edit_llama_config(LlamaProviderConfig& cfg) {
-    std::cout << "\n--- Llama.cpp Settings ---\n";
-    std::string input;
-
-    std::cout << "Model path [" << cfg.model_path << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.model_path = input;
-
-    std::cout << "Tensor parallelism (tp) [" << cfg.tp << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.tp = std::stoi(input);
-
-    std::cout << "Pipeline parallelism (pp) [" << cfg.pp << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.pp = std::stoi(input);
-
-    std::cout << "GPU layers (-1=auto, 0=CPU) [" << cfg.gpu_layers << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.gpu_layers = std::stoi(input);
-
-    std::cout << "Context size (0=auto) [" << cfg.context_size << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.context_size = std::stoi(input);
-
-    std::cout << "Temperature [" << cfg.temperature << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.temperature = std::stof(input);
-
-    return true;
-}
-
-bool Provider::edit_tensorrt_config(TensorRTProviderConfig& cfg) {
-    std::cout << "\n--- TensorRT-LLM Settings ---\n";
-    std::string input;
-
-    std::cout << "Model path [" << cfg.model_path << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.model_path = input;
-
-    std::cout << "Tensor parallelism (tp) [" << cfg.tp << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.tp = std::stoi(input);
-
-    std::cout << "Pipeline parallelism (pp) [" << cfg.pp << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.pp = std::stoi(input);
-
-    std::cout << "GPU ID [" << cfg.gpu_id << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.gpu_id = std::stoi(input);
-
-    std::cout << "Context size (0=auto) [" << cfg.context_size << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.context_size = std::stoi(input);
-
-    std::cout << "Temperature [" << cfg.temperature << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.temperature = std::stof(input);
-
-    return true;
-}
-
-bool Provider::edit_api_config(ApiProviderConfig& cfg) {
-    std::cout << "\n--- API Settings ---\n";
-    std::string input;
-
-    std::cout << "API Key [" << (cfg.api_key.empty() ? "not set" : "****") << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.api_key = input;
-
-    std::cout << "Base URL (leave empty for default) [" << cfg.base_url << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.base_url = input;
-
-    std::cout << "Temperature [" << cfg.temperature << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.temperature = std::stof(input);
-
-    std::cout << "Max tokens (0=auto) [" << cfg.max_tokens << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.max_tokens = std::stoi(input);
-
-    return true;
-}
-
-bool Provider::edit_ollama_config(OllamaProviderConfig& cfg) {
-    std::cout << "\n--- Ollama Settings ---\n";
-    std::string input;
-
-    std::cout << "Base URL [" << cfg.base_url << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.base_url = input;
-
-    std::cout << "Temperature [" << cfg.temperature << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.temperature = std::stof(input);
-
-    std::cout << "Context window (0=auto) [" << cfg.num_ctx << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.num_ctx = std::stoi(input);
-
-    return true;
-}
-
-bool Provider::edit_cli_config(CliProviderConfig& cfg) {
-    std::cout << "\n--- CLI Server Settings ---\n";
-    std::string input;
-
-    std::cout << "Server URL [" << cfg.base_url << "]: ";
-    std::getline(std::cin, input);
-    if (!input.empty()) cfg.base_url = input;
-
-    return true;
-}
-
-std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string& type, const std::vector<std::string>& args) {
-    std::unique_ptr<ProviderConfig> config;
-
-    // Create appropriate config type
-    if (type == "llamacpp") {
-        config = std::make_unique<LlamaProviderConfig>();
-    }
-    else if (type == "tensorrt") {
-        config = std::make_unique<TensorRTProviderConfig>();
-    }
-    else if (type == "openai" || type == "anthropic" || type == "gemini") {
-        config = std::make_unique<ApiProviderConfig>();
-    }
-    else if (type == "ollama") {
-        config = std::make_unique<OllamaProviderConfig>();
-    }
-    else if (type == "cli") {
-        config = std::make_unique<CliProviderConfig>();
-    }
-    else {
-        throw std::runtime_error("Unknown provider type: " + type);
-    }
-
-    config->type = type;
-
-    // Parse common arguments
-    for (size_t i = 0; i < args.size(); i++) {
-        const std::string& arg = args[i];
-
-        if ((arg == "--name" || arg == "-n") && i + 1 < args.size()) {
-            config->name = args[++i];
-        }
-        else if ((arg == "--model" || arg == "-m") && i + 1 < args.size()) {
-            config->model = args[++i];
-        }
-        else if ((arg == "--priority" || arg == "-p") && i + 1 < args.size()) {
-            config->priority = std::stoi(args[++i]);
-            if (config->priority < 1 || config->priority > 100) {
-                config->priority = 100;
-            }
-        }
-        else if (arg == "--tokens-per-month" && i + 1 < args.size()) {
-            config->rate_limits.tokens_per_month = std::stoi(args[++i]);
-        }
-        else if (arg == "--max-cost" && i + 1 < args.size()) {
-            config->rate_limits.max_cost_per_month = std::stof(args[++i]);
-        }
-        else if (arg == "--dynamic-pricing") {
-            config->pricing.dynamic = true;
-        }
-        else if (arg == "--prompt-cost" && i + 1 < args.size()) {
-            config->pricing.prompt_cost = std::stof(args[++i]);
-        }
-        else if (arg == "--completion-cost" && i + 1 < args.size()) {
-            config->pricing.completion_cost = std::stof(args[++i]);
-        }
-    }
-
-    // Parse type-specific arguments
-    if (auto* llama = dynamic_cast<LlamaProviderConfig*>(config.get())) {
-        for (size_t i = 0; i < args.size(); i++) {
-            const std::string& arg = args[i];
-            if (arg == "--tp" && i + 1 < args.size()) llama->tp = std::stoi(args[++i]);
-            else if (arg == "--pp" && i + 1 < args.size()) llama->pp = std::stoi(args[++i]);
-            else if (arg == "--gpu-layers" && i + 1 < args.size()) llama->gpu_layers = std::stoi(args[++i]);
-        }
-    }
-    else if (auto* api = dynamic_cast<ApiProviderConfig*>(config.get())) {
-        for (size_t i = 0; i < args.size(); i++) {
-            const std::string& arg = args[i];
-            if ((arg == "--key" || arg == "--api-key" || arg == "-k") && i + 1 < args.size()) {
-                api->api_key = args[++i];
-            }
-            else if ((arg == "--base-url" || arg == "--url" || arg == "-u") && i + 1 < args.size()) {
-                api->base_url = args[++i];
-            }
-        }
-    }
-
-    return config;
-}
-
-std::unique_ptr<Backend> Provider::connect_provider(const std::string& name, Session& session, size_t context_size) {
-    auto provider_config = get_provider(name);
-    if (!provider_config) {
-        LOG_ERROR("Provider '" + name + "' not found");
-        return nullptr;
-    }
-
-    // Use provider's context_size if set, otherwise use the passed-in value
-    size_t effective_context_size = (provider_config->context_size > 0)
-        ? provider_config->context_size
-        : context_size;
-
-    try {
-        LOG_INFO("Connecting to provider: " + name + " (priority: " + std::to_string(provider_config->priority) + ")");
-        auto backend = BackendFactory::create_from_provider(provider_config, effective_context_size);
-        if (!backend) {
-            LOG_ERROR("Failed to create backend for provider '" + name + "'");
-            return nullptr;
-        }
-
-        backend->initialize(session);
-        current_provider = name;
-        LOG_INFO("Successfully connected to provider: " + name);
-        return backend;
-
-    } catch (const std::exception& e) {
-        LOG_ERROR("Provider '" + name + "' failed: " + std::string(e.what()));
-        return nullptr;
-    }
-}
-
-std::unique_ptr<Backend> Provider::connect_next_provider(Session& session, size_t context_size) {
-    auto provider_names = list_providers();
-    if (provider_names.empty()) {
-        LOG_ERROR("No providers configured");
-        return nullptr;
-    }
-
-    for (const auto& name : provider_names) {
-        auto backend = connect_provider(name, session, context_size);
-        if (backend) {
-            return backend;
-        }
-        // Failed - check if we should try next
-        if (!config->auto_provider) {
-            LOG_INFO("auto_provider disabled, not trying other providers");
-            return nullptr;
-        }
-    }
-
-    LOG_ERROR("All providers failed to connect");
-    return nullptr;
-}
-
-std::unique_ptr<ProviderConfig> create_provider_from_config() {
+Provider Provider::from_config() {
     extern std::unique_ptr<Config> config;
 
-    std::string backend_type = config->backend;
+    Provider p;
+    p.type = config->backend;
+    p.model = config->model;
+    p.model_path = config->model_path;
+    p.api_key = config->key;
+    p.base_url = config->api_base;
+    p.context_size = config->context_size;
 
-    // Create appropriate ProviderConfig subclass based on backend type
-    if (backend_type == "llamacpp") {
-        auto cfg = std::make_unique<LlamaProviderConfig>();
-        cfg->type = "llamacpp";
-        cfg->model = config->model;
-        cfg->model_path = config->model_path;
-        cfg->context_size = config->context_size;
+    // Pull additional settings from config->json if present
+    if (config->json.contains("temperature")) p.temperature = config->json["temperature"];
+    if (config->json.contains("top_p")) p.top_p = config->json["top_p"];
+    if (config->json.contains("top_k")) p.top_k = config->json["top_k"];
+    if (config->json.contains("repeat_penalty")) p.repeat_penalty = config->json["repeat_penalty"];
+    if (config->json.contains("frequency_penalty")) p.frequency_penalty = config->json["frequency_penalty"];
+    if (config->json.contains("presence_penalty")) p.presence_penalty = config->json["presence_penalty"];
+    if (config->json.contains("max_tokens")) p.max_tokens = config->json["max_tokens"];
+    if (config->json.contains("tp")) p.tp = config->json["tp"];
+    if (config->json.contains("pp")) p.pp = config->json["pp"];
+    if (config->json.contains("gpu_layers")) p.gpu_layers = config->json["gpu_layers"];
+    if (config->json.contains("gpu_id")) p.gpu_id = config->json["gpu_id"];
+    if (config->json.contains("n_batch")) p.n_batch = config->json["n_batch"];
+    if (config->json.contains("n_threads")) p.n_threads = config->json["n_threads"];
+    if (config->json.contains("num_ctx")) p.num_ctx = config->json["num_ctx"];
+    if (config->json.contains("num_predict")) p.num_predict = config->json["num_predict"];
 
-        // Copy settings from config->json if present
-        if (config->json.contains("tp")) cfg->tp = config->json["tp"];
-        if (config->json.contains("pp")) cfg->pp = config->json["pp"];
-        if (config->json.contains("gpu_layers")) cfg->gpu_layers = config->json["gpu_layers"];
-        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
-        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
-        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
-        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
-        if (config->json.contains("n_batch")) cfg->n_batch = config->json["n_batch"];
-        if (config->json.contains("n_threads")) cfg->n_threads = config->json["n_threads"];
+    return p;
+}
 
-        return cfg;
+void Provider::save() const {
+    std::string providers_dir = get_providers_dir();
+    fs::create_directories(providers_dir);
+
+    std::string filename = providers_dir + "/" + name + ".json";
+    std::ofstream file(filename);
+    if (!file) {
+        throw std::runtime_error("Failed to open provider file for writing: " + filename);
     }
-    else if (backend_type == "tensorrt") {
-        auto cfg = std::make_unique<TensorRTProviderConfig>();
-        cfg->type = "tensorrt";
-        cfg->model = config->model;
-        cfg->model_path = config->model_path;
-        cfg->context_size = config->context_size;
 
-        if (config->json.contains("tp")) cfg->tp = config->json["tp"];
-        if (config->json.contains("pp")) cfg->pp = config->json["pp"];
-        if (config->json.contains("gpu_id")) cfg->gpu_id = config->json["gpu_id"];
-        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
-        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
-        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
-        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
+    file << to_json().dump(4) << std::endl;
+}
 
-        return cfg;
+void Provider::remove(const std::string& name) {
+    std::string providers_dir = get_providers_dir();
+    std::string filename = providers_dir + "/" + name + ".json";
+
+    if (fs::exists(filename)) {
+        fs::remove(filename);
     }
-    else if (backend_type == "ollama") {
-        auto cfg = std::make_unique<OllamaProviderConfig>();
-        cfg->type = "ollama";
-        cfg->model = config->model;
-        cfg->context_size = config->context_size;
-        if (!config->api_base.empty()) cfg->base_url = config->api_base;
+}
 
-        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
-        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
-        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
-        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
-        if (config->json.contains("num_ctx")) cfg->num_ctx = config->json["num_ctx"];
-        if (config->json.contains("num_predict")) cfg->num_predict = config->json["num_predict"];
+std::unique_ptr<Backend> Provider::connect(Session& session) {
+    extern std::unique_ptr<Config> config;
 
-        return cfg;
+    LOG_INFO("Connecting to provider: " + name + " (type: " + type + ")");
+
+    // Print loading message (not for mpirun children)
+    if (!getenv("OMPI_COMM_WORLD_SIZE")) {
+        std::cerr << "Loading provider: " << name << std::endl;
     }
-    else if (backend_type == "cli") {
-        auto cfg = std::make_unique<CliProviderConfig>();
-        cfg->type = "cli";
-        if (!config->api_base.empty()) cfg->base_url = config->api_base;
 
-        return cfg;
+    // Set config globals from this provider
+    config->model = model;
+    config->backend = type;
+
+    if (is_api()) {
+        config->key = api_key;
+        config->api_base = base_url;
+        config->json["temperature"] = temperature;
+        config->json["top_p"] = top_p;
+        if (top_k > 0) config->json["top_k"] = top_k;
+        if (frequency_penalty != 0.0f) config->json["frequency_penalty"] = frequency_penalty;
+        if (presence_penalty != 0.0f) config->json["presence_penalty"] = presence_penalty;
+        if (max_tokens > 0) config->json["max_tokens"] = max_tokens;
+        config->json["ssl_verify"] = ssl_verify;
+        if (!ca_bundle_path.empty()) config->json["ca_bundle_path"] = ca_bundle_path;
+        if (!client_id.empty()) config->json["client_id"] = client_id;
+        if (!client_secret.empty()) config->json["client_secret"] = client_secret;
+        if (!token_url.empty()) config->json["token_url"] = token_url;
+        if (!token_scope.empty()) config->json["token_scope"] = token_scope;
+        if (!deployment_name.empty()) config->json["deployment_name"] = deployment_name;
+        if (!api_version.empty()) config->json["api_version"] = api_version;
+    } else if (type == "llamacpp") {
+        config->model_path = model_path;
+        config->json["tp"] = tp;
+        config->json["pp"] = pp;
+        config->json["gpu_layers"] = gpu_layers;
+        config->json["temperature"] = temperature;
+        config->json["top_p"] = top_p;
+        config->json["top_k"] = top_k;
+        config->json["repeat_penalty"] = repeat_penalty;
+        config->json["n_batch"] = n_batch;
+        if (n_threads > 0) config->json["n_threads"] = n_threads;
+    } else if (type == "tensorrt") {
+        config->model_path = model_path;
+        config->json["tp"] = tp;
+        config->json["pp"] = pp;
+        config->json["gpu_id"] = gpu_id;
+        config->json["temperature"] = temperature;
+        config->json["top_p"] = top_p;
+        config->json["top_k"] = top_k;
+        config->json["repeat_penalty"] = repeat_penalty;
+        config->json["frequency_penalty"] = frequency_penalty;
+        config->json["presence_penalty"] = presence_penalty;
+    } else if (type == "ollama") {
+        config->api_base = base_url.empty() ? "http://localhost:11434" : base_url;
+        config->json["temperature"] = temperature;
+        config->json["top_p"] = top_p;
+        config->json["top_k"] = top_k;
+        config->json["repeat_penalty"] = repeat_penalty;
+        if (num_ctx > 0) config->json["num_ctx"] = num_ctx;
+        if (num_predict != -1) config->json["num_predict"] = num_predict;
+    } else if (type == "cli") {
+        config->api_base = base_url.empty() ? "http://localhost:8000" : base_url;
     }
-    else {
-        // Other API backends: openai, anthropic, gemini
-        auto cfg = std::make_unique<ApiProviderConfig>();
-        cfg->type = backend_type;
-        cfg->model = config->model;
-        cfg->api_key = config->key;
-        cfg->base_url = config->api_base;
-        cfg->context_size = config->context_size;
 
-        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
-        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
-        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
-        if (config->json.contains("frequency_penalty")) cfg->frequency_penalty = config->json["frequency_penalty"];
-        if (config->json.contains("presence_penalty")) cfg->presence_penalty = config->json["presence_penalty"];
-        if (config->json.contains("max_tokens")) cfg->max_tokens = config->json["max_tokens"];
-        if (config->json.contains("ssl_verify")) cfg->ssl_verify = config->json["ssl_verify"];
-        if (config->json.contains("ca_bundle_path")) cfg->ca_bundle_path = config->json["ca_bundle_path"];
+    // Create and initialize backend
+    size_t ctx = (context_size > 0) ? context_size : config->context_size;
+    auto backend = BackendFactory::create_backend(type, ctx);
 
-        // OAuth
-        if (config->json.contains("client_id")) cfg->client_id = config->json["client_id"];
-        if (config->json.contains("client_secret")) cfg->client_secret = config->json["client_secret"];
-        if (config->json.contains("token_url")) cfg->token_url = config->json["token_url"];
-        if (config->json.contains("token_scope")) cfg->token_scope = config->json["token_scope"];
-
-        // Azure
-        if (config->json.contains("deployment_name")) cfg->deployment_name = config->json["deployment_name"];
-        if (config->json.contains("api_version")) cfg->api_version = config->json["api_version"];
-
-        return cfg;
+    if (backend) {
+        backend->initialize(session);
     }
+
+    return backend;
 }
 
 // Common provider command implementation
 int handle_provider_args(const std::vector<std::string>& args,
                          std::unique_ptr<Backend>* backend,
-                         Session* session) {
-	Provider provider_manager;
-	provider_manager.load_providers();
+                         Session* session,
+                         std::vector<Provider>* providers_ptr,
+                         std::string* current_provider) {
+	// Load providers if not passed in
+	std::vector<Provider> local_providers;
+	std::vector<Provider>& providers = providers_ptr ? *providers_ptr : local_providers;
+	if (!providers_ptr) {
+		local_providers = Provider::load_providers();
+	}
+
+	// Helper to find provider by name
+	auto find_provider = [&providers](const std::string& name) -> Provider* {
+		for (auto& p : providers) {
+			if (p.name == name) return &p;
+		}
+		return nullptr;
+	};
 
 	// No args shows current provider (interactive mode only)
 	if (args.empty()) {
-		std::string current = provider_manager.get_current_provider();
-		if (current.empty()) {
+		if (!current_provider || current_provider->empty()) {
 			std::cout << "No provider configured\n";
 		} else {
-			auto prov = provider_manager.get_provider(current);
+			auto* prov = find_provider(*current_provider);
 			if (prov) {
 				std::cout << "Current provider: " << prov->name << "\n";
 				std::cout << "  Type: " << prov->type << "\n";
 				std::cout << "  Model: " << prov->model << "\n";
-				if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-					if (!api->base_url.empty()) {
-						std::cout << "  Base URL: " << api->base_url << "\n";
-					}
+				if (prov->is_api() && !prov->base_url.empty()) {
+					std::cout << "  Base URL: " << prov->base_url << "\n";
 				}
 			}
 		}
@@ -989,17 +397,15 @@ int handle_provider_args(const std::vector<std::string>& args,
 	std::string subcmd = args[0];
 
 	if (subcmd == "list") {
-		auto providers = provider_manager.list_providers();
 		if (providers.empty()) {
 			std::cout << "No providers configured\n";
 		} else {
-			std::string current = provider_manager.get_current_provider();
 			std::cout << "Available providers:\n";
-			for (const auto& name : providers) {
-				if (name == current) {
-					std::cout << "  * " << name << " (current)\n";
+			for (const auto& p : providers) {
+				if (current_provider && p.name == *current_provider) {
+					std::cout << "  * " << p.name << " (current)\n";
 				} else {
-					std::cout << "    " << name << "\n";
+					std::cout << "    " << p.name << "\n";
 				}
 			}
 		}
@@ -1008,7 +414,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 	if (subcmd == "add") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider add <name> [--type <type>] [options...]\n";
+			std::cerr << "Usage: provider add <name> --type <type> [options...]\n";
 			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n";
 			return 1;
 		}
@@ -1017,60 +423,46 @@ int handle_provider_args(const std::vector<std::string>& args,
 		std::vector<std::string> cmd_args(args.begin() + 2, args.end());
 
 		// Check if provider already exists
-		if (provider_manager.get_provider(name)) {
-			std::cerr << "Provider '" << name << "' already exists. Use 'provider edit " << name << "' to modify.\n";
+		if (find_provider(name)) {
+			std::cerr << "Provider '" << name << "' already exists. Use 'provider set' to modify.\n";
 			return 1;
 		}
 
-		// If no additional args, create default and open interactive edit
-		if (cmd_args.empty()) {
-			// Create a default API provider config
-			auto new_config = std::make_unique<ApiProviderConfig>();
-			new_config->name = name;
-			new_config->type = "openai";  // Default type, user can change in editor
+		// Parse args
+		Provider new_prov;
+		new_prov.name = name;
+		new_prov.type = "openai";  // Default
 
-			if (provider_manager.interactive_edit(*new_config)) {
-				provider_manager.save_provider(*new_config);
-				std::cout << "Provider '" << new_config->name << "' added successfully\n";
-			} else {
-				std::cout << "Add cancelled\n";
-			}
-			return 0;
-		}
-
-		// Parse --type from args
-		std::string type = "openai";  // Default
-		std::vector<std::string> remaining_args;
 		for (size_t i = 0; i < cmd_args.size(); i++) {
 			if (cmd_args[i] == "--type" && i + 1 < cmd_args.size()) {
-				type = cmd_args[++i];
-			} else {
-				remaining_args.push_back(cmd_args[i]);
+				new_prov.type = cmd_args[++i];
+			} else if (cmd_args[i] == "--model" && i + 1 < cmd_args.size()) {
+				new_prov.model = cmd_args[++i];
+			} else if (cmd_args[i] == "--api-key" && i + 1 < cmd_args.size()) {
+				new_prov.api_key = cmd_args[++i];
+			} else if (cmd_args[i] == "--base-url" && i + 1 < cmd_args.size()) {
+				new_prov.base_url = cmd_args[++i];
+			} else if (cmd_args[i] == "--model-path" && i + 1 < cmd_args.size()) {
+				new_prov.model_path = cmd_args[++i];
+			} else if (cmd_args[i] == "--priority" && i + 1 < cmd_args.size()) {
+				new_prov.priority = std::stoi(cmd_args[++i]);
 			}
 		}
 
-		try {
-			auto new_config = provider_manager.parse_provider_args(type, remaining_args);
-			new_config->name = name;
-
-			provider_manager.save_provider(*new_config);
-			std::cout << "Provider '" << new_config->name << "' added successfully\n";
-			return 0;
-		} catch (const std::exception& e) {
-			std::cerr << "Error: " << e.what() << "\n";
-			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n";
-			return 1;
-		}
+		new_prov.save();
+		providers.push_back(new_prov);
+		std::cout << "Provider '" << name << "' added successfully\n";
+		return 0;
 	}
 
 	if (subcmd == "show") {
-		std::string name = (args.size() >= 2) ? args[1] : provider_manager.get_current_provider();
+		std::string name = (args.size() >= 2) ? args[1] : (current_provider ? *current_provider : "");
 		if (name.empty()) {
 			std::cout << "No provider specified\n";
 			return 1;
 		}
 
-		auto prov = provider_manager.get_provider(name);
+		auto* prov = find_provider(name);
 		if (!prov) {
 			std::cerr << "Provider '" << name << "' not found\n";
 			return 1;
@@ -1079,15 +471,15 @@ int handle_provider_args(const std::vector<std::string>& args,
 		std::cout << "Provider: " << prov->name << "\n";
 		std::cout << "  Type: " << prov->type << "\n";
 
-		if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-			std::cout << "  API Key: " << (api->api_key.empty() ? "not set" : "****") << "\n";
-			if (!api->base_url.empty()) {
-				std::cout << "  Base URL: " << api->base_url << "\n";
+		if (prov->is_api()) {
+			std::cout << "  API Key: " << (prov->api_key.empty() ? "not set" : "****") << "\n";
+			if (!prov->base_url.empty()) {
+				std::cout << "  Base URL: " << prov->base_url << "\n";
 			}
-		} else if (auto* llama = dynamic_cast<LlamaProviderConfig*>(prov)) {
-			std::cout << "  Model Path: " << llama->model_path << "\n";
-			std::cout << "  TP: " << llama->tp << ", PP: " << llama->pp << "\n";
-			std::cout << "  GPU Layers: " << llama->gpu_layers << "\n";
+		} else if (prov->type == "llamacpp" || prov->type == "tensorrt") {
+			std::cout << "  Model Path: " << prov->model_path << "\n";
+			std::cout << "  TP: " << prov->tp << ", PP: " << prov->pp << "\n";
+			std::cout << "  GPU Layers: " << prov->gpu_layers << "\n";
 		}
 
 		std::cout << "  Model: " << prov->model << "\n";
@@ -1109,38 +501,22 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "edit") {
-		if (args.size() < 2) {
-			std::cerr << "Usage: provider edit <name>\n";
-			return 1;
-		}
-
-		std::string name = args[1];
-		auto prov = provider_manager.get_provider(name);
-		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found\n";
-			return 1;
-		}
-
-		if (provider_manager.interactive_edit(*prov)) {
-			provider_manager.save_provider(*prov);
-			std::cout << "Provider '" << prov->name << "' updated\n";
-		} else {
-			std::cout << "Edit cancelled\n";
-		}
-		return 0;
+		std::cerr << "Interactive edit not supported. Use 'provider set <name> <field> <value>'\n";
+		return 1;
 	}
 
 	if (subcmd == "set") {
-		if (args.size() < 3) {
+		if (args.size() < 4) {
 			std::cerr << "Usage: provider set <name> <field> <value>\n";
+			std::cerr << "Fields: model, api_key, base_url, model_path, priority\n";
 			return 1;
 		}
 
 		std::string name = args[1];
 		std::string field = args[2];
-		std::string value = (args.size() >= 4) ? args[3] : "";
+		std::string value = args[3];
 
-		auto prov = provider_manager.get_provider(name);
+		auto* prov = find_provider(name);
 		if (!prov) {
 			std::cerr << "Provider '" << name << "' not found\n";
 			return 1;
@@ -1149,25 +525,24 @@ int handle_provider_args(const std::vector<std::string>& args,
 		// Update specific field
 		if (field == "model") {
 			prov->model = value;
+		} else if (field == "api_key" || field == "key") {
+			prov->api_key = value;
+		} else if (field == "base_url" || field == "url") {
+			prov->base_url = value;
+		} else if (field == "model_path") {
+			prov->model_path = value;
+		} else if (field == "priority") {
+			prov->priority = std::stoi(value);
 		} else if (field == "tokens_per_month") {
 			prov->rate_limits.tokens_per_month = std::stoi(value);
 		} else if (field == "max_cost") {
 			prov->rate_limits.max_cost_per_month = std::stof(value);
-		} else if (auto* api = dynamic_cast<ApiProviderConfig*>(prov)) {
-			if (field == "api_key" || field == "key") {
-				api->api_key = value;
-			} else if (field == "base_url" || field == "url") {
-				api->base_url = value;
-			} else {
-				std::cerr << "Unknown field: " << field << "\n";
-				return 1;
-			}
 		} else {
 			std::cerr << "Unknown field: " << field << "\n";
 			return 1;
 		}
 
-		provider_manager.save_provider(*prov);
+		prov->save();
 		std::cout << "Provider '" << name << "' updated\n";
 		return 0;
 	}
@@ -1179,7 +554,13 @@ int handle_provider_args(const std::vector<std::string>& args,
 		}
 
 		std::string name = args[1];
-		provider_manager.remove_provider(name);
+		Provider::remove(name);
+
+		// Remove from in-memory list
+		auto it = std::remove_if(providers.begin(), providers.end(),
+			[&name](const Provider& p) { return p.name == name; });
+		providers.erase(it, providers.end());
+
 		std::cout << "Provider '" << name << "' removed\n";
 		return 0;
 	}
@@ -1191,7 +572,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 		}
 
 		std::string name = args[1];
-		auto prov = provider_manager.get_provider(name);
+		auto* prov = find_provider(name);
 		if (!prov) {
 			std::cerr << "Provider '" << name << "' not found\n";
 			return 1;
@@ -1200,11 +581,10 @@ int handle_provider_args(const std::vector<std::string>& args,
 		// Interactive mode - switch backend
 		if (backend && session) {
 			// Shutdown current backend first to free GPU memory
-			size_t old_context_size = (*backend)->context_size;
 			(*backend)->shutdown();
 
-			// Connect to the specified provider (creates and initializes)
-			auto new_backend = provider_manager.connect_provider(name, *session, old_context_size);
+			// Connect to the specified provider
+			auto new_backend = prov->connect(*session);
 			if (!new_backend) {
 				std::cerr << "Failed to connect to provider '" << name << "'\n";
 				return 1;
@@ -1214,71 +594,90 @@ int handle_provider_args(const std::vector<std::string>& args,
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
 
+			if (current_provider) {
+				*current_provider = name;
+			}
+
 			std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
 		} else {
-			// Command-line mode - just set current
-			provider_manager.set_current_provider(name);
-			std::cout << "Current provider set to: " << name << "\n";
+			std::cout << "Provider '" << name << "' selected\n";
 		}
 		return 0;
 	}
 
 	if (subcmd == "next") {
-		auto next_name = provider_manager.get_next_provider();
-		if (!next_name) {
-			std::cout << "No available providers (all rate limited or none configured)\n";
+		// Find next provider (skip current and priority 0 ephemeral providers)
+		Provider* next_prov = nullptr;
+		for (auto& p : providers) {
+			if (p.priority == 0) continue;  // Skip ephemeral
+			if (current_provider && p.name == *current_provider) continue;
+			next_prov = &p;
+			break;
+		}
+
+		if (!next_prov) {
+			std::cout << "No other providers available\n";
 			return 1;
 		}
 
 		// Interactive mode - switch backend
 		if (backend && session) {
 			// Shutdown current backend first to free GPU memory
-			size_t old_context_size = (*backend)->context_size;
 			(*backend)->shutdown();
 
-			// Connect to the next provider (creates and initializes)
-			auto new_backend = provider_manager.connect_provider(*next_name, *session, old_context_size);
+			// Connect to the next provider
+			auto new_backend = next_prov->connect(*session);
 			if (!new_backend) {
-				std::cerr << "Failed to connect to provider '" << *next_name << "'\n";
+				std::cerr << "Failed to connect to provider '" << next_prov->name << "'\n";
 				return 1;
 			}
-
-			// Get provider info for display
-			auto prov = provider_manager.get_provider(*next_name);
 
 			// Update backend ownership and session pointer
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
 
-			std::cout << "Switched to provider '" << *next_name << "'";
-			if (prov) {
-				std::cout << " (" << prov->type << " / " << prov->model << ")";
+			if (current_provider) {
+				*current_provider = next_prov->name;
 			}
-			std::cout << "\n";
+
+			std::cout << "Switched to provider '" << next_prov->name << "' (" << next_prov->type << " / " << next_prov->model << ")\n";
 		} else {
-			std::cout << "Next provider: " << *next_name << "\n";
+			std::cout << "Next provider: " << next_prov->name << "\n";
 		}
 		return 0;
 	}
 
 	std::cerr << "Unknown provider subcommand: " << subcmd << "\n";
-	std::cerr << "Available: list, add, show, edit, set, remove, use, next\n";
+	std::cerr << "Available: list, add, show, set, remove, use, next\n";
 	return 1;
 }
 
 // Common model command implementation
 int handle_model_args(const std::vector<std::string>& args,
-                      std::unique_ptr<Backend>* backend) {
-	Provider provider_manager;
-	provider_manager.load_providers();
+                      std::unique_ptr<Backend>* backend,
+                      std::vector<Provider>* providers_ptr,
+                      std::string* current_provider_name) {
+	// Load providers if not passed in
+	std::vector<Provider> local_providers;
+	std::vector<Provider>& providers = providers_ptr ? *providers_ptr : local_providers;
+	if (!providers_ptr) {
+		local_providers = Provider::load_providers();
+	}
+
+	// Helper to find provider by name
+	auto find_provider = [&providers](const std::string& name) -> Provider* {
+		for (auto& p : providers) {
+			if (p.name == name) return &p;
+		}
+		return nullptr;
+	};
 
 	// No args shows current model
 	if (args.empty()) {
-		std::string current_provider = provider_manager.get_current_provider();
-		if (current_provider.empty()) {
+		if (!current_provider_name || current_provider_name->empty()) {
 			std::cout << "No provider configured\n";
 		} else {
-			auto prov = provider_manager.get_provider(current_provider);
+			auto* prov = find_provider(*current_provider_name);
 			if (prov) {
 				std::cout << "Current model: " << prov->model << "\n";
 			}
@@ -1301,16 +700,15 @@ int handle_model_args(const std::vector<std::string>& args,
 
 	if (subcmd == "set" && args.size() >= 2) {
 		std::string model = args[1];
-		std::string current_provider = provider_manager.get_current_provider();
-		if (current_provider.empty()) {
+		if (!current_provider_name || current_provider_name->empty()) {
 			std::cout << "No provider configured\n";
 			return 1;
 		}
 
-		auto prov = provider_manager.get_provider(current_provider);
+		auto* prov = find_provider(*current_provider_name);
 		if (prov) {
 			prov->model = model;
-			provider_manager.save_provider(*prov);
+			prov->save();
 
 			// Update backend's model if available
 			if (backend && *backend) {

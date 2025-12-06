@@ -220,21 +220,11 @@ Shepherd automatically detects available backends at runtime. Priority order:
 ### Environment Variables
 
 ```bash
-# API Keys
-export OPENAI_API_KEY="sk-..."
-export ANTHROPIC_API_KEY="sk-ant-..."
-export GOOGLE_API_KEY="..."
-export GROK_API_KEY="xai-..."
+# Force interactive mode (useful when running in scripts/pipes)
+export SHEPHERD_INTERACTIVE=1
 
-# Local Model Path (for llama.cpp/TensorRT)
-export MODEL_PATH="/path/to/model.gguf"
-
-# RAG Database
-export RAG_DB_PATH="./shepherd_memory.db"
-export RAG_MAX_SIZE="10737418240"  # 10GB
-
-# Backend Override
-export SHEPHERD_BACKEND="llamacpp"  # or "tensorrt", "openai", etc.
+# Disable colors (standard)
+export NO_COLOR=1
 ```
 
 ### Configuration File (shepherd.json)
@@ -988,8 +978,8 @@ shepherd/
 │   ├── openai.{cpp,h}           # OpenAI API
 │   ├── anthropic.{cpp,h}        # Anthropic Claude
 │   ├── gemini.{cpp,h}           # Google Gemini
-│   ├── grok.{cpp,h}             # xAI Grok
-│   └── ollama.{cpp,h}           # Ollama
+│   ├── ollama.{cpp,h}           # Ollama
+│   └── cli_client.{cpp,h}       # CLI client (connects to shepherd server)
 ├── tools/              # Tool implementations
 │   ├── tool.{cpp,h}             # Base tool interface
 │   ├── filesystem_tools.{cpp,h}

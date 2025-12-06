@@ -37,8 +37,8 @@ private:
     Tools* tools_ptr;  // Optional pointer to Tools for populating sub-session
 };
 
-/// @brief Convert ProviderConfig to APIToolEntry
-APIToolEntry provider_to_tool_entry(const ProviderConfig* config, const std::string& provider_name);
+/// @brief Convert Provider to APIToolEntry
+APIToolEntry provider_to_tool_entry(const Provider& provider);
 
 /// @brief Register all API providers as tools (except the active one)
 /// @param tools Tools instance to register with

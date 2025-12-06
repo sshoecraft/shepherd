@@ -16,7 +16,7 @@ public:
     static std::unique_ptr<Backend> create_from_provider(ProviderConfig* provider, size_t context_size);
 
     /// @brief Create backend manager by backend name (legacy)
-    /// @param backend Backend name ("llamacpp", "tensorrt", "openai", "anthropic", "gemini", "grok")
+    /// @param backend Backend name ("llamacpp", "tensorrt", "openai", "anthropic", "gemini", "ollama", "cli")
     /// @param model_path_or_name Model file path or name
     /// @param max_context_tokens Maximum context window size
     /// @param api_key API key for cloud providers

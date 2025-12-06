@@ -62,6 +62,10 @@ static void deserialize_common(ProviderConfig& cfg, const json& j) {
     cfg.name = j.value("name", "");
     cfg.model = j.value("model", "");
     cfg.priority = j.value("priority", 100);
+    // Clamp user-created provider priorities to 1-100 (0 is reserved for ephemeral _cmdline)
+    if (cfg.priority < 1 || cfg.priority > 100) {
+        cfg.priority = 100;
+    }
     cfg.context_size = j.value("context_size", 0);
 
     // Rate limits
@@ -260,6 +264,20 @@ OllamaProviderConfig OllamaProviderConfig::from_json(const json& j) {
     return cfg;
 }
 
+json CliProviderConfig::to_json() const {
+    json j;
+    serialize_common(j, *this);
+    j["base_url"] = base_url;
+    return j;
+}
+
+CliProviderConfig CliProviderConfig::from_json(const json& j) {
+    CliProviderConfig cfg;
+    deserialize_common(cfg, j);
+    cfg.base_url = j.value("base_url", "http://localhost:8000");
+    return cfg;
+}
+
 // ProviderConfig factory
 std::unique_ptr<ProviderConfig> ProviderConfig::from_json(const json& j) {
     std::string type = j.value("type", "");
@@ -270,11 +288,14 @@ std::unique_ptr<ProviderConfig> ProviderConfig::from_json(const json& j) {
     else if (type == "tensorrt") {
         return std::make_unique<TensorRTProviderConfig>(TensorRTProviderConfig::from_json(j));
     }
-    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok" || type == "cli") {
+    else if (type == "openai" || type == "anthropic" || type == "gemini") {
         return std::make_unique<ApiProviderConfig>(ApiProviderConfig::from_json(j));
     }
     else if (type == "ollama") {
         return std::make_unique<OllamaProviderConfig>(OllamaProviderConfig::from_json(j));
+    }
+    else if (type == "cli") {
+        return std::make_unique<CliProviderConfig>(CliProviderConfig::from_json(j));
     }
 
     throw std::runtime_error("Unknown provider type: " + type);
@@ -352,6 +373,14 @@ void Provider::save_provider(const ProviderConfig& config) {
 
     // Reload providers to update in-memory map with correct type
     load_providers();
+}
+
+void Provider::add_ephemeral_provider(std::unique_ptr<ProviderConfig> config) {
+    if (!config || config->name.empty()) {
+        throw std::runtime_error("Ephemeral provider must have a name");
+    }
+    LOG_INFO("Adding ephemeral provider: " + config->name);
+    providers[config->name] = std::move(config);
 }
 
 void Provider::remove_provider(const std::string& name) {
@@ -509,15 +538,21 @@ bool Provider::interactive_edit(ProviderConfig& config) {
     std::getline(std::cin, input);
     if (!input.empty()) config.model = input;
 
-    std::cout << "Priority (lower = higher priority) [" << config.priority << "]: ";
+    std::cout << "Priority (1-100, lower = higher priority) [" << config.priority << "]: ";
     std::getline(std::cin, input);
-    if (!input.empty()) config.priority = std::stoi(input);
+    if (!input.empty()) {
+        config.priority = std::stoi(input);
+        if (config.priority < 1 || config.priority > 100) {
+            config.priority = 100;
+        }
+    }
 
     std::cout << "Context size (0=auto) [" << config.context_size << "]: ";
     std::getline(std::cin, input);
     if (!input.empty()) config.context_size = std::stoi(input);
 
     // Dispatch to type-specific editor
+    // Note: order matters for inheritance - check derived classes before base classes
     bool is_api = false;
     if (auto* llama = dynamic_cast<LlamaProviderConfig*>(&config)) {
         if (!edit_llama_config(*llama)) return false;
@@ -525,12 +560,16 @@ bool Provider::interactive_edit(ProviderConfig& config) {
     else if (auto* tensorrt = dynamic_cast<TensorRTProviderConfig*>(&config)) {
         if (!edit_tensorrt_config(*tensorrt)) return false;
     }
+    else if (auto* ollama = dynamic_cast<OllamaProviderConfig*>(&config)) {
+        if (!edit_ollama_config(*ollama)) return false;
+        is_api = true;
+    }
+    else if (auto* cli = dynamic_cast<CliProviderConfig*>(&config)) {
+        if (!edit_cli_config(*cli)) return false;
+    }
     else if (auto* api = dynamic_cast<ApiProviderConfig*>(&config)) {
         if (!edit_api_config(*api)) return false;
         is_api = true;
-    }
-    else if (auto* ollama = dynamic_cast<OllamaProviderConfig*>(&config)) {
-        if (!edit_ollama_config(*ollama)) return false;
     }
 
     // Rate limits and pricing only for API providers
@@ -674,6 +713,17 @@ bool Provider::edit_ollama_config(OllamaProviderConfig& cfg) {
     return true;
 }
 
+bool Provider::edit_cli_config(CliProviderConfig& cfg) {
+    std::cout << "\n--- CLI Server Settings ---\n";
+    std::string input;
+
+    std::cout << "Server URL [" << cfg.base_url << "]: ";
+    std::getline(std::cin, input);
+    if (!input.empty()) cfg.base_url = input;
+
+    return true;
+}
+
 std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string& type, const std::vector<std::string>& args) {
     std::unique_ptr<ProviderConfig> config;
 
@@ -684,11 +734,14 @@ std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string&
     else if (type == "tensorrt") {
         config = std::make_unique<TensorRTProviderConfig>();
     }
-    else if (type == "openai" || type == "anthropic" || type == "gemini" || type == "grok" || type == "cli") {
+    else if (type == "openai" || type == "anthropic" || type == "gemini") {
         config = std::make_unique<ApiProviderConfig>();
     }
     else if (type == "ollama") {
         config = std::make_unique<OllamaProviderConfig>();
+    }
+    else if (type == "cli") {
+        config = std::make_unique<CliProviderConfig>();
     }
     else {
         throw std::runtime_error("Unknown provider type: " + type);
@@ -708,6 +761,9 @@ std::unique_ptr<ProviderConfig> Provider::parse_provider_args(const std::string&
         }
         else if ((arg == "--priority" || arg == "-p") && i + 1 < args.size()) {
             config->priority = std::stoi(args[++i]);
+            if (config->priority < 1 || config->priority > 100) {
+                config->priority = 100;
+            }
         }
         else if (arg == "--tokens-per-month" && i + 1 < args.size()) {
             config->rate_limits.tokens_per_month = std::stoi(args[++i]);
@@ -803,6 +859,105 @@ std::unique_ptr<Backend> Provider::connect_next_provider(Session& session, size_
     LOG_ERROR("All providers failed to connect");
     return nullptr;
 }
+
+std::unique_ptr<ProviderConfig> create_provider_from_config() {
+    extern std::unique_ptr<Config> config;
+
+    std::string backend_type = config->backend;
+
+    // Create appropriate ProviderConfig subclass based on backend type
+    if (backend_type == "llamacpp") {
+        auto cfg = std::make_unique<LlamaProviderConfig>();
+        cfg->type = "llamacpp";
+        cfg->model = config->model;
+        cfg->model_path = config->model_path;
+        cfg->context_size = config->context_size;
+
+        // Copy settings from config->json if present
+        if (config->json.contains("tp")) cfg->tp = config->json["tp"];
+        if (config->json.contains("pp")) cfg->pp = config->json["pp"];
+        if (config->json.contains("gpu_layers")) cfg->gpu_layers = config->json["gpu_layers"];
+        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
+        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
+        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
+        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
+        if (config->json.contains("n_batch")) cfg->n_batch = config->json["n_batch"];
+        if (config->json.contains("n_threads")) cfg->n_threads = config->json["n_threads"];
+
+        return cfg;
+    }
+    else if (backend_type == "tensorrt") {
+        auto cfg = std::make_unique<TensorRTProviderConfig>();
+        cfg->type = "tensorrt";
+        cfg->model = config->model;
+        cfg->model_path = config->model_path;
+        cfg->context_size = config->context_size;
+
+        if (config->json.contains("tp")) cfg->tp = config->json["tp"];
+        if (config->json.contains("pp")) cfg->pp = config->json["pp"];
+        if (config->json.contains("gpu_id")) cfg->gpu_id = config->json["gpu_id"];
+        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
+        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
+        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
+        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
+
+        return cfg;
+    }
+    else if (backend_type == "ollama") {
+        auto cfg = std::make_unique<OllamaProviderConfig>();
+        cfg->type = "ollama";
+        cfg->model = config->model;
+        cfg->context_size = config->context_size;
+        if (!config->api_base.empty()) cfg->base_url = config->api_base;
+
+        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
+        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
+        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
+        if (config->json.contains("repeat_penalty")) cfg->repeat_penalty = config->json["repeat_penalty"];
+        if (config->json.contains("num_ctx")) cfg->num_ctx = config->json["num_ctx"];
+        if (config->json.contains("num_predict")) cfg->num_predict = config->json["num_predict"];
+
+        return cfg;
+    }
+    else if (backend_type == "cli") {
+        auto cfg = std::make_unique<CliProviderConfig>();
+        cfg->type = "cli";
+        if (!config->api_base.empty()) cfg->base_url = config->api_base;
+
+        return cfg;
+    }
+    else {
+        // Other API backends: openai, anthropic, gemini
+        auto cfg = std::make_unique<ApiProviderConfig>();
+        cfg->type = backend_type;
+        cfg->model = config->model;
+        cfg->api_key = config->key;
+        cfg->base_url = config->api_base;
+        cfg->context_size = config->context_size;
+
+        if (config->json.contains("temperature")) cfg->temperature = config->json["temperature"];
+        if (config->json.contains("top_p")) cfg->top_p = config->json["top_p"];
+        if (config->json.contains("top_k")) cfg->top_k = config->json["top_k"];
+        if (config->json.contains("frequency_penalty")) cfg->frequency_penalty = config->json["frequency_penalty"];
+        if (config->json.contains("presence_penalty")) cfg->presence_penalty = config->json["presence_penalty"];
+        if (config->json.contains("max_tokens")) cfg->max_tokens = config->json["max_tokens"];
+        if (config->json.contains("ssl_verify")) cfg->ssl_verify = config->json["ssl_verify"];
+        if (config->json.contains("ca_bundle_path")) cfg->ca_bundle_path = config->json["ca_bundle_path"];
+
+        // OAuth
+        if (config->json.contains("client_id")) cfg->client_id = config->json["client_id"];
+        if (config->json.contains("client_secret")) cfg->client_secret = config->json["client_secret"];
+        if (config->json.contains("token_url")) cfg->token_url = config->json["token_url"];
+        if (config->json.contains("token_scope")) cfg->token_scope = config->json["token_scope"];
+
+        // Azure
+        if (config->json.contains("deployment_name")) cfg->deployment_name = config->json["deployment_name"];
+        if (config->json.contains("api_version")) cfg->api_version = config->json["api_version"];
+
+        return cfg;
+    }
+}
+
 // Common provider command implementation
 int handle_provider_args(const std::vector<std::string>& args,
                          std::unique_ptr<Backend>* backend,
@@ -854,7 +1009,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 	if (subcmd == "add") {
 		if (args.size() < 2) {
 			std::cerr << "Usage: provider add <name> [--type <type>] [options...]\n";
-			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
+			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n";
 			return 1;
 		}
 
@@ -903,7 +1058,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			return 0;
 		} catch (const std::exception& e) {
 			std::cerr << "Error: " << e.what() << "\n";
-			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama\n";
+			std::cerr << "Supported types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n";
 			return 1;
 		}
 	}

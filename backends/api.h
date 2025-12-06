@@ -286,7 +286,7 @@ struct ApiResponse {
     std::string tool_calls_json;        ///< JSON string of tool calls if present
 };
 
-/// @brief Base class for all API-based backends (Anthropic, OpenAI, Gemini, Grok, Ollama)
+/// @brief Base class for all API-based backends (OpenAI, Anthropic, Gemini, Ollama)
 /// Provides common functionality:
 /// - Context management via ContextManager member (inherited from Backend)
 /// - Default implementations of add_*_message() methods

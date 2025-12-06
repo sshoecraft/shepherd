@@ -4,6 +4,8 @@
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
 #include "../mcp/mcp.h"
+#include "../rag.h"
+#include "../config.h"
 #include "../llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "nlohmann/json.hpp"
 #include <mutex>
@@ -24,6 +26,25 @@ CLIServer::~CLIServer() {
 }
 
 void CLIServer::init(bool no_mcp, bool no_tools) {
+    // Initialize RAG system using global config
+    std::string db_path = config->memory_database;
+    if (db_path.empty()) {
+        try {
+            db_path = Config::get_default_memory_db_path();
+        } catch (const ConfigError& e) {
+            LOG_ERROR("Failed to determine memory database path: " + std::string(e.what()));
+            throw;
+        }
+    } else if (db_path[0] == '~') {
+        // Expand ~ if present
+        db_path = Config::get_home_directory() + db_path.substr(1);
+    }
+
+    if (!RAGManager::initialize(db_path, config->max_db_size)) {
+        throw std::runtime_error("Failed to initialize RAG system");
+    }
+    LOG_INFO("RAG initialized with database: " + db_path);
+
     if (no_tools) {
         LOG_INFO("Tools disabled for CLI server");
         return;

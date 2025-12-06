@@ -6,9 +6,8 @@
 #include "mcp/mcp.h"
 #include "mcp/mcp_config.h"
 #include "provider.h"
-#include "rag.h"
+#include "frontend.h"
 #include "cli.h"
-#include "server/api_server.h"
 #include "server/cli_server.h"
 #include "terminal_io.h"
 #include "backends/backend.h"
@@ -96,7 +95,7 @@ static void print_usage(int, char** argv) {
 	printf("	-m, --model		   Model name or file (overrides config)\n");
 	printf("	-p, --provider	   Provider name to use (from provider list)\n");
 	printf("	--model_path	   Model directory path (overrides config, e.g., ~/models)\n");
-	printf("	--backend		   Backend (llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama)\n");
+	printf("	--backend		   Backend (llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli)\n");
 	printf("	--api-key		   API key for cloud backends\n");
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
@@ -399,35 +398,40 @@ int main(int argc, char** argv) {
 		return handle_sched_command(argc, argv);
 	}
 
-	bool debug_override = false;
+	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
 	bool no_tools = false;
-	bool warmup_enable = false;
-	bool calibration_enable = false;
-	bool thinking_override = false;
-	int truncate_limit = 0;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	std::string log_file;
 	std::string config_file_path;
-	std::string provider_override;
-	std::string model_override;
-	std::string model_path_override;
-	std::string backend_override;
-	std::string api_key_override;
-	std::string api_base_override;
-	std::string template_override;
-	std::string memory_db_override;
-	std::string models_file_override;
-	std::string system_prompt_override;
-	bool system_prompt_was_set = false;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
-	int context_size_override = -1;  // -1 means not specified, 0 means use model's full context
-	int gpu_layers_override = -999;  // -999 means not specified, -1=auto/all, 0=CPU only, >0=specific
-	int tp_override = -1;  // -1 means not specified
-	int pp_override = -1;  // -1 means not specified
-	int ubatch_override = -1;  // -1 means not specified
 	std::string frontend_mode = "cli";
+
+	// Temporary storage for command-line overrides (applied to config after load)
+	struct {
+		bool debug = false;
+		bool warmup = false;
+		bool calibration = false;
+		bool thinking = false;
+		bool system_prompt_set = false;
+		int truncate_limit = 0;
+		int context_size = -1;      // -1 = not specified
+		int gpu_layers = -999;      // -999 = not specified
+		int tp = -1;                // -1 = not specified
+		int pp = -1;                // -1 = not specified
+		int ubatch = -1;            // -1 = not specified
+		std::string provider;
+		std::string model;
+		std::string model_path;
+		std::string backend;
+		std::string api_key;
+		std::string api_base;
+		std::string template_name;
+		std::string memory_db;
+		std::string models_file;
+		std::string system_prompt;
+	} override;
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
@@ -475,7 +479,7 @@ int main(int argc, char** argv) {
 				config_file_path = optarg;
 				break;
 			case 'd':
-				debug_override = true;
+				override.debug = true;
 				// Parse optional debug level (default to 1 if not specified)
 				if (optarg) {
 					g_debug_level = atoi(optarg);
@@ -487,32 +491,32 @@ int main(int argc, char** argv) {
 				log_file = optarg;
 				break;
 			case 'm':
-				model_override = optarg;
+				override.model = optarg;
 				break;
 			case 'p':
-				provider_override = optarg;
+				override.provider = optarg;
 				break;
 			case 1018: // --model_path
-				model_path_override = optarg;
+				override.model_path = optarg;
 				break;
 			case 1002: // --backend
-				backend_override = optarg;
+				override.backend = optarg;
 				break;
 			case 1003: // --api-key
-				api_key_override = optarg;
+				override.api_key = optarg;
 				break;
 			case 1004: // --api-base
-				api_base_override = optarg;
+				override.api_base = optarg;
 				break;
 			case 1000: // --context-size
-				context_size_override = std::atoi(optarg);
-				if (context_size_override < 0) {
+				override.context_size = std::atoi(optarg);
+				if (override.context_size < 0) {
 					printf("Error: context-size cannot be negative (use 0 for model's full context)\n");
 					return 1;
 				}
 				break;
 			case 1025: // --gpu-layers
-				gpu_layers_override = std::atoi(optarg);
+				override.gpu_layers = std::atoi(optarg);
 				break;
 			case 1005: // --nomcp
 				no_mcp = true;
@@ -524,14 +528,15 @@ int main(int argc, char** argv) {
 				no_tools = true;
 				break;
 			case 1028: // --system-prompt
-				system_prompt_override = optarg;
-				system_prompt_was_set = true;
+				override.system_prompt = optarg;
+				override.system_prompt_set = true;
 				break;
 			case 1006: // --template
-				template_override = optarg;
+				override.template_name = optarg;
 				break;
 			case 1015: // --apiserver
 				frontend_mode = "api-server";
+				g_server_mode = true;
 				break;
 			case 1036: // --cliserver
 				frontend_mode = "cli-server";
@@ -547,41 +552,40 @@ int main(int argc, char** argv) {
 				server_host = optarg;
 				break;
 			case 1019: // --truncate
-				truncate_limit = std::atoi(optarg);
+				override.truncate_limit = std::atoi(optarg);
 				break;
 			case 1023: // --memory-db
-				memory_db_override = optarg;
+				override.memory_db = optarg;
 				break;
 			case 1024: // --models-file
-				models_file_override = optarg;
+				override.models_file = optarg;
 				break;
 			case 1026: // --warmup
-				warmup_enable = true;
+				override.warmup = true;
 				break;
 			case 1029: // --tp
-				tp_override = std::atoi(optarg);
-				if (tp_override < 1) {
+				override.tp = std::atoi(optarg);
+				if (override.tp < 1) {
 					printf("Error: tp must be at least 1\n");
 					return 1;
 				}
 				break;
 			case 1030: // --pp
-				pp_override = std::atoi(optarg);
-				if (pp_override < 1) {
+				override.pp = std::atoi(optarg);
+				if (override.pp < 1) {
 					printf("Error: pp must be at least 1\n");
 					return 1;
 				}
 				break;
 			case 1035: // --ubatch
-				ubatch_override = std::atoi(optarg);
-				if (ubatch_override < 1) {
+				override.ubatch = std::atoi(optarg);
+				if (override.ubatch < 1) {
 					printf("Error: ubatch must be at least 1\n");
 					return 1;
 				}
 				break;
 			case 1031: // --thinking
-				g_show_thinking = true;
-				thinking_override = true;
+				override.thinking = true;
 				break;
 			case 1032: // --colors
 				color_override = 1;
@@ -590,7 +594,7 @@ int main(int argc, char** argv) {
 				color_override = 0;
 				break;
 			case 1034: // --calibration
-				calibration_enable = true;
+				override.calibration = true;
 				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
@@ -644,54 +648,67 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	// Apply command-line overrides
-	if (!backend_override.empty()) {
+	// Apply command-line overrides to config
+	if (!override.backend.empty()) {
 		try {
-			config->set_backend(backend_override);
+			config->set_backend(override.backend);
 		} catch (const ConfigError& e) {
 			fprintf(stderr, "Error: %s\n", e.what());
 			return 1;
 		}
 	}
-	if (!api_key_override.empty()) {
-		config->key = api_key_override;
+	if (!override.api_key.empty()) {
+		config->key = override.api_key;
 	}
-	if (!api_base_override.empty()) {
-		config->api_base = api_base_override;
+	if (!override.api_base.empty()) {
+		config->api_base = override.api_base;
 	}
-	if (context_size_override >= 0) {  // -1 means not set, 0+ are valid values
-		config->context_size = context_size_override;
+	if (!override.model.empty()) {
+		config->model = override.model;
 	}
-	if (truncate_limit > 0) {
-		config->truncate_limit = truncate_limit;
+	if (!override.model_path.empty()) {
+		config->model_path = override.model_path;
 	}
-	if (warmup_enable) {
+	if (!override.memory_db.empty()) {
+		config->memory_database = override.memory_db;
+	}
+	if (!override.models_file.empty()) {
+		config->models_file = override.models_file;
+	}
+	if (!override.system_prompt.empty()) {
+		config->system_message = override.system_prompt;
+	}
+	if (override.context_size >= 0) {
+		config->context_size = override.context_size;
+	}
+	if (override.truncate_limit > 0) {
+		config->truncate_limit = override.truncate_limit;
+	}
+	if (override.warmup) {
 		config->warmup = true;
 	}
-	if (calibration_enable) {
+	if (override.calibration) {
 		config->calibration = true;
 	}
-	// Set g_show_thinking from config, then apply command-line override
-	g_show_thinking = config->thinking;
-	if (thinking_override) {
+	if (override.thinking) {
 		config->thinking = true;
-		g_show_thinking = true;
 	}
-	if (gpu_layers_override != -999) {  // -999 means not specified
-		config->json["gpu_layers"] = gpu_layers_override;
+	g_show_thinking = config->thinking;
+	if (override.gpu_layers != -999) {
+		config->json["gpu_layers"] = override.gpu_layers;
 	}
-	if (tp_override != -1) {  // -1 means not specified
-		config->json["tp"] = tp_override;
+	if (override.tp != -1) {
+		config->json["tp"] = override.tp;
 	}
-	if (pp_override != -1) {  // -1 means not specified
-		config->json["pp"] = pp_override;
+	if (override.pp != -1) {
+		config->json["pp"] = override.pp;
 	}
-	if (ubatch_override != -1) {  // -1 means not specified
-		config->json["ubatch"] = ubatch_override;
+	if (override.ubatch != -1) {
+		config->json["ubatch"] = override.ubatch;
 	}
 
 	// Validate configuration (skip model path check if overridden)
-	if (model_override.empty() && model_path_override.empty()) {
+	if (override.model.empty() && override.model_path.empty()) {
 		// No overrides - validate everything from config
 		try {
 			config->validate();
@@ -720,18 +737,16 @@ int main(int argc, char** argv) {
 					config->backend.c_str(), available_str.c_str());
 			return 1;
 		}
-		// Validate model file exists (only for local backends with overrides)
+		// Validate model file exists (only for local backends)
 		if (config->backend == "llamacpp" || config->backend == "tensorrt") {
-			// Construct the full path to validate
+			// Construct the full path to validate (config already has overrides applied)
 			std::string model_file_to_check;
-			std::string model_name = model_override.empty() ? config->model : model_override;
-			std::string model_dir = model_path_override.empty() ? config->model_path : model_path_override;
 
-			// Check if model_name is already a full path
-			if (!model_name.empty() && (model_name[0] == '/' || model_name[0] == '~')) {
-				model_file_to_check = model_name;
+			// Check if model is already a full path
+			if (!config->model.empty() && (config->model[0] == '/' || config->model[0] == '~')) {
+				model_file_to_check = config->model;
 			} else {
-				model_file_to_check = std::filesystem::path(model_dir) / model_name;
+				model_file_to_check = std::filesystem::path(config->model_path) / config->model;
 			}
 
 			// Expand ~ if present
@@ -760,98 +775,34 @@ int main(int argc, char** argv) {
 	signal(SIGTERM, signal_handler);
 	signal(SIGUSR1, cancel_handler);  // For cancellation from FastAPI on client disconnect
 
-	size_t context_size = context_size_override >= 0 ? static_cast<size_t>(context_size_override) : config->context_size;
-
-	// Initialize models database if custom file specified (command-line takes precedence)
-	std::string models_file = models_file_override.empty() ? config->models_file : models_file_override;
-	if (!models_file.empty()) {
-		Models::init(models_file);
+	// Initialize models database if specified
+	if (!config->models_file.empty()) {
+		Models::init(config->models_file);
 	}
 
 	// Create and initialize backend (needed for both CLI and server mode)
 	try {
-		// Create backend manager
-		std::string model_path;
-
-		// Apply command-line overrides to config (for local backends)
-		if (config->backend == "llamacpp" || config->backend == "tensorrt") {
-			if (!model_override.empty()) {
-				config->model = model_override;
-				LOG_INFO("Model override from command line: " + model_override);
-			}
-			if (!model_path_override.empty()) {
-				config->model_path = model_path_override;
-				LOG_INFO("Model path override from command line: " + model_path_override);
-			}
-		}
-
-		// Create the backend from provider system or legacy config
 		std::unique_ptr<Backend> backend;
-		bool use_provider_mode = backend_override.empty() && model_override.empty() && api_key_override.empty();
-		Provider provider_mgr;  // Need this for provider mode
+		Provider provider;
+		provider.load_providers();
 
-		// Check if using command-line overrides (legacy mode)
-		if (!use_provider_mode) {
-			// Legacy mode: create from command-line args (will initialize after session is ready)
-			LOG_INFO("Using command-line overrides (legacy mode)");
-			backend = BackendFactory::create_backend(config->backend, context_size);
-			if (!backend) {
-				LOG_ERROR("Failed to create backend");
-				return 1;
-			}
-		}
-		// Provider mode: backend will be created after session/tools are ready
-
-
-		// Initialize RAG system with specified or default path (skip in server mode - clients have their own RAG)
-		if (!g_server_mode) {
-			std::string db_path;
-			if (!memory_db_override.empty()) {
-				// Command-line override takes precedence
-				db_path = memory_db_override;
-				// Expand ~ if present
-				if (db_path[0] == '~') {
-					db_path = Config::get_home_directory() + db_path.substr(1);
-				}
-				LOG_INFO("Using memory database from command line: " + db_path);
-			} else if (!config->memory_database.empty()) {
-				// Config file value
-				db_path = config->memory_database;
-				// Expand ~ if present
-				if (db_path[0] == '~') {
-					db_path = Config::get_home_directory() + db_path.substr(1);
-				}
-				LOG_INFO("Using memory database from config: " + db_path);
-			} else {
-				// Default
-				try {
-					db_path = Config::get_default_memory_db_path();
-				} catch (const ConfigError& e) {
-					LOG_ERROR("Failed to determine memory database path: " + std::string(e.what()));
-					return 1;
-				}
-			}
-			if (!RAGManager::initialize(db_path, config->max_db_size)) {
-				LOG_ERROR("Failed to initialize RAG system");
-				return 1;
-			}
+		// If command-line overrides were provided, create ephemeral provider
+		bool has_cmdline_override = !override.backend.empty() || !override.model.empty() || !override.api_key.empty();
+		if (has_cmdline_override) {
+			auto cmdline_provider = create_provider_from_config();
+			cmdline_provider->name = "_cmdline";
+			cmdline_provider->priority = 0;  // Highest priority (reserved for ephemeral)
+			provider.add_ephemeral_provider(std::move(cmdline_provider));
 		}
 
 		// Create the session that will be used throughout (not in server mode)
 		Session session;
-		session.system_message = system_prompt_was_set ? system_prompt_override : config->system_message;
+		session.system_message = config->system_message;
 
 		// Create frontend early so we can call init() for tools
-		std::unique_ptr<Frontend> frontend;
-		if (frontend_mode == "cli") {
-			frontend = std::make_unique<CLI>();
-		} else if (frontend_mode == "api-server") {
-			frontend = std::make_unique<APIServer>(server_host, server_port);
-		} else if (frontend_mode == "cli-server") {
-			frontend = std::make_unique<CLIServer>(server_host, server_port);
-		}
+		auto frontend = Frontend::create(frontend_mode, server_host, server_port);
 
-		// Initialize tools via frontend (skip in server mode - tools handled by client)
+		// Initialize frontend (RAG, tools, MCP) - skip in server mode, clients handle their own
 		if (!g_server_mode) {
 			frontend->init(no_mcp, no_tools);
 
@@ -873,34 +824,30 @@ int main(int argc, char** argv) {
 			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
 		}
 
-		// Now that session/tools are ready, connect to provider (if using provider mode)
-		if (use_provider_mode) {
-			if (!provider_override.empty()) {
-				// Specific provider requested - only try that one
-				backend = provider_mgr.connect_provider(provider_override, session, context_size);
-			} else {
-				// Try providers in priority order (respects auto_provider setting)
-				backend = provider_mgr.connect_next_provider(session, context_size);
-			}
-
-			if (!backend) {
-				fprintf(stderr, "Failed to connect to provider. Use 'shepherd provider add' to configure providers.\n");
-				return 1;
-			}
+		// Connect to provider (always uses provider system now)
+		if (!override.provider.empty()) {
+			// Specific provider requested via --provider
+			backend = provider.connect_provider(override.provider, session, config->context_size);
+		} else if (has_cmdline_override) {
+			// Command-line overrides → use ephemeral _cmdline provider
+			backend = provider.connect_provider("_cmdline", session, config->context_size);
 		} else {
-			// Legacy mode: initialize the backend we created earlier
-			backend->initialize(session);
+			// No overrides → try providers in priority order
+			backend = provider.connect_next_provider(session, config->context_size);
+		}
+
+		if (!backend) {
+			fprintf(stderr, "Failed to connect to provider. Use 'shepherd provider add' to configure providers.\n");
+			return 1;
 		}
 
 		// Register non-active providers as tools (ask_<provider_name>)
-		if (!g_server_mode && !no_tools && use_provider_mode) {
-			std::string active_provider = provider_mgr.get_current_provider();
+		if (!g_server_mode && !no_tools) {
+			std::string active_provider = provider.get_current_provider();
 			if (!active_provider.empty()) {
-				// Cast frontend to CLI to access tools
 				CLI* cli = dynamic_cast<CLI*>(frontend.get());
 				if (cli) {
 					register_provider_tools(cli->tools, active_provider);
-					// Re-populate session.tools with the new provider tools
 					cli->tools.populate_session_tools(session);
 				}
 			}

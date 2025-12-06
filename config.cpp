@@ -397,9 +397,9 @@ std::vector<std::string> Config::get_available_backends() {
     backends.push_back("openai");
     backends.push_back("anthropic");
     backends.push_back("gemini");
-    backends.push_back("grok");
     backends.push_back("ollama");
 #endif
+    backends.push_back("cli");
 
     return backends;
 }

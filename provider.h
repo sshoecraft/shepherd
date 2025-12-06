@@ -86,7 +86,7 @@ public:
     static TensorRTProviderConfig from_json(const nlohmann::json& j);
 };
 
-// API provider configuration (OpenAI, Anthropic, Gemini, Grok, Ollama)
+// API provider configuration (OpenAI, Anthropic, Gemini)
 class ApiProviderConfig : public ProviderConfig {
 public:
     bool is_api() const override { return true; }
@@ -133,6 +133,19 @@ public:
     static OllamaProviderConfig from_json(const nlohmann::json& j);
 };
 
+// CLI client provider configuration (connects to shepherd server)
+class CliProviderConfig : public ProviderConfig {
+public:
+    std::string base_url = "http://localhost:8000";
+
+    CliProviderConfig() {
+        type = "cli";
+    }
+
+    nlohmann::json to_json() const override;
+    static CliProviderConfig from_json(const nlohmann::json& j);
+};
+
 class Provider {
 public:
     Provider();
@@ -143,6 +156,9 @@ public:
 
     // Save provider to file
     void save_provider(const ProviderConfig& config);
+
+    // Add ephemeral provider (in-memory only, not saved to disk)
+    void add_ephemeral_provider(std::unique_ptr<ProviderConfig> config);
 
     // Remove provider file
     void remove_provider(const std::string& name);
@@ -202,6 +218,7 @@ private:
     bool edit_tensorrt_config(TensorRTProviderConfig& cfg);
     bool edit_api_config(ApiProviderConfig& cfg);
     bool edit_ollama_config(OllamaProviderConfig& cfg);
+    bool edit_cli_config(CliProviderConfig& cfg);
 };
 
 // Common provider command implementation (takes parsed args)
@@ -216,3 +233,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 // backend is optional - needed for runtime model changes
 int handle_model_args(const std::vector<std::string>& args,
                       std::unique_ptr<Backend>* backend = nullptr);
+
+// Create ProviderConfig from current global config state
+// Used to create ephemeral provider from command-line arguments
+std::unique_ptr<ProviderConfig> create_provider_from_config();

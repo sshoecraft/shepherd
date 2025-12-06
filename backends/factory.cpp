@@ -101,6 +101,9 @@ std::unique_ptr<Backend> BackendFactory::create_from_provider(ProviderConfig* pr
         if (ollama->num_ctx > 0) config->json["num_ctx"] = ollama->num_ctx;
         if (ollama->num_predict != -1) config->json["num_predict"] = ollama->num_predict;
     }
+    else if (auto* cli = dynamic_cast<CliProviderConfig*>(provider)) {
+        config->api_base = cli->base_url;
+    }
 
     // Create backend by type
     std::string type = provider->type;
@@ -185,7 +188,6 @@ std::vector<std::string> BackendFactory::get_available_backends() {
     backends.push_back("openai");
     backends.push_back("anthropic");
     backends.push_back("gemini");
-    backends.push_back("grok");
     backends.push_back("ollama");
 #endif
     backends.push_back("cli");

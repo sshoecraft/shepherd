@@ -13,7 +13,7 @@ public:
     CLIServer(const std::string& host, int port);
     ~CLIServer();
 
-    /// @brief Initialize tools
+    /// @brief Initialize tools and RAG
     void init(bool no_mcp = false, bool no_tools = false) override;
 
     /// @brief Run the CLI server

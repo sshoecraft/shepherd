@@ -339,6 +339,11 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
         auto* config = provider_mgr.get_provider(name);
         if (!config) continue;
 
+        // Skip ephemeral providers (priority 0 is reserved for command-line providers)
+        if (config->priority == 0) {
+            continue;
+        }
+
         // Only register API providers (not local models)
         if (!config->is_api()) {
             continue;

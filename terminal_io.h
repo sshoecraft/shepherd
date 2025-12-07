@@ -4,6 +4,7 @@
 #include <vector>
 #include <deque>
 #include <mutex>
+#include <condition_variable>
 #include <termios.h>
 
 // Forward declaration
@@ -54,6 +55,12 @@ public:
     void write(const char* text, size_t len, Color color = Color::DEFAULT);
     void add_input(const std::string& input);
 
+    // Queue management for producer-consumer model
+    void notify_input();                    // Signal that input is available
+    bool wait_for_input(int timeout_ms);    // Wait for input, returns true if available
+    bool has_pending_input();               // Check if queue has pending items
+    size_t queue_size();                    // Get current queue depth
+
     // Response lifecycle management
     void begin_response();  // Call before starting to write a response
     void end_response();    // Call after finishing a response - flushes/consumes incomplete tags
@@ -67,11 +74,12 @@ public:
     bool check_escape_pressed();
 
 private:
-    // Input queue
+    // Input queue with condition variable for producer-consumer
     std::deque<std::string> input_queue;
     std::mutex queue_mutex;
+    std::condition_variable queue_cv;
 
-    // Replxx instance
+    // Replxx instance (may be nullptr if InputReader owns it)
     Replxx* replxx;
 
     // Terminal state for raw mode (unused for now)

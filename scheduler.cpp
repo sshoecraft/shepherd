@@ -10,8 +10,13 @@
 #include <random>
 #include <algorithm>
 #include <cstdlib>
+#include <unistd.h>
 
 using json = nlohmann::json;
+
+// Static instance pointer for signal handler
+Scheduler* Scheduler::instance = nullptr;
+volatile sig_atomic_t Scheduler::alarm_pending = 0;
 
 // ScheduleEntry JSON serialization
 json Scheduler::ScheduleEntry::to_json() const {
@@ -258,46 +263,73 @@ std::vector<Scheduler::ScheduleEntry> Scheduler::list() const {
     return schedules;
 }
 
+void Scheduler::alarm_handler(int sig) {
+    (void)sig;  // Unused
+    // Just set the flag - don't do any real work in signal handler
+    // (mutex/CV operations are not async-signal-safe)
+    alarm_pending = 1;
+
+    // Re-arm the alarm for next minute
+    if (instance && instance->running) {
+        // Simple calculation - just set for 60 seconds
+        // poll() will handle the actual timing
+        alarm(60);
+    }
+}
+
+void Scheduler::poll() {
+    if (!alarm_pending) return;
+    alarm_pending = 0;
+
+    if (running) {
+        check_and_fire();
+    }
+}
+
 void Scheduler::start() {
     if (running) return;
 
+    instance = this;
     running = true;
-    worker_thread = std::thread(&Scheduler::worker_loop, this);
-    LOG_DEBUG("Scheduler started");
+
+    // Set up signal handler for SIGALRM
+    struct sigaction sa;
+    sa.sa_handler = alarm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;  // Restart interrupted system calls
+    sigaction(SIGALRM, &sa, nullptr);
+
+    // Calculate seconds until next minute boundary + 1 second
+    auto now = std::chrono::system_clock::now();
+    auto next_min = std::chrono::ceil<std::chrono::minutes>(now);
+    auto now_sec = std::chrono::time_point_cast<std::chrono::seconds>(now);
+
+    // If we're right at a minute boundary, wait for next minute
+    if (now_sec == std::chrono::time_point_cast<std::chrono::seconds>(next_min)) {
+        next_min += std::chrono::minutes(1);
+    }
+
+    auto wake_time = next_min + std::chrono::seconds(1);
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(wake_time - now);
+    unsigned int secs = static_cast<unsigned int>(duration.count());
+    if (secs == 0) secs = 1;
+
+    alarm(secs);
+
+    LOG_DEBUG("Scheduler started with SIGALRM (next check in " + std::to_string(secs) + "s)");
 }
 
 void Scheduler::stop() {
     if (!running) return;
 
     running = false;
-    if (worker_thread.joinable()) {
-        worker_thread.join();
-    }
+    alarm(0);  // Cancel pending alarm
+    instance = nullptr;
+
+    // Restore default signal handler
+    signal(SIGALRM, SIG_DFL);
+
     LOG_DEBUG("Scheduler stopped");
-}
-
-void Scheduler::worker_loop() {
-    while (running) {
-        check_and_fire();
-
-        // Sleep until next minute boundary + 1 second
-        auto now = std::chrono::system_clock::now();
-        auto now_sec = std::chrono::time_point_cast<std::chrono::seconds>(now);
-        auto next_min = std::chrono::ceil<std::chrono::minutes>(now);
-
-        // If we're right at a minute boundary, wait for next minute
-        if (now_sec == std::chrono::time_point_cast<std::chrono::seconds>(next_min)) {
-            next_min += std::chrono::minutes(1);
-        }
-
-        // Add 1 second offset to ensure we're past the minute boundary
-        auto wake_time = next_min + std::chrono::seconds(1);
-
-        // Sleep in small increments so we can respond to stop() quickly
-        while (running && std::chrono::system_clock::now() < wake_time) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    }
 }
 
 void Scheduler::check_and_fire() {

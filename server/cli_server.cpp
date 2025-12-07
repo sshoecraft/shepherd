@@ -10,8 +10,11 @@
 #include "nlohmann/json.hpp"
 #include <mutex>
 #include <queue>
+#include <deque>
 #include <atomic>
 #include <future>
+#include <thread>
+#include <condition_variable>
 
 using json = nlohmann::json;
 
@@ -94,21 +97,47 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
     return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
 }
 
-// Request queue entry
-struct CliRequest {
-    std::string prompt;
-    std::promise<json> response_promise;
-};
-
-// CLI Server state
+// CLI Server state with input queue
 struct CliServerState {
     Backend* backend;
     Session* session;
     Tools* tools;
-    std::mutex request_mutex;
+
+    // Input queue with condition variable
+    std::deque<std::string> input_queue;
+    std::mutex queue_mutex;
+    std::condition_variable queue_cv;
+
     std::atomic<bool> processing{false};
-    std::atomic<int> queue_depth{0};
+    std::atomic<bool> running{true};
     std::string current_request;
+
+    // Add prompt to queue
+    void add_input(const std::string& prompt) {
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            input_queue.push_back(prompt);
+        }
+        queue_cv.notify_one();
+    }
+
+    // Get queue depth
+    size_t queue_size() {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        return input_queue.size();
+    }
+
+    // Wait for and get next input
+    std::string get_next_input() {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        queue_cv.wait(lock, [this] { return !input_queue.empty() || !running; });
+        if (!running && input_queue.empty()) {
+            return "";
+        }
+        std::string prompt = input_queue.front();
+        input_queue.pop_front();
+        return prompt;
+    }
 };
 
 // Process a single request with tool execution loop
@@ -201,7 +230,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
         json response;
         response["status"] = "ok";
         response["processing"] = state.processing.load();
-        response["queue_depth"] = state.queue_depth.load();
+        response["queue_depth"] = static_cast<int>(state.queue_size());
         response["model"] = backend->model_name;
         response["context_size"] = backend->context_size;
         response["messages"] = state.session->messages.size();
@@ -220,43 +249,51 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
     // Request endpoint
     server.Post("/request", [&](const httplib::Request& req, httplib::Response& res) {
-        std::lock_guard<std::mutex> lock(state.request_mutex);
+        // Parse request
+        json request_json;
+        std::string prompt;
+        bool stream = false;
+        bool async_mode = false;
 
+        if (!req.body.empty()) {
+            try {
+                request_json = json::parse(req.body);
+                if (request_json.contains("prompt")) {
+                    prompt = request_json["prompt"].get<std::string>();
+                }
+                stream = request_json.value("stream", false);
+                async_mode = request_json.value("async", false);
+            } catch (const json::exception&) {
+                // Not JSON, treat body as raw prompt
+                prompt = req.body;
+            }
+        }
+
+        if (prompt.empty()) {
+            json error_response;
+            error_response["success"] = false;
+            error_response["error"] = "Missing prompt";
+            res.status = 400;
+            res.set_content(error_response.dump(), "application/json");
+            return;
+        }
+
+        // Async mode: queue and return immediately
+        if (async_mode && !stream) {
+            state.add_input(prompt);
+            json response;
+            response["success"] = true;
+            response["queued"] = true;
+            response["queue_position"] = static_cast<int>(state.queue_size());
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+
+        // Synchronous processing (with optional streaming)
         state.processing = true;
-        state.queue_depth++;
+        state.current_request = prompt;
 
         try {
-            // Parse request
-            json request_json;
-            std::string prompt;
-            bool stream = false;
-
-            if (!req.body.empty()) {
-                try {
-                    request_json = json::parse(req.body);
-                    if (request_json.contains("prompt")) {
-                        prompt = request_json["prompt"].get<std::string>();
-                    }
-                    stream = request_json.value("stream", false);
-                } catch (const json::exception&) {
-                    // Not JSON, treat body as raw prompt
-                    prompt = req.body;
-                }
-            }
-
-            if (prompt.empty()) {
-                json error_response;
-                error_response["success"] = false;
-                error_response["error"] = "Missing prompt";
-                res.status = 400;
-                res.set_content(error_response.dump(), "application/json");
-                state.processing = false;
-                state.queue_depth--;
-                return;
-            }
-
-            state.current_request = prompt;
-
             if (stream) {
                 // Streaming response using SSE
                 res.set_header("Content-Type", "text/event-stream");
@@ -437,13 +474,10 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
         state.current_request.clear();
         state.processing = false;
-        state.queue_depth--;
     });
 
     // Clear endpoint - reset conversation
     server.Post("/clear", [&](const httplib::Request&, httplib::Response& res) {
-        std::lock_guard<std::mutex> lock(state.request_mutex);
-
         state.session->messages.clear();
         state.session->last_prompt_tokens = 0;
         state.session->total_tokens = 0;
@@ -459,12 +493,49 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
     });
 
     LOG_INFO("CLI server endpoints: /health, /status, /request, /clear");
+
+    // Start background processing thread for async requests
+    std::thread processor_thread([&state]() {
+        LOG_DEBUG("CLI server processor thread started");
+        while (state.running) {
+            std::string prompt = state.get_next_input();
+            if (prompt.empty()) {
+                continue;  // Shutdown or spurious wakeup
+            }
+
+            state.processing = true;
+            state.current_request = prompt;
+
+            LOG_DEBUG("Processing async request: " + prompt.substr(0, 50) + "...");
+            json result = process_request(state, prompt);
+
+            // For async requests, we just log the result (no one is waiting)
+            if (result.value("success", false)) {
+                LOG_DEBUG("Async request completed successfully");
+            } else {
+                LOG_DEBUG("Async request failed: " + result.value("error", "unknown"));
+            }
+
+            state.current_request.clear();
+            state.processing = false;
+        }
+        LOG_DEBUG("CLI server processor thread stopped");
+    });
+
     LOG_INFO("CLI server listening on " + host + ":" + std::to_string(port));
 
     if (!server.listen(host.c_str(), port)) {
         LOG_ERROR("Failed to start CLI server on " + host + ":" + std::to_string(port));
+        state.running = false;
+        state.queue_cv.notify_all();
+        processor_thread.join();
         return 1;
     }
+
+    // Cleanup
+    state.running = false;
+    state.queue_cv.notify_all();
+    processor_thread.join();
 
     return 0;
 }

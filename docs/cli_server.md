@@ -65,9 +65,15 @@ Main request endpoint for prompts.
 ```json
 {
     "prompt": "user message",
-    "stream": true
+    "stream": true,
+    "async": false
 }
 ```
+
+**Parameters:**
+- `prompt` - The user message to process
+- `stream` - Enable SSE streaming (default: false)
+- `async` - Queue request and return immediately (default: false, v2.7.0+)
 
 **Response (streaming):**
 
@@ -87,6 +93,17 @@ data: {"done": true, "response": "Hello world"}
     "success": true
 }
 ```
+
+**Response (async mode):**
+```json
+{
+    "success": true,
+    "queued": true,
+    "queue_position": 1
+}
+```
+
+When `async: true` is set, the request is added to the input queue and returns immediately. The prompt is processed in order by a background thread. Use `/status` to monitor processing.
 
 ## Streaming Support
 
@@ -144,3 +161,4 @@ The CLI client (`cli_client.cpp`) uses `post_stream_cancellable()` for streaming
 
 - **2.6.0** - Initial CLI server implementation
 - **2.6.1** - Added streaming support with SSE, CLI client backend, and add_message_stream for all backends
+- **2.7.0** - Added async request queuing with `async: true` parameter

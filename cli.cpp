@@ -20,6 +20,7 @@
 #include "backends/api.h"  // For ApiBackend::set_chars_per_token()
 #include "backends/factory.h"
 #include "rag.h"
+#include "input_reader.h"
 
 #include <iostream>
 #include <sstream>
@@ -28,6 +29,7 @@
 #include <sys/select.h>
 #include <cstring>
 #include <ctime>
+#include <atomic>
 
 #include "terminal_io.h"
 
@@ -200,12 +202,40 @@ bool CLI::handle_slash_commands(const std::string& input, Session& session) {
 	std::string cmd;
 	iss >> cmd;
 
-	// Parse remaining arguments
+	// Parse remaining arguments - handle quoted strings
 	std::vector<std::string> args;
-	std::string arg;
-	while (iss >> arg) {
-		args.push_back(arg);
+	std::string rest;
+	std::getline(iss, rest);
+
+	std::string token;
+	bool in_quotes = false;
+	std::string quoted_arg;
+
+	for (size_t i = 0; i < rest.size(); ++i) {
+		char c = rest[i];
+		if (c == '"') {
+			if (in_quotes) {
+				args.push_back(quoted_arg);
+				quoted_arg.clear();
+				in_quotes = false;
+			} else {
+				in_quotes = true;
+			}
+		} else if (std::isspace(c) && !in_quotes) {
+			if (!token.empty()) {
+				args.push_back(token);
+				token.clear();
+			}
+		} else {
+			if (in_quotes) {
+				quoted_arg += c;
+			} else {
+				token += c;
+			}
+		}
 	}
+	if (!token.empty()) args.push_back(token);
+	if (!quoted_arg.empty()) args.push_back(quoted_arg);
 
 	// /provider commands
 	if (cmd == "/provider") {
@@ -294,27 +324,56 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 		LOG_INFO("Scheduler disabled via --nosched flag");
 	}
 
+	// Initialize input reader thread
+	InputReader input_reader;
+	std::atomic<bool> eof_signaled{false};
+
+	// Callback to queue input and handle EOF
+	auto input_callback = [&eof_signaled](const std::string& input) {
+		if (input.empty()) {
+			// EOF signal
+			eof_signaled = true;
+			tio.add_input("");  // Add empty to wake up main loop
+			tio.notify_input();
+		} else {
+			tio.add_input(input);
+		}
+	};
+
+	if (!input_reader.init(tio.interactive_mode, tio.colors_enabled, input_callback)) {
+		LOG_ERROR("Failed to initialize input reader");
+		return 1;
+	}
+	input_reader.start();
+
 	std::string user_input;
 
 	// Main interaction loop
 	while (true) {
-		// Get next input (from queue or user)
+		// Poll scheduler for pending alarms
+		if (!g_disable_scheduler) {
+			scheduler.poll();
+		}
+
+		// Wait for input with timeout so we can poll scheduler
+		if (!tio.wait_for_input(1000)) {  // 1 second timeout
+			continue;  // No input, loop back to poll scheduler
+		}
+
+		// Get next input (from queue - InputReader populates it)
 		user_input = tio.read(">");
 
 		if (user_input.empty()) {
-			// Empty string indicates EOF (Ctrl+D) or empty input
-			if (cli.eof_received || std::cin.eof()) {
+			// Empty string indicates EOF
+			if (eof_signaled) {
 				if (!tio.interactive_mode) {
 					LOG_DEBUG("End of piped input");
 				} else {
 					LOG_INFO("User pressed Ctrl+D - exiting");
 				}
 				break;
-			} else if (tio.interactive_mode) {
-				// Interactive mode: empty line continues (just prompt again)
-				continue;
 			} else {
-				// In non-interactive mode, skip empty lines
+				// Spurious empty, continue
 				continue;
 			}
 		}
@@ -408,6 +467,14 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 			while (true) {
 				tool_loop_iteration++;
 				LOG_DEBUG("Tool loop iteration: " + std::to_string(tool_loop_iteration));
+
+				// Check for pending input - if new input arrived, interrupt current processing
+				if (tio.has_pending_input()) {
+					LOG_DEBUG("New input pending, interrupting tool loop");
+					g_generation_cancelled = true;
+					cli.show_cancelled();
+					break;
+				}
 
 				// Check for tool calls from TerminalIO buffer first
 				std::optional<ToolParser::ToolCall> tool_call_opt;
@@ -761,7 +828,8 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 		}
 	}
 
-	// Stop and cleanup scheduler
+	// Stop input reader and scheduler
+	input_reader.stop();
 	scheduler.stop();
 
 	LOG_DEBUG("CLI loop ended");

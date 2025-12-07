@@ -108,20 +108,14 @@ bool TerminalIO::init(int color_override) {
 }
 
 std::string TerminalIO::read(const char* prompt) {
-    std::string line;
+    // Wait for input to be available in the queue
+    // InputReader thread populates the queue, we just consume
+    std::unique_lock<std::mutex> lock(queue_mutex);
 
-    if (input_queue.empty()) {
-        line = get_input_line(prompt);
-        if (line.empty()) {
-            return ""; // EOF
-        }
+    // Wait for input
+    queue_cv.wait(lock, [this] { return !input_queue.empty(); });
 
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        input_queue.push_back(line);
-    }
-
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    line = input_queue.front();
+    std::string line = input_queue.front();
     input_queue.pop_front();
 
     return line;
@@ -364,8 +358,40 @@ void TerminalIO::add_input(const std::string& input) {
         return;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        input_queue.push_back(input);
+    }
+    // Notify waiting consumers
+    queue_cv.notify_one();
+}
+
+void TerminalIO::notify_input() {
+    queue_cv.notify_one();
+}
+
+bool TerminalIO::wait_for_input(int timeout_ms) {
+    std::unique_lock<std::mutex> lock(queue_mutex);
+    if (!input_queue.empty()) {
+        return true;
+    }
+    if (timeout_ms < 0) {
+        // Wait indefinitely
+        queue_cv.wait(lock, [this] { return !input_queue.empty(); });
+        return true;
+    }
+    return queue_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                              [this] { return !input_queue.empty(); });
+}
+
+bool TerminalIO::has_pending_input() {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    input_queue.push_back(input);
+    return !input_queue.empty();
+}
+
+size_t TerminalIO::queue_size() {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return input_queue.size();
 }
 
 std::string TerminalIO::get_input_line(const char* prompt) {

@@ -55,17 +55,46 @@ The CLI implements intelligent truncation to prevent tool results from consuming
 
 ## Input Handling
 
+### Producer-Consumer Model (v2.7.0+)
+
+Input handling uses a dedicated thread (InputReader) that feeds into a queue:
+
+```
+┌─────────────────┐     ┌──────────────────┐
+│  InputReader    │────▶│  Input Queue     │
+│  Thread         │     │  (TerminalIO)    │
+└─────────────────┘     └────────┬─────────┘
+                                 │
+                        ┌────────▼─────────┐
+                        │   Main Thread    │
+                        │   (CLI loop)     │
+                        └──────────────────┘
+```
+
+This allows:
+- Queuing prompts while processing continues
+- Interrupting current processing when new input arrives
+- Scheduler can inject prompts into the same queue
+
 ### Input Sources
 
 1. **Interactive Mode** (TTY detected)
    - Uses `replxx` library for readline functionality
    - History support, arrow keys, Ctrl+C/Ctrl+D handling
-   - Escape key cancels generation in progress
+   - InputReader thread handles replxx input
 
 2. **Piped Mode** (stdin redirection)
-   - Reads lines from stdin
+   - Reads lines from stdin via InputReader thread
    - No interactive prompts
    - Automatic EOF detection
+
+### Interrupt Mechanism
+
+When new input arrives during processing:
+1. Input is queued via `tio.add_input()`
+2. Tool loop checks `tio.has_pending_input()`
+3. If pending, sets `g_generation_cancelled = true`
+4. Current generation stops, main loop proceeds to next input
 
 ### Input Sanitization
 
@@ -146,17 +175,20 @@ Invalid UTF-8 sequences are now correctly replaced with Unicode replacement char
 - Generation cancellation handled gracefully
 
 ### Threading
-- Main CLI runs single-threaded
+- InputReader runs in dedicated thread for input handling
+- Main CLI loop consumes from input queue
 - Backend may use threads internally (e.g., streaming responses)
-- Terminal I/O uses select() for async input during generation
+- Scheduler uses SIGALRM for timer-based prompt injection
 
 ## Dependencies
 
-- `terminal_io.h` - Low-level terminal I/O with marker filtering
+- `terminal_io.h` - Low-level terminal I/O with marker filtering and queue
+- `input_reader.h` - Async input reading thread
 - `tools/tool.h` - Tool execution system
 - `tools/utf8_sanitizer.h` - UTF-8 validation and sanitization
 - `backends/backend.h` - Backend interface
 - `session.h` - Conversation session management
+- `scheduler.h` - SIGALRM-based scheduled prompts
 - `replxx` library - Interactive readline functionality
 
 ## Configuration

@@ -2,10 +2,10 @@
 
 #include <string>
 #include <vector>
-#include <thread>
 #include <mutex>
 #include <atomic>
 #include <set>
+#include <csignal>
 #include "nlohmann/json.hpp"
 
 class Scheduler {
@@ -67,12 +67,20 @@ public:
 
 private:
     std::vector<ScheduleEntry> schedules;
-    std::thread worker_thread;
     std::atomic<bool> running;
     mutable std::mutex mutex;
     std::string config_path;
 
-    void worker_loop();
+    // SIGALRM handler (static for signal compatibility)
+    static void alarm_handler(int sig);
+    static Scheduler* instance;  // For signal handler access
+    static volatile sig_atomic_t alarm_pending;  // Flag set by signal handler
+
+public:
+    // Check if alarm fired and process (call from main loop)
+    void poll();
+
+private:
     void check_and_fire();
     std::string generate_id();
     std::string current_iso_time() const;

@@ -24,15 +24,16 @@ The scheduler module provides cron-like scheduling for LLM prompts. Scheduled pr
 
 2. **CronExpr** - Parsed cron expression with sets of valid values for each field
 
-3. **Scheduler** - Main class handling persistence, CRUD operations, and the background worker thread
+3. **Scheduler** - Main class handling persistence, CRUD operations, and SIGALRM-based execution
 
-### Thread Model
+### Timer Model (v2.7.0+)
 
-- Background worker thread started in `run_cli()`
-- Wakes up at each minute boundary + 1 second
-- Checks all enabled schedules against current time
+- Uses SIGALRM signal instead of background thread
+- `alarm()` set to fire at each minute boundary + 1 second
+- Signal handler checks all enabled schedules against current time
 - Injects matching prompts into `tio.add_input()`
 - Thread-safe access via mutex
+- No polling or sleep loops - efficient timer-based wakeup
 
 ### Storage
 
@@ -119,3 +120,4 @@ Same commands available as slash commands within the CLI:
 
 - **2.6.0** - Initial implementation of scheduler functionality
 - **2.6.1** - Added get_time and get_date tools
+- **2.7.0** - Replaced worker thread with SIGALRM-based timer

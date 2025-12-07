@@ -26,6 +26,7 @@ set(SHEPHERD_SOURCES
     provider.cpp
     logger.cpp
     terminal_io.cpp
+    input_reader.cpp
     http_client.cpp
     rag.cpp
     sse_parser.cpp

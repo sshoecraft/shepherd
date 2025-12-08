@@ -1,8 +1,14 @@
 #include "input_reader.h"
+#include "tui_screen.h"
+#include "terminal_io.h"
 #include "logger.h"
 #include "vendor/replxx/include/replxx.h"
 #include <iostream>
 #include <cstring>
+
+// External globals
+extern TUIScreen* g_tui_screen;
+extern TerminalIO tio;
 
 InputReader::InputReader()
     : replxx(nullptr)
@@ -15,10 +21,7 @@ InputReader::InputReader()
 
 InputReader::~InputReader() {
     stop();
-    if (replxx) {
-        replxx_end(replxx);
-        replxx = nullptr;
-    }
+    // Note: replxx is owned by TerminalIO, not us - don't call replxx_end here
 }
 
 bool InputReader::init(bool interactive, bool colors, InputCallback callback) {
@@ -26,21 +29,12 @@ bool InputReader::init(bool interactive, bool colors, InputCallback callback) {
     colors_enabled = colors;
     on_input = callback;
 
-    if (interactive_mode) {
-        replxx = replxx_init();
+    // Use replxx from TerminalIO (shared instance for coordinated I/O)
+    if (interactive_mode && !tio.tui_mode) {
+        replxx = tio.get_replxx();
         if (!replxx) {
-            LOG_ERROR("Failed to initialize replxx");
+            LOG_ERROR("TerminalIO replxx not initialized");
             return false;
-        }
-
-        // Configure replxx
-        replxx_set_max_history_size(replxx, 1000);
-        replxx_set_max_hint_rows(replxx, 3);
-        replxx_set_indent_multiline(replxx, 1);
-        replxx_enable_bracketed_paste(replxx);
-
-        if (!colors_enabled) {
-            replxx_set_no_color(replxx, 1);
         }
     }
 
@@ -57,9 +51,14 @@ void InputReader::start() {
 }
 
 void InputReader::stop() {
-    if (!running) return;
-
     should_stop = true;
+
+    // Wake up thread if it's paused waiting on pause_cv
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex);
+        prompting_paused = false;
+    }
+    pause_cv.notify_one();
 
     // For interactive mode, we need to interrupt replxx_input
     // Send a newline to unblock it
@@ -67,6 +66,7 @@ void InputReader::stop() {
         replxx_emulate_key_press(replxx, '\n');
     }
 
+    // Always join the thread if joinable (it may have exited naturally on EOF)
     if (reader_thread.joinable()) {
         reader_thread.join();
     }
@@ -75,8 +75,27 @@ void InputReader::stop() {
     LOG_DEBUG("InputReader thread stopped");
 }
 
+void InputReader::pause_prompting() {
+    prompting_paused = true;
+}
+
+void InputReader::resume_prompting() {
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex);
+        prompting_paused = false;
+    }
+    pause_cv.notify_one();
+}
+
 void InputReader::reader_loop() {
     while (!should_stop) {
+        // Wait if prompting is paused (during generation)
+        if (interactive_mode && prompting_paused) {
+            std::unique_lock<std::mutex> lock(pause_mutex);
+            pause_cv.wait(lock, [this] { return !prompting_paused || should_stop; });
+            if (should_stop) break;
+        }
+
         std::string line;
 
         if (interactive_mode) {
@@ -109,20 +128,33 @@ void InputReader::reader_loop() {
         if (on_input) {
             on_input(line);
         }
+
+        // In interactive non-TUI mode, pause after submitting input
+        // Main loop will resume when ready for next input
+        if (interactive_mode && !g_tui_screen) {
+            prompting_paused = true;
+        }
     }
 
     running = false;
 }
 
 std::string InputReader::read_line_interactive() {
-    std::string colored_prompt;
-    if (colors_enabled) {
-        colored_prompt = "\033[32m> \033[0m";
+    // In TUI mode, we don't use a prompt - the input box handles it
+    std::string prompt;
+    if (g_tui_screen) {
+        // Just position cursor - box is already drawn by TUIScreen::refresh()
+        g_tui_screen->position_cursor_in_input(0);
+        prompt = "";  // No prompt - box already has "> "
     } else {
-        colored_prompt = "> ";
+        if (colors_enabled) {
+            prompt = "\033[32m> \033[0m";
+        } else {
+            prompt = "> ";
+        }
     }
 
-    const char* input = replxx_input(replxx, colored_prompt.c_str());
+    const char* input = replxx_input(replxx, prompt.c_str());
     if (input == nullptr) {
         // EOF (Ctrl+D) or error
         return "";
@@ -133,6 +165,12 @@ std::string InputReader::read_line_interactive() {
     // Add to history if non-empty
     if (!line.empty() && !is_blank(line)) {
         replxx_history_add(replxx, input);
+
+        // In TUI mode, clear the input box for next input
+        // (echo happens in CLI when input is consumed)
+        if (g_tui_screen) {
+            g_tui_screen->set_input_content("");
+        }
     }
 
     return line;

@@ -18,6 +18,7 @@
 #include <memory>
 #include <chrono>
 #include <filesystem>
+#include <atomic>
 
 #if 0
 // Make json a core type
@@ -54,8 +55,8 @@ extern bool g_verbose_mode;
 // Server mode flag - true when running as HTTP API server (--server)
 extern bool g_server_mode;
 
-// Cancellation flag
-extern bool g_generation_cancelled;
+// Cancellation flag (atomic for thread safety)
+extern std::atomic<bool> g_generation_cancelled;
 
 // Scheduler disable flag (--nosched)
 extern bool g_disable_scheduler;

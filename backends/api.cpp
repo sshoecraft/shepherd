@@ -4,6 +4,7 @@
 #include "session.h"
 #include "message.h"
 #include "terminal_io.h"
+#include "output_queue.h"
 #include "sse_parser.h"
 
 // ApiBackend implementation
@@ -133,7 +134,7 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
 
         Response resp = add_message_stream(session, type, content,
             [](const std::string& delta, const std::string& accumulated, const Response& partial) -> bool {
-                tio.write(delta.c_str(), delta.length());
+                g_output_queue.push(delta);
                 return true;
             },
             tool_name, tool_id, prompt_tokens, max_tokens);

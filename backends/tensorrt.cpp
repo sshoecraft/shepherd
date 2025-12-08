@@ -9,6 +9,7 @@
 #include "config.h"
 #include "rag.h"
 #include "terminal_io.h"
+#include "output_queue.h"
 
 #ifdef ENABLE_TENSORRT
 #include "tokenizers_c.h"  // Use C API instead of broken C++ wrapper
@@ -1570,7 +1571,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, St
                         response_text += new_text;
                         // Only write to terminal in interactive mode
                         if (!g_server_mode) {
-                            tio.write(new_text.c_str(), new_text.length());
+                            g_output_queue.push(new_text);
                         }
                     }
                 }

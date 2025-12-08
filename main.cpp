@@ -71,8 +71,8 @@ std::unique_ptr<Config> config;
 // Global server mode flag
 bool g_server_mode = false;
 
-// Global generation cancellation flag (for llamacpp backend)
-bool g_generation_cancelled = false;
+// Global generation cancellation flag (for llamacpp backend) - atomic for thread safety
+std::atomic<bool> g_generation_cancelled{false};
 
 // Scheduler disable flag (--nosched)
 bool g_disable_scheduler = false;
@@ -120,6 +120,8 @@ static void print_usage(int, char** argv) {
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
 	printf("	--colors		   Force enable colored output (overrides environment)\n");
 	printf("	--no-colors		   Force disable colored output (overrides environment)\n");
+	printf("	--tui			   Force enable TUI mode (boxed input, status line)\n");
+	printf("	--no-tui		   Force disable TUI mode (classic scrolling terminal)\n");
 	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
 	printf("\nMCP Management:\n");
@@ -154,18 +156,6 @@ static void print_usage(int, char** argv) {
 	printf("\n");
 }
 
-static void signal_handler(int signal) {
-	// Terminal cleanup is handled by CLI destructor
-	printf("\n\nReceived signal %d, shutting down gracefully...\n", signal);
-	exit(0);
-}
-
-static void cancel_handler(int signal) {
-	(void)signal; // Suppress unused parameter warning
-	// Set cancellation flag when SIGUSR1 received (from FastAPI on client disconnect)
-	// g_generation_cancelled = true;  // This would need to be in CLI now
-	LOG_INFO("Received SIGUSR1 - cancelling generation");
-}
 
 static int handle_config_subcommand(int argc, char** argv) {
 	// Convert argc/argv to vector of args (skip "shepherd" and "config")
@@ -402,6 +392,7 @@ int main(int argc, char** argv) {
 	bool no_mcp = false;
 	bool no_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
+	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string log_file;
 	std::string config_file_path;
 	int server_port = 8000;
@@ -465,6 +456,8 @@ int main(int argc, char** argv) {
 		{"thinking", no_argument, 0, 1031},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
+		{"tui", no_argument, 0, 1038},
+		{"no-tui", no_argument, 0, 1039},
 		{"calibration", no_argument, 0, 1034},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
@@ -593,6 +586,12 @@ int main(int argc, char** argv) {
 			case 1033: // --no-colors
 				color_override = 0;
 				break;
+			case 1038: // --tui
+				tui_override = 1;
+				break;
+			case 1039: // --no-tui
+				tui_override = 0;
+				break;
 			case 1034: // --calibration
 				override.calibration = true;
 				break;
@@ -609,7 +608,11 @@ int main(int argc, char** argv) {
 	}
 
 	// Initialize terminal I/O early (before logger and other systems)
-	if (!tio.init(color_override)) {
+	// Server modes should never use TUI or interactive input - force TUI off
+	if (g_server_mode) {
+		tui_override = 0;  // Force TUI off for server modes
+	}
+	if (!tio.init(color_override, tui_override)) {
 		return 1;  // Failed to initialize terminal
 	}
 
@@ -770,10 +773,6 @@ int main(int argc, char** argv) {
 	LOG_INFO("Shepherd starting up...");
 	LOG_INFO("Backend: " + config->backend);
 
-	// Set up signal handlers for graceful shutdown
-	signal(SIGINT, signal_handler);
-	signal(SIGTERM, signal_handler);
-	signal(SIGUSR1, cancel_handler);  // For cancellation from FastAPI on client disconnect
 
 	// Initialize models database if specified
 	if (!config->models_file.empty()) {

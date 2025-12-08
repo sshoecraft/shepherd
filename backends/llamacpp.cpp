@@ -19,6 +19,7 @@
 #endif
 
 #include "terminal_io.h"
+#include "output_queue.h"
 
 // LlamaCppBackend implementation
 LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
@@ -843,7 +844,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
             // Stream output to terminal only if not suppressed (suppressed for tool calls)
             if (!suppress_streaming) {
-                tio.write(token_str, token_len);
+                g_output_queue.push(std::string(token_str, token_len));
             }
         }
 

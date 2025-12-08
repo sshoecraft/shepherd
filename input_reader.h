@@ -3,6 +3,8 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <functional>
 
 // Forward declaration
@@ -33,6 +35,11 @@ public:
     // Check if reader is running
     bool is_running() const { return running; }
 
+    // Pause/resume prompting (for async generation)
+    // When paused, InputReader won't show prompt or read input
+    void pause_prompting();
+    void resume_prompting();
+
     // History management (for interactive mode)
     void history_add(const std::string& line);
     void history_load(const std::string& path);
@@ -45,6 +52,9 @@ private:
     std::thread reader_thread;
     std::atomic<bool> running;
     std::atomic<bool> should_stop;
+    std::atomic<bool> prompting_paused{false};
+    std::mutex pause_mutex;
+    std::condition_variable pause_cv;
     bool interactive_mode;
     bool colors_enabled;
     InputCallback on_input;

@@ -1,14 +1,17 @@
 #include "terminal_io.h"
+#include "tui_screen.h"
 #include "logger.h"
 #include "vendor/replxx/include/replxx.h"
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <unistd.h>
 #include <sys/select.h>
 
 // External globals
 extern int g_debug_level;
+extern bool g_server_mode;
 
 // Global instance
 TerminalIO tio;
@@ -16,9 +19,11 @@ TerminalIO tio;
 TerminalIO::TerminalIO()
     : interactive_mode(false)
     , colors_enabled(false)
+    , tui_mode(false)
     , show_thinking(false)
     , last_char_was_newline(true)  // Start as if on new line
     , json_brace_depth(0)
+    , tui_screen(nullptr)
     , replxx(nullptr)
     , term_raw_mode(false)
     , filter_state(NORMAL)
@@ -29,6 +34,10 @@ TerminalIO::TerminalIO()
 }
 
 TerminalIO::~TerminalIO() {
+    if (tui_screen) {
+        delete tui_screen;
+        tui_screen = nullptr;
+    }
     if (replxx) {
         replxx_end(replxx);
         replxx = nullptr;
@@ -38,11 +47,15 @@ TerminalIO::~TerminalIO() {
     }
 }
 
-bool TerminalIO::init(int color_override) {
+bool TerminalIO::init(int color_override, int tui_override) {
     // Detect if stdin is a TTY - check env var first (preserved across MPI re-exec)
     const char* interactive_env = getenv("SHEPHERD_INTERACTIVE");
 
-    if (interactive_env) {
+    if (g_server_mode) {
+        // Server modes are never interactive - no user input from stdin
+        interactive_mode = false;
+        LOG_DEBUG("TerminalIO: server mode, forcing interactive_mode=false");
+    } else if (interactive_env) {
         interactive_mode = (std::string(interactive_env) == "1");
         LOG_DEBUG("TerminalIO using SHEPHERD_INTERACTIVE=" + std::string(interactive_env) +
                   " -> interactive_mode=" + std::to_string(interactive_mode));
@@ -84,8 +97,38 @@ bool TerminalIO::init(int color_override) {
         }
     }
 
-    // Initialize replxx for interactive mode
-    if (interactive_mode) {
+    // Determine TUI mode
+    if (tui_override == 1) {
+        tui_mode = true;
+    } else if (tui_override == 0) {
+        tui_mode = false;
+    } else {
+        // Auto: TUI mode only in interactive mode with color support
+        tui_mode = interactive_mode && colors_enabled;
+    }
+
+    // Initialize TUI screen if in TUI mode
+    if (tui_mode) {
+        tui_screen = new TUIScreen();
+        if (!tui_screen->init()) {
+            LOG_ERROR("Failed to initialize TUI screen, falling back to standard mode");
+            delete tui_screen;
+            tui_screen = nullptr;
+            tui_mode = false;
+        } else {
+            LOG_DEBUG("TUI mode enabled");
+            g_tui_screen = tui_screen;
+
+            // Set up input callback to queue input
+            tui_screen->set_input_callback([this](const std::string& input) {
+                add_input(input);
+            });
+        }
+    }
+
+    // Initialize replxx for interactive non-TUI mode
+    // This single instance is shared - InputReader uses tio.replxx for input
+    if (interactive_mode && !tui_mode) {
         replxx = replxx_init();
         if (!replxx) {
             std::cerr << "ERROR: Failed to initialize terminal (replxx)\n";
@@ -95,10 +138,9 @@ bool TerminalIO::init(int color_override) {
         // Configure replxx
         replxx_set_max_history_size(replxx, 1000);
         replxx_set_max_hint_rows(replxx, 3);
-        replxx_set_indent_multiline(replxx, 1);  // Enable multiline input
-        replxx_enable_bracketed_paste(replxx);   // Enable bracketed paste for multi-line pasting
+        replxx_set_indent_multiline(replxx, 1);
+        replxx_enable_bracketed_paste(replxx);
 
-        // Disable colors in replxx if needed
         if (!colors_enabled) {
             replxx_set_no_color(replxx, 1);
         }
@@ -108,6 +150,11 @@ bool TerminalIO::init(int color_override) {
 }
 
 std::string TerminalIO::read(const char* prompt) {
+    auto [text, needs_echo] = read_with_echo_flag(prompt);
+    return text;
+}
+
+std::pair<std::string, bool> TerminalIO::read_with_echo_flag(const char* prompt) {
     // Wait for input to be available in the queue
     // InputReader thread populates the queue, we just consume
     std::unique_lock<std::mutex> lock(queue_mutex);
@@ -115,27 +162,31 @@ std::string TerminalIO::read(const char* prompt) {
     // Wait for input
     queue_cv.wait(lock, [this] { return !input_queue.empty(); });
 
-    std::string line = input_queue.front();
+    QueuedInput item = input_queue.front();
     input_queue.pop_front();
 
-    return line;
+    return {item.text, item.needs_echo};
 }
 
 void TerminalIO::write_raw(const char* text, size_t len, Color color) {
-    if (interactive_mode) {
-        if (colors_enabled && color != Color::DEFAULT) {
-            // Apply color
-            const char* ansi_color = get_ansi_color(color);
-            replxx_write(replxx, ansi_color, strlen(ansi_color));
-            replxx_write(replxx, text, len);
-            replxx_write(replxx, "\033[0m", 4); // Reset
-        } else {
-            replxx_write(replxx, text, len);
-        }
+    // In TUI mode, route through TUIScreen
+    if (tui_screen) {
+        tui_screen->write_output(text, len, color);
+        tui_screen->flush();
+        return;
+    }
+
+    // Use stdout for all non-TUI output
+    // Note: replxx_write is not thread-safe with replxx_input running in another thread
+    if (colors_enabled && color != Color::DEFAULT) {
+        const char* ansi_color = get_ansi_color(color);
+        std::cout << ansi_color;
+        std::cout.write(text, len);
+        std::cout << "\033[0m";
     } else {
         std::cout.write(text, len);
-        std::cout.flush();
     }
+    std::cout.flush();
 }
 
 void TerminalIO::write(const char* text, size_t len, Color color) {
@@ -352,7 +403,7 @@ void TerminalIO::write(const char* text, size_t len, Color color) {
     }
 }
 
-void TerminalIO::add_input(const std::string& input) {
+void TerminalIO::add_input(const std::string& input, bool needs_echo) {
     // Skip blank lines
     if (input.empty() || is_blank(input)) {
         return;
@@ -360,8 +411,14 @@ void TerminalIO::add_input(const std::string& input) {
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex);
-        input_queue.push_back(input);
+        input_queue.push_back({input, needs_echo});
     }
+
+    // If generating and in TUI mode, show input as queued (gray)
+    if (is_generating && tui_screen) {
+        tui_screen->show_queued_input(input);
+    }
+
     // Notify waiting consumers
     queue_cv.notify_one();
 }
@@ -569,4 +626,18 @@ bool TerminalIO::check_escape_pressed() {
     }
 
     return false;
+}
+
+// TUI-specific methods
+void TerminalIO::set_status(const std::string& left, const std::string& right) {
+    if (tui_screen) {
+        tui_screen->set_status(left, right);
+    }
+}
+
+void TerminalIO::echo_user_input(const std::string& input) {
+    // Display input in output window with > prefix
+    // This is called for ALL input sources (user, scheduler, warmup, etc.)
+    std::string formatted = "> " + input + "\n";
+    write(formatted.c_str(), formatted.length(), Color::GREEN);
 }

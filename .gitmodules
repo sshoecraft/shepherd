@@ -9,3 +9,6 @@
 [submodule "vendor/replxx"]
 	path = vendor/replxx
 	url = https://github.com/AmokHuginnsson/replxx.git
+[submodule "vendor/ftxui"]
+	path = vendor/ftxui
+	url = https://github.com/ArthurSonzogni/FTXUI.git

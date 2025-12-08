@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "logger.h"
 #include "terminal_io.h"
+#include "output_queue.h"
 #include "nlohmann/json.hpp"
 
 extern std::unique_ptr<Config> config;
@@ -165,7 +166,7 @@ Response CLIClientBackend::add_message(Session& session,
 
         Response resp = send_request(content,
             [](const std::string& delta, const std::string& accumulated, const Response& partial) -> bool {
-                tio.write(delta.c_str(), delta.length());
+                g_output_queue.push(delta);
                 return true;
             });
 

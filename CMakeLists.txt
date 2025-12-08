@@ -26,7 +26,10 @@ set(SHEPHERD_SOURCES
     provider.cpp
     logger.cpp
     terminal_io.cpp
+    tui_screen.cpp
     input_reader.cpp
+    output_queue.cpp
+    generation_thread.cpp
     http_client.cpp
     rag.cpp
     sse_parser.cpp
@@ -358,11 +361,17 @@ if(ENABLE_LLAMACPP)
     )
 endif()
 
-# replxx for line editing
+# replxx for line editing (used in non-TUI mode)
 add_subdirectory(vendor/replxx)
 target_link_libraries(shepherd PRIVATE replxx)
 target_include_directories(shepherd PRIVATE vendor/replxx/include)
 message(STATUS "Using replxx for line editing")
+
+# ncurses for TUI mode
+find_package(Curses REQUIRED)
+target_include_directories(shepherd PRIVATE ${CURSES_INCLUDE_DIR})
+target_link_libraries(shepherd PRIVATE ${CURSES_LIBRARIES})
+message(STATUS "Using ncurses for TUI")
 
 # Compiler options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

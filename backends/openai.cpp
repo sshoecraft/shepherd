@@ -1162,7 +1162,18 @@ Response OpenAIBackend::add_message_stream(Session& session,
                 session.last_prompt_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
             }
 
-            session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            // Update total tokens
+            if (accumulated_resp.prompt_tokens > 0) {
+                // Server provided token count - use it
+                session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            } else {
+                // Server didn't provide tokens - calculate from session messages
+                int total = 0;
+                for (const auto& msg : session.messages) {
+                    total += msg.tokens;
+                }
+                session.total_tokens = total;
+            }
         }
 
         return accumulated_resp;

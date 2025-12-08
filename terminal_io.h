@@ -5,10 +5,12 @@
 #include <deque>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <termios.h>
 
-// Forward declaration
+// Forward declarations
 struct Replxx;
+class TUIScreen;
 
 // Color codes for terminal output
 enum class Color {
@@ -33,6 +35,7 @@ public:
     // Public state
     bool interactive_mode;
     bool colors_enabled;
+    bool tui_mode;                      // True if using TUI screen layout
 
     // Output filtering configuration
     OutputMarkers markers;
@@ -48,12 +51,14 @@ public:
 
     // Initialization
     // color_override: -1 = auto-detect, 0 = force off, 1 = force on
-    bool init(int color_override = -1);
+    // tui_override: -1 = auto (on if interactive), 0 = force off, 1 = force on
+    bool init(int color_override = -1, int tui_override = -1);
 
     // Input/Output
     std::string read(const char* prompt);
+    std::pair<std::string, bool> read_with_echo_flag(const char* prompt);  // Returns (input, needs_echo)
     void write(const char* text, size_t len, Color color = Color::DEFAULT);
-    void add_input(const std::string& input);
+    void add_input(const std::string& input, bool needs_echo = true);
 
     // Queue management for producer-consumer model
     void notify_input();                    // Signal that input is available
@@ -73,9 +78,25 @@ public:
     void restore_terminal();
     bool check_escape_pressed();
 
+    // TUI-specific methods
+    void set_status(const std::string& left, const std::string& right);
+    void echo_user_input(const std::string& input);  // Show user input in output area
+    TUIScreen* get_tui_screen() { return tui_screen; }
+    Replxx* get_replxx() { return replxx; }  // For InputReader to share
+
+    // Generation state (for queued input visual feedback)
+    std::atomic<bool> is_generating{false};
+
 private:
+    // TUI screen (owned, nullptr if not in TUI mode)
+    TUIScreen* tui_screen;
+    // Input queue item - input string plus whether it needs to be echoed
+    struct QueuedInput {
+        std::string text;
+        bool needs_echo;  // false if replxx already displayed it
+    };
     // Input queue with condition variable for producer-consumer
-    std::deque<std::string> input_queue;
+    std::deque<QueuedInput> input_queue;
     std::mutex queue_mutex;
     std::condition_variable queue_cv;
 

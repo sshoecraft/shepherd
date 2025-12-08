@@ -1,6 +1,7 @@
 #include "provider.h"
 #include "config.h"
 #include "logger.h"
+#include "terminal_io.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
 #include "session.h"
@@ -284,9 +285,14 @@ std::unique_ptr<Backend> Provider::connect(Session& session) {
 
     LOG_INFO("Connecting to provider: " + name + " (type: " + type + ")");
 
-    // Print loading message (not for mpirun children)
+    // Print loading message (not for mpirun children, and route through TUI if active)
     if (!getenv("OMPI_COMM_WORLD_SIZE")) {
-        std::cerr << "Loading provider: " << name << std::endl;
+        std::string msg = "Loading provider: " + name + "\n";
+        if (tio.tui_mode) {
+            tio.write(msg.c_str(), msg.length(), Color::GRAY);
+        } else {
+            std::cerr << "Loading provider: " << name << std::endl;
+        }
     }
 
     // Set config globals from this provider

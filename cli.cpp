@@ -468,16 +468,8 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 			tool_loop_iteration++;
 			LOG_DEBUG("Tool loop iteration: " + std::to_string(tool_loop_iteration));
 
-			// Check for pending input - interrupt if new input arrived
-			if (tio.has_pending_input()) {
-				LOG_DEBUG("New input pending, interrupting tool loop");
-				g_generation_cancelled = true;
-				cli.show_cancelled();
-				in_tool_loop = false;
-				tool_loop_iteration = 0;
-				recent_tool_calls.clear();
-				continue;
-			}
+			// Pending input just queues - don't cancel generation
+			// User can press Escape to cancel if needed
 
 			// Check for tool calls
 			std::optional<ToolParser::ToolCall> tool_call_opt;

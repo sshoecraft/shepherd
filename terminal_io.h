@@ -65,6 +65,7 @@ public:
     bool wait_for_input(int timeout_ms);    // Wait for input, returns true if available
     bool has_pending_input();               // Check if queue has pending items
     size_t queue_size();                    // Get current queue depth
+    void clear_input_queue();               // Clear all pending input (used on Escape cancel)
 
     // Response lifecycle management
     void begin_response();  // Call before starting to write a response

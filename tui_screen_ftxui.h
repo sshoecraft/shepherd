@@ -6,7 +6,6 @@
 #include <memory>
 #include <functional>
 #include <atomic>
-#include <chrono>
 
 // Forward declarations for FTXUI
 namespace ftxui {
@@ -32,18 +31,9 @@ public:
     bool init();
     void shutdown();
 
-    // Output line types for formatting
-    enum class LineType {
-        USER,       // User input ("> " prefix, green, no indent)
-        TOOL_CALL,  // Tool call ("* " prefix, yellow, no indent)
-        TOOL_RESULT,// Tool result ("> " prefix, cyan, no indent)
-        ASSISTANT,  // Model output (default color, indented)
-        SYSTEM      // System messages (red/gray, no indent)
-    };
-
     // Output area management (thread-safe)
-    void write_output(const std::string& text, LineType type);
-    void write_output(const char* text, size_t len, LineType type);
+    void write_output(const std::string& text, Color color);
+    void write_output(const char* text, size_t len, Color color);
 
     // Input handling
     void set_input_callback(InputCallback callback);
@@ -59,11 +49,6 @@ public:
 
     // Check if TUI has been quit
     bool has_quit() const { return quit_requested; }
-
-    // Check if Escape was pressed (for cancellation) - clears the flag
-    bool check_escape_pressed() {
-        return escape_pressed.exchange(false);
-    }
 
     // Request a screen refresh (call after adding output)
     void request_refresh();
@@ -92,37 +77,11 @@ private:
 
     // State
     std::string input_content;
-
-    // Output lines with type info
-    struct ColoredLine {
-        std::string text;
-        Color color;
-        LineType type;
-    };
-    std::vector<ColoredLine> output_lines;
-    std::string current_output_line;  // Partial line for streaming
-    Color current_output_color;  // Color for current streaming line (initialized in .cpp)
-    LineType current_output_type;  // Type for current streaming line
-    int scroll_offset{0};  // Lines scrolled back from bottom (0 = at bottom)
+    std::vector<std::string> output_lines;
     std::string status_left;
     std::string status_right;
     std::atomic<bool> quit_requested{false};
     std::atomic<bool> refresh_needed{false};
-    std::atomic<bool> escape_pressed{false};  // For cancellation
-    bool in_paste_mode{false};  // Bracketed paste tracking
-    std::chrono::steady_clock::time_point last_escape_time;  // For double-escape detection
-
-    // Input history
-    std::vector<std::string> history;
-    int history_index{-1};
-    std::string saved_input;  // Save current input when browsing history
-
-    // Queued input display (separate from output)
-    struct QueuedInputDisplay {
-        std::string text;
-        bool is_processing;  // false=gray (queued), true=cyan (processing)
-    };
-    std::vector<QueuedInputDisplay> queued_inputs;
 
     // Input callback
     InputCallback on_input;

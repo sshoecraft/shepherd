@@ -3,6 +3,7 @@
 #include "logger.h"
 #include "vendor/replxx/include/replxx.h"
 #include <iostream>
+#include <sstream>
 #include <cstdlib>
 #include <cstring>
 #include <utility>
@@ -171,7 +172,17 @@ std::pair<std::string, bool> TerminalIO::read_with_echo_flag(const char* prompt)
 void TerminalIO::write_raw(const char* text, size_t len, Color color) {
     // In TUI mode, route through TUIScreen
     if (tui_screen) {
-        tui_screen->write_output(text, len, color);
+        // Map Color to LineType
+        TUIScreen::LineType type;
+        switch (color) {
+            case Color::GREEN:  type = TUIScreen::LineType::USER; break;
+            case Color::YELLOW: type = TUIScreen::LineType::TOOL_CALL; break;
+            case Color::CYAN:   type = TUIScreen::LineType::TOOL_RESULT; break;
+            case Color::RED:
+            case Color::GRAY:   type = TUIScreen::LineType::SYSTEM; break;
+            default:            type = TUIScreen::LineType::ASSISTANT; break;
+        }
+        tui_screen->write_output(text, len, type);
         tui_screen->flush();
         return;
     }
@@ -451,6 +462,11 @@ size_t TerminalIO::queue_size() {
     return input_queue.size();
 }
 
+void TerminalIO::clear_input_queue() {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    input_queue.clear();
+}
+
 std::string TerminalIO::get_input_line(const char* prompt) {
     while (true) {
         std::string line;
@@ -608,6 +624,17 @@ void TerminalIO::restore_terminal() {
 }
 
 bool TerminalIO::check_escape_pressed() {
+    // In TUI mode, check FTXUI's escape flag
+    if (tui_screen) {
+        if (tui_screen->check_escape_pressed()) {
+            // Clear queued input on cancel
+            clear_input_queue();
+            return true;
+        }
+        return false;
+    }
+
+    // Non-TUI mode: check raw terminal input
     if (!term_raw_mode) return false;
 
     fd_set readfds;
@@ -636,8 +663,21 @@ void TerminalIO::set_status(const std::string& left, const std::string& right) {
 }
 
 void TerminalIO::echo_user_input(const std::string& input) {
-    // Display input in output window with > prefix
-    // This is called for ALL input sources (user, scheduler, warmup, etc.)
-    std::string formatted = "> " + input + "\n";
+    // Display input in output window with > prefix on first line only
+    // Continuation lines get indented with spaces
+    std::string formatted;
+    std::istringstream stream(input);
+    std::string line;
+    bool first = true;
+    while (std::getline(stream, line)) {
+        if (!first) formatted += "\n";
+        if (first) {
+            formatted += "> " + line;
+            first = false;
+        } else {
+            formatted += "  " + line;  // 2-space indent for continuation
+        }
+    }
+    formatted += "\n";
     write(formatted.c_str(), formatted.length(), Color::GREEN);
 }

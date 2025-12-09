@@ -49,6 +49,17 @@ public:
     HttpResponse get(const std::string& url,
                      const std::map<std::string, std::string>& headers = {});
 
+    /// @brief Perform HTTP GET request with streaming response
+    /// @param url Full URL to request
+    /// @param headers Optional custom headers
+    /// @param callback Callback function for each chunk
+    /// @param user_data User data passed to callback
+    /// @return Response object (body will be empty as it's streamed)
+    HttpResponse get_stream(const std::string& url,
+                           const std::map<std::string, std::string>& headers,
+                           StreamCallback callback,
+                           void* user_data = nullptr);
+
     /// @brief Perform HTTP POST request
     /// @param url Full URL to request
     /// @param body Request body (typically JSON)

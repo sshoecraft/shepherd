@@ -9,6 +9,7 @@
 #include "frontend.h"
 #include "cli.h"
 #include "server/cli_server.h"
+#include "server/control.h"
 #include "terminal_io.h"
 #include "backends/backend.h"
 #include "backends/factory.h"
@@ -88,6 +89,7 @@ static void print_usage(int, char** argv) {
 	printf("	%s config <show|set> [args...]\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
+	printf("	%s ctl <status|shutdown> [--socket PATH]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
@@ -388,6 +390,15 @@ int main(int argc, char** argv) {
 		return handle_sched_command(argc, argv);
 	}
 
+	// Handle ctl subcommand (server control)
+	if (argc >= 2 && std::string(argv[1]) == "ctl") {
+		std::vector<std::string> args;
+		for (int i = 2; i < argc; i++) {
+			args.push_back(argv[i]);
+		}
+		return handle_ctl_args(args);
+	}
+
 	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
 	bool no_tools = false;
@@ -609,7 +620,7 @@ int main(int argc, char** argv) {
 
 	// Initialize terminal I/O early (before logger and other systems)
 	// Server modes should never use TUI or interactive input - force TUI off
-	if (g_server_mode) {
+	if (g_server_mode || frontend_mode == "cli-server") {
 		tui_override = 0;  // Force TUI off for server modes
 	}
 	if (!tio.init(color_override, tui_override)) {

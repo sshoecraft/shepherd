@@ -129,6 +129,7 @@ public:
     int context_token_count;
     bool is_local = false;  // true for GPU/local backends (llamacpp, tensorrt), false for API backends
     bool streaming_enabled = false;  // true if backend supports and has enabled streaming
+    bool sse_handles_output = false;  // true if SSE handles all output (CLI client backend)
 
 protected:
     virtual void parse_backend_config() {

@@ -705,7 +705,8 @@ static int run_cli_impl(CLI& cli, std::unique_ptr<Backend>& backend, Session& se
 		}
 
 		// Echo input to output window (only if not already displayed by replxx)
-		if (needs_echo) {
+		// Skip if SSE handles output (CLI client backend)
+		if (needs_echo && !backend->sse_handles_output) {
 			tio.echo_user_input(user_input);
 		}
 

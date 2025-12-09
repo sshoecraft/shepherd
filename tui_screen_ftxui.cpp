@@ -1,6 +1,9 @@
 #include "tui_screen.h"
 #include "terminal_io.h"
 
+#include <termios.h>
+#include <unistd.h>
+
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/loop.hpp>
@@ -70,20 +73,27 @@ void TUIScreen::shutdown() {
         }
     }
 
-    if (loop) {
-        delete loop;
-        loop = nullptr;
-    }
+    // Just signal exit - don't delete, let program cleanup handle it
+    // Deleting causes crashes due to FTXUI's DEC mode cleanup lambdas
     if (screen) {
-        delete screen;
-        screen = nullptr;
+        screen->Exit();
     }
+    // Note: intentionally NOT deleting loop and screen
+    // FTXUI has issues with cleanup order of captured lambdas
 
     // Disable bracketed paste mode
     printf("\033[?2004l");
     // Restore cursor: show it and set to steady block
     printf("\033[?25h");   // Show cursor
     printf("\033[2 q");    // Steady block
+
+    // Restore terminal to sane defaults
+    struct termios term;
+    tcgetattr(STDIN_FILENO, &term);
+    term.c_iflag |= (BRKINT | ICRNL | IMAXBEL | IUTF8);
+    term.c_oflag |= (OPOST | ONLCR);
+    term.c_lflag |= (ICANON | ISIG | IEXTEN | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE);
+    tcsetattr(STDIN_FILENO, TCSANOW, &term);
 
     // Dump session history to terminal so it's in scrollback
     printf("\n--- Session History ---\n");

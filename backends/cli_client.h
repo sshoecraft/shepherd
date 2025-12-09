@@ -5,13 +5,15 @@
 #include <memory>
 #include <string>
 #include <sstream>
+#include <thread>
+#include <atomic>
 
 /// @brief Backend that connects to a CLI server
 /// Simple client that POSTs prompts to /request and gets responses
 class CLIClientBackend : public Backend {
 public:
     explicit CLIClientBackend(const std::string& base_url);
-    ~CLIClientBackend() override = default;
+    ~CLIClientBackend() override;
 
     void initialize(Session& session) override;
 
@@ -44,6 +46,11 @@ public:
 private:
     std::string base_url;
     std::unique_ptr<HttpClient> http_client;
+
+    // SSE listener thread for updates
+    std::thread sse_thread;
+    std::atomic<bool> sse_running{false};
+    void sse_listener_thread();
 
     Response send_request(const std::string& prompt, StreamCallback callback = nullptr);
 };

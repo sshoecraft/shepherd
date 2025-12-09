@@ -6,23 +6,68 @@
 #include "../mcp/mcp.h"
 #include "../rag.h"
 #include "../config.h"
-#include "../llama.cpp/vendor/cpp-httplib/httplib.h"
-#include "nlohmann/json.hpp"
-#include <mutex>
-#include <queue>
-#include <deque>
-#include <atomic>
-#include <future>
+#include <algorithm>
 #include <thread>
-#include <condition_variable>
+#include <chrono>
 
 using json = nlohmann::json;
 
 extern std::unique_ptr<Config> config;
 
+// CliServerState methods
+void CliServerState::add_input(const std::string& prompt) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        input_queue.push_back(prompt);
+    }
+    queue_cv.notify_one();
+}
+
+size_t CliServerState::queue_size() {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    return input_queue.size();
+}
+
+std::string CliServerState::get_next_input() {
+    std::unique_lock<std::mutex> lock(queue_mutex);
+    queue_cv.wait(lock, [this] { return !input_queue.empty() || !running; });
+    if (!running && input_queue.empty()) {
+        return "";
+    }
+    std::string prompt = input_queue.front();
+    input_queue.pop_front();
+    return prompt;
+}
+
+void CliServerState::broadcast_event(const std::string& event_type, const nlohmann::json& data) {
+    std::lock_guard<std::mutex> lock(sse_mutex);
+
+    nlohmann::json event;
+    event["type"] = event_type;
+    event["data"] = data;
+    std::string sse_data = "data: " + event.dump() + "\n\n";
+
+    LOG_DEBUG("Broadcasting SSE event: " + event_type + " to " + std::to_string(sse_clients.size()) + " clients");
+
+    // Send to all connected SSE clients
+    for (auto it = sse_clients.begin(); it != sse_clients.end(); ) {
+        SSEClient* client = *it;
+        if (client && client->sink) {
+            if (!client->sink->write(sse_data.c_str(), sse_data.size())) {
+                // Client disconnected, remove from list
+                LOG_DEBUG("SSE client disconnected during broadcast");
+                it = sse_clients.erase(it);
+                delete client;
+                continue;
+            }
+        }
+        ++it;
+    }
+}
+
 // CLIServer class implementation
 CLIServer::CLIServer(const std::string& host, int port)
-    : Server(host, port) {
+    : Server(host, port, "cli") {
 }
 
 CLIServer::~CLIServer() {
@@ -85,10 +130,6 @@ void CLIServer::init(Session& session, bool no_mcp, bool no_tools, const std::st
     }
 }
 
-int CLIServer::run(Session& session) {
-    return run_cli_server(backend, session, host, port, tools);
-}
-
 // Helper: Extract tool call from Response
 static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
     if (!resp.tool_calls.empty()) {
@@ -96,49 +137,6 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
     }
     return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
 }
-
-// CLI Server state with input queue
-struct CliServerState {
-    Backend* backend;
-    Session* session;
-    Tools* tools;
-
-    // Input queue with condition variable
-    std::deque<std::string> input_queue;
-    std::mutex queue_mutex;
-    std::condition_variable queue_cv;
-
-    std::atomic<bool> processing{false};
-    std::atomic<bool> running{true};
-    std::string current_request;
-
-    // Add prompt to queue
-    void add_input(const std::string& prompt) {
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            input_queue.push_back(prompt);
-        }
-        queue_cv.notify_one();
-    }
-
-    // Get queue depth
-    size_t queue_size() {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        return input_queue.size();
-    }
-
-    // Wait for and get next input
-    std::string get_next_input() {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        queue_cv.wait(lock, [this] { return !input_queue.empty() || !running; });
-        if (!running && input_queue.empty()) {
-            return "";
-        }
-        std::string prompt = input_queue.front();
-        input_queue.pop_front();
-        return prompt;
-    }
-};
 
 // Process a single request with tool execution loop
 static json process_request(CliServerState& state, const std::string& prompt) {
@@ -204,51 +202,76 @@ static json process_request(CliServerState& state, const std::string& prompt) {
     return result;
 }
 
-int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
-                   const std::string& host, int port, Tools& tools) {
+void CLIServer::add_status_info(nlohmann::json& status) {
+    status["processing"] = state.processing.load();
+    status["queue_depth"] = static_cast<int>(state.queue_size());
+    status["messages"] = state.session ? state.session->messages.size() : 0;
 
-    LOG_INFO("Starting CLI server on " + host + ":" + std::to_string(port));
+    if (state.processing.load() && !state.current_request.empty()) {
+        // Truncate for display
+        std::string truncated = state.current_request;
+        if (truncated.length() > 100) {
+            truncated = truncated.substr(0, 100) + "...";
+        }
+        status["current_request"] = truncated;
+    }
+}
 
-    httplib::Server server;
+void CLIServer::on_server_start() {
+    // Start background processing thread for async requests
+    processor_thread = std::thread([this]() {
+        LOG_DEBUG("CLI server processor thread started");
+        while (state.running) {
+            std::string prompt = state.get_next_input();
+            if (prompt.empty()) {
+                continue;  // Shutdown or spurious wakeup
+            }
 
-    CliServerState state;
+            state.processing = true;
+            state.current_request = prompt;
+
+            LOG_DEBUG("Processing async request: " + prompt.substr(0, 50) + "...");
+            json result = process_request(state, prompt);
+
+            // Increment request counter
+            requests_processed++;
+
+            // For async requests, we just log the result (no one is waiting)
+            if (result.value("success", false)) {
+                LOG_DEBUG("Async request completed successfully");
+            } else {
+                LOG_DEBUG("Async request failed: " + result.value("error", "unknown"));
+            }
+
+            state.current_request.clear();
+            state.processing = false;
+        }
+        LOG_DEBUG("CLI server processor thread stopped");
+    });
+}
+
+void CLIServer::on_server_stop() {
+    // Signal everything to stop
+    state.running = false;
+    state.queue_cv.notify_all();
+
+    // Signal any in-flight generation to cancel
+    g_generation_cancelled = true;
+
+    // Wait for processor thread to finish
+    if (processor_thread.joinable()) {
+        processor_thread.join();
+    }
+}
+
+void CLIServer::register_endpoints(Session& session) {
+    // Initialize state with backend, session, and tools
     state.backend = backend.get();
     state.session = &session;
     state.tools = &tools;
 
-    // Health endpoint
-    server.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
-        json response;
-        response["status"] = "ok";
-        response["mode"] = "cli_server";
-        response["model"] = backend->model_name;
-        res.set_content(response.dump(), "application/json");
-    });
-
-    // Status endpoint
-    server.Get("/status", [&](const httplib::Request&, httplib::Response& res) {
-        json response;
-        response["status"] = "ok";
-        response["processing"] = state.processing.load();
-        response["queue_depth"] = static_cast<int>(state.queue_size());
-        response["model"] = backend->model_name;
-        response["context_size"] = backend->context_size;
-        response["messages"] = state.session->messages.size();
-
-        if (state.processing.load() && !state.current_request.empty()) {
-            // Truncate for display
-            std::string truncated = state.current_request;
-            if (truncated.length() > 100) {
-                truncated = truncated.substr(0, 100) + "...";
-            }
-            response["current_request"] = truncated;
-        }
-
-        res.set_content(response.dump(), "application/json");
-    });
-
-    // Request endpoint
-    server.Post("/request", [&](const httplib::Request& req, httplib::Response& res) {
+    // POST /request - Main request endpoint
+    tcp_server.Post("/request", [this](const httplib::Request& req, httplib::Response& res) {
         // Parse request
         json request_json;
         std::string prompt;
@@ -289,9 +312,38 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
             return;
         }
 
+        // Acquire request mutex - blocks until previous request completes
+        std::unique_lock<std::mutex> request_lock(state.request_mutex);
+
+        // Check if we're shutting down
+        if (!state.running) {
+            json error_response;
+            error_response["success"] = false;
+            error_response["error"] = "Server is shutting down";
+            res.status = 503;
+            res.set_content(error_response.dump(), "application/json");
+            return;
+        }
+
+        // Log request with client info (at debug level)
+        std::string client_info = req.remote_addr;
+        if (!req.get_header_value("X-Client-ID").empty()) {
+            client_info += " (" + req.get_header_value("X-Client-ID") + ")";
+        }
+        LOG_DEBUG("Request from " + client_info + ": " + prompt.substr(0, 100) + (prompt.length() > 100 ? "..." : ""));
+
+        // Broadcast that a new request is starting
+        json request_event;
+        request_event["prompt"] = prompt;
+        request_event["client"] = client_info;
+        state.broadcast_event("request_start", request_event);
+
         // Synchronous processing (with optional streaming)
         state.processing = true;
         state.current_request = prompt;
+
+        // Increment request counter
+        requests_processed++;
 
         try {
             if (stream) {
@@ -300,13 +352,16 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                 res.set_header("Cache-Control", "no-cache");
                 res.set_header("X-Accel-Buffering", "no");
 
+                // Capture state pointer for lambda
+                CliServerState* state_ptr = &state;
+
                 res.set_content_provider(
                     "text/event-stream",
-                    [&state, prompt](size_t offset, httplib::DataSink& sink) mutable {
+                    [state_ptr, prompt](size_t offset, httplib::DataSink& sink) mutable {
                         std::string accumulated_response;
 
                         // Tool call filtering state
-                        std::vector<std::string> tool_markers = state.backend->get_tool_call_markers();
+                        std::vector<std::string> tool_markers = state_ptr->backend->get_tool_call_markers();
                         std::string pending_buffer;
                         bool in_tool_call = false;
 
@@ -373,6 +428,12 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                                 json chunk;
                                 chunk["delta"] = pending_buffer;
                                 std::string data = "data: " + chunk.dump() + "\n\n";
+
+                                // Broadcast delta to SSE clients
+                                json delta_event;
+                                delta_event["delta"] = pending_buffer;
+                                state_ptr->broadcast_event("delta", delta_event);
+
                                 pending_buffer.clear();
                                 if (!sink.write(data.c_str(), data.size())) {
                                     return false;
@@ -382,7 +443,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                         };
 
                         // Add user message with streaming
-                        Response resp = state.session->add_message_stream(
+                        Response resp = state_ptr->session->add_message_stream(
                             Message::USER, prompt, stream_callback);
 
                         if (!resp.success) {
@@ -404,7 +465,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                         while (iteration < max_tool_iterations) {
                             iteration++;
 
-                            auto tool_call_opt = extract_tool_call(resp, state.backend);
+                            auto tool_call_opt = extract_tool_call(resp, state_ptr->backend);
                             if (!tool_call_opt) {
                                 break;
                             }
@@ -419,7 +480,7 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
                             sink.write(tool_data.c_str(), tool_data.size());
 
                             // Execute the tool
-                            ToolResult tool_result = state.tools->execute(tool_name, tool_call.parameters);
+                            ToolResult tool_result = state_ptr->tools->execute(tool_name, tool_call.parameters);
 
                             // Reset filtering state for next generation
                             in_tool_call = false;
@@ -427,11 +488,11 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
                             if (tool_result.success) {
                                 std::string sanitized = utf8_sanitizer::sanitize_utf8(tool_result.content);
-                                resp = state.session->add_message_stream(
+                                resp = state_ptr->session->add_message_stream(
                                     Message::TOOL, sanitized, stream_callback, tool_name, tool_call.tool_call_id);
                             } else {
                                 std::string error_msg = "Error: " + tool_result.error;
-                                resp = state.session->add_message_stream(
+                                resp = state_ptr->session->add_message_stream(
                                     Message::TOOL, error_msg, stream_callback, tool_name, tool_call.tool_call_id);
                             }
 
@@ -447,6 +508,11 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
 
                             accumulated_response = resp.content;
                         }
+
+                        // Broadcast response complete to SSE clients
+                        json complete_event;
+                        complete_event["response"] = accumulated_response;
+                        state_ptr->broadcast_event("response_complete", complete_event);
 
                         // Send final done message
                         json done_chunk;
@@ -476,8 +542,8 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
         state.processing = false;
     });
 
-    // Clear endpoint - reset conversation
-    server.Post("/clear", [&](const httplib::Request&, httplib::Response& res) {
+    // POST /clear - Reset conversation
+    tcp_server.Post("/clear", [this](const httplib::Request&, httplib::Response& res) {
         state.session->messages.clear();
         state.session->last_prompt_tokens = 0;
         state.session->total_tokens = 0;
@@ -492,50 +558,120 @@ int run_cli_server(std::unique_ptr<Backend>& backend, Session& session,
         res.set_content(response.dump(), "application/json");
     });
 
-    LOG_INFO("CLI server endpoints: /health, /status, /request, /clear");
+    // GET /session - Get full session state
+    tcp_server.Get("/session", [this](const httplib::Request&, httplib::Response& res) {
+        json response;
+        response["success"] = true;
 
-    // Start background processing thread for async requests
-    std::thread processor_thread([&state]() {
-        LOG_DEBUG("CLI server processor thread started");
-        while (state.running) {
-            std::string prompt = state.get_next_input();
-            if (prompt.empty()) {
-                continue;  // Shutdown or spurious wakeup
-            }
-
-            state.processing = true;
-            state.current_request = prompt;
-
-            LOG_DEBUG("Processing async request: " + prompt.substr(0, 50) + "...");
-            json result = process_request(state, prompt);
-
-            // For async requests, we just log the result (no one is waiting)
-            if (result.value("success", false)) {
-                LOG_DEBUG("Async request completed successfully");
-            } else {
-                LOG_DEBUG("Async request failed: " + result.value("error", "unknown"));
-            }
-
-            state.current_request.clear();
-            state.processing = false;
+        // Context info from backend
+        if (state.backend) {
+            response["context_size"] = state.backend->context_size;
+            response["model"] = state.backend->model_name;
         }
-        LOG_DEBUG("CLI server processor thread stopped");
+
+        // Token counts
+        response["total_tokens"] = state.session->total_tokens;
+        response["system_tokens"] = state.session->system_message_tokens;
+        response["desired_completion_tokens"] = state.session->desired_completion_tokens;
+
+        // Messages in OpenAI format
+        json messages = json::array();
+        for (const auto& msg : state.session->messages) {
+            json m;
+            m["role"] = msg.get_role();
+            m["content"] = msg.content;
+            m["tokens"] = msg.tokens;
+
+            if (!msg.tool_name.empty()) {
+                m["tool_name"] = msg.tool_name;
+            }
+            if (!msg.tool_call_id.empty()) {
+                m["tool_call_id"] = msg.tool_call_id;
+            }
+            if (!msg.tool_calls_json.empty()) {
+                try {
+                    m["tool_calls"] = json::parse(msg.tool_calls_json);
+                } catch (...) {
+                    m["tool_calls_raw"] = msg.tool_calls_json;
+                }
+            }
+
+            messages.push_back(m);
+        }
+        response["messages"] = messages;
+
+        // System message if set
+        if (!state.session->system_message.empty()) {
+            response["system_message"] = state.session->system_message;
+        }
+
+        res.set_content(response.dump(), "application/json");
     });
 
-    LOG_INFO("CLI server listening on " + host + ":" + std::to_string(port));
+    // GET /updates - SSE endpoint for live session updates
+    tcp_server.Get("/updates", [this](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("X-Accel-Buffering", "no");
 
-    if (!server.listen(host.c_str(), port)) {
-        LOG_ERROR("Failed to start CLI server on " + host + ":" + std::to_string(port));
-        state.running = false;
-        state.queue_cv.notify_all();
-        processor_thread.join();
-        return 1;
-    }
+        // Get client identifier from header or IP
+        std::string client_id = req.get_header_value("X-Client-ID");
+        if (client_id.empty()) {
+            client_id = req.remote_addr;
+        }
 
-    // Cleanup
-    state.running = false;
-    state.queue_cv.notify_all();
-    processor_thread.join();
+        LOG_INFO("SSE client connected for updates: " + client_id);
 
-    return 0;
+        res.set_content_provider(
+            "text/event-stream",
+            [this, client_id](size_t offset, httplib::DataSink& sink) mutable {
+                // Create client entry
+                SSEClient* client = new SSEClient();
+                client->sink = &sink;
+                client->client_id = client_id;
+
+                // Register this client
+                {
+                    std::lock_guard<std::mutex> lock(state.sse_mutex);
+                    state.sse_clients.push_back(client);
+                }
+
+                // Send initial connected event
+                json connected;
+                connected["type"] = "connected";
+                connected["data"]["client_id"] = client_id;
+                std::string initial = "data: " + connected.dump() + "\n\n";
+                sink.write(initial.c_str(), initial.size());
+
+                // Keep connection open - the broadcast_event function will send data
+                // This provider will block until the connection is closed
+                while (state.running) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                    // Check if sink is still valid by trying to send a keep-alive
+                    // (empty comment line is valid SSE)
+                    const char* keepalive = ": keepalive\n\n";
+                    if (!sink.write(keepalive, strlen(keepalive))) {
+                        break;  // Connection closed
+                    }
+                }
+
+                // Cleanup: remove this client from the list
+                {
+                    std::lock_guard<std::mutex> lock(state.sse_mutex);
+                    auto it = std::find(state.sse_clients.begin(), state.sse_clients.end(), client);
+                    if (it != state.sse_clients.end()) {
+                        state.sse_clients.erase(it);
+                    }
+                }
+                delete client;
+
+                LOG_INFO("SSE client disconnected: " + client_id);
+                sink.done();
+                return false;
+            }
+        );
+    });
+
+    LOG_INFO("CLI server endpoints: /health, /status, /request, /clear, /session, /updates");
 }

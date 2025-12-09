@@ -197,6 +197,74 @@ HttpResponse HttpClient::get(const std::string& url,
     return response;
 }
 
+HttpResponse HttpClient::get_stream(const std::string& url,
+                                     const std::map<std::string, std::string>& headers,
+                                     StreamCallback callback,
+                                     void* user_data) {
+    HttpResponse response;
+
+#ifdef ENABLE_API_BACKENDS
+    if (!curl_) {
+        response.error_message = "CURL not initialized";
+        return response;
+    }
+
+    LOG_DEBUG("HTTP GET (streaming): " + url);
+
+    configure_curl();
+
+    // Set URL
+    curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
+
+    // Set streaming callback
+    StreamCallbackData callback_data;
+    callback_data.callback = callback;
+    callback_data.user_data = user_data;
+
+    curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, stream_callback);
+    curl_easy_setopt(curl_, CURLOPT_WRITEDATA, &callback_data);
+    curl_easy_setopt(curl_, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(curl_, CURLOPT_HEADERDATA, &response);
+
+    // Set headers
+    struct curl_slist* header_list = set_headers(headers);
+    if (header_list) {
+        curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, header_list);
+    }
+
+    // No timeout for SSE connections
+    curl_easy_setopt(curl_, CURLOPT_TIMEOUT, 0L);
+
+    // Perform request
+    CURLcode res = curl_easy_perform(curl_);
+
+    // Get status code
+    curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &response.status_code);
+
+    // Clean up
+    if (header_list) {
+        curl_slist_free_all(header_list);
+    }
+
+    if (res != CURLE_OK) {
+        response.error_message = curl_easy_strerror(res);
+        // CURLE_WRITE_ERROR (23) happens when callback returns false - intentional cancellation
+        if (res == CURLE_WRITE_ERROR) {
+            LOG_DEBUG("HTTP GET (streaming) stopped by callback");
+        } else {
+            LOG_ERROR("HTTP GET (streaming) failed: " + response.error_message);
+        }
+    } else {
+        LOG_DEBUG("HTTP GET (streaming) completed with status: " + std::to_string(response.status_code));
+    }
+#else
+    response.error_message = "API backends not compiled in";
+    LOG_ERROR("HttpClient::get_stream() called but API backends not compiled in");
+#endif
+
+    return response;
+}
+
 HttpResponse HttpClient::post(const std::string& url,
                                const std::string& body,
                                const std::map<std::string, std::string>& headers) {

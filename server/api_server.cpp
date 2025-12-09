@@ -278,8 +278,23 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
             // OpenAI protocol sends FULL conversation history each time, so REPLACE not append
             session.messages.clear();
             for (const auto& msg : request["messages"]) {
-                std::string role = msg["role"];
-                std::string content = msg.value("content", "");
+                std::string role = msg.value("role", "user");
+
+                // Content can be a string or an array (for multi-modal messages)
+                std::string content;
+                if (msg.contains("content") && !msg["content"].is_null()) {
+                    if (msg["content"].is_string()) {
+                        content = msg["content"].get<std::string>();
+                    } else if (msg["content"].is_array()) {
+                        // Extract text from content array
+                        for (const auto& part : msg["content"]) {
+                            if (part.contains("type") && part["type"] == "text" && part.contains("text")) {
+                                if (!content.empty()) content += "\n";
+                                content += part["text"].get<std::string>();
+                            }
+                        }
+                    }
+                }
 
                 // Convert role to Message::Type
                 Message::Type type;

@@ -1,5 +1,6 @@
 #include "cli_server.h"
 #include "../shepherd.h"
+#include "../debug.h"
 #include "../tools/tool.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
@@ -47,7 +48,7 @@ void CliServerState::broadcast_event(const std::string& event_type, const nlohma
     event["data"] = data;
     std::string sse_data = "data: " + event.dump() + "\n\n";
 
-    LOG_DEBUG("Broadcasting SSE event: " + event_type + " to " + std::to_string(sse_clients.size()) + " clients");
+    dprintf(3, "Broadcasting SSE event: %s to %zu clients", event_type.c_str(), sse_clients.size());
 
     // Send to all connected SSE clients
     for (auto it = sse_clients.begin(); it != sse_clients.end(); ) {

@@ -53,7 +53,15 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 - **Simple Configuration**: Add AI backends as tools via CLI (`shepherd api add`)
 - **Automatic Discovery**: API tools registered alongside native tools at startup
 
-### 🌐 Server Mode (HTTP REST API)
+### 🖥️ CLI Server Mode (Persistent AI Session)
+- **24/7 Persistent Session**: Run Shepherd as a daemon with always-on context
+- **Multi-Client SSE Streaming**: Multiple clients connect and see real-time updates
+- **Server-Side Tool Execution**: All tools run on the server with full local access
+- **Private Data Access**: Databases, files, and resources stay on the server
+- **Session Synchronization**: Clients see conversation history on connect
+- **Scheduled Tasks**: Background jobs with full AI + tool capabilities
+
+### 🌐 API Server Mode (OpenAI-Compatible REST API)
 - **OpenAI-Compatible Endpoints**: Remote access to Shepherd via REST API
   - `POST /v1/chat/completions` - Chat completions with streaming support
   - `GET /v1/models` - List available models
@@ -840,6 +848,168 @@ for (size_t i = prefix_match_count; i < session.messages.size(); i++) {
 ```
 
 This is functionally identical to vLLM's automatic prefix caching, providing the same performance benefits for multi-turn conversations.
+
+---
+
+## CLI Server Mode (Persistent AI Session)
+
+CLI Server mode is one of Shepherd's most powerful features - a **persistent AI session** that runs 24/7 with full tool access, allowing multiple clients to connect and interact with the same context.
+
+### Why CLI Server Mode?
+
+Unlike the API server (which is stateless and requires clients to manage conversation history), CLI Server mode provides:
+
+- **Persistent Context**: The AI maintains full conversation history in GPU memory
+- **Server-Side Tools**: All tools execute on the server with access to local resources
+- **Private Data**: Databases, files, credentials, and APIs stay on the server
+- **Multi-Client Access**: Multiple users can connect and see the same session
+- **Real-Time Updates**: SSE streaming shows all activity to connected clients
+- **Background Automation**: Scheduled tasks can run with full AI capabilities
+
+### Use Cases
+
+**Home Server AI Assistant**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Home Server (24/7)                         │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │ Shepherd CLI Server                                         ││
+│  │  • Local LLM (70B model on RTX 3090s)                      ││
+│  │  • Full tool access (filesystem, databases, APIs)          ││
+│  │  • InfluxDB connection for home automation data            ││
+│  │  • Private documents and knowledge base                    ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+         │              │              │
+    ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
+    │ Laptop  │    │ Phone   │    │ Desktop │
+    │ Client  │    │ Client  │    │ Client  │
+    └─────────┘    └─────────┘    └─────────┘
+```
+
+**DevOps/Infrastructure Assistant**
+- Query production databases without exposing credentials
+- Execute scripts and commands on infrastructure
+- Monitor logs and metrics with AI analysis
+- All from any device, anywhere
+
+**Research/Data Analysis**
+- Large datasets stay on powerful server hardware
+- Multiple researchers share the same AI session
+- Expensive computations run server-side
+- Results visible to all connected clients
+
+### Starting CLI Server
+
+```bash
+# Start CLI server with local model
+./shepherd --cliserver --port 8000 --backend llamacpp --model /path/to/model.gguf
+
+# Server output:
+[INFO] cli server ready on 0.0.0.0:8000
+[INFO] CLI server endpoints: /health, /status, /request, /clear, /session, /updates
+```
+
+### Connecting Clients
+
+```bash
+# Connect to CLI server from any machine
+./shepherd --backend cli --api-base http://server:8000
+
+# Client automatically:
+# 1. Fetches session history from server
+# 2. Displays conversation context
+# 3. Connects to SSE for real-time updates
+# 4. Sends requests to server for processing
+```
+
+### How It Works
+
+1. **Server** runs with local backend (llama.cpp, TensorRT) and all tools
+2. **Clients** connect via HTTP and SSE (Server-Sent Events)
+3. **Requests** are serialized - one request processes at a time
+4. **SSE** broadcasts all events (prompts, responses, tool calls) to all clients
+5. **Session state** persists on server indefinitely
+
+### Server Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/request` | POST | Submit a prompt for processing |
+| `/session` | GET | Get full session state (messages, context info) |
+| `/updates` | GET | SSE stream for real-time updates |
+| `/status` | GET | Server status and statistics |
+| `/clear` | POST | Clear session history |
+| `/health` | GET | Health check |
+
+### Example: Multi-Client Session
+
+**Terminal 1 (Server)**:
+```bash
+$ ./shepherd --cliserver --port 8000
+[INFO] cli server ready on 0.0.0.0:8000
+```
+
+**Terminal 2 (Client A)**:
+```bash
+$ ./shepherd --backend cli --api-base http://localhost:8000
+> What files are in the current directory?
+[Tool: list_directory] .
+main.cpp, README.md, CMakeLists.txt...
+```
+
+**Terminal 3 (Client B connects and sees Client A's activity)**:
+```bash
+$ ./shepherd --backend cli --api-base http://localhost:8000
+# Automatically shows session history:
+> What files are in the current directory?
+[Tool: list_directory] .
+main.cpp, README.md, CMakeLists.txt...
+
+# Client B can continue the conversation:
+> Read the README.md file
+[Tool: read] README.md
+# Shepherd is a production-grade LLM system...
+```
+
+Both clients see all activity in real-time via SSE streaming.
+
+### Configuration
+
+**Server** (shepherd.json):
+```json
+{
+    "backend": "llamacpp",
+    "model_path": "/models/model.gguf",
+    "context_size": 131072,
+    "mcp_servers": [
+        {
+            "name": "database",
+            "command": "python",
+            "args": ["mcp_server.py"]
+        }
+    ]
+}
+```
+
+**Client** (shepherd.json):
+```json
+{
+    "backend": "cli",
+    "api_base": "http://server:8000"
+}
+```
+
+### Comparison: CLI Server vs API Server
+
+| Feature | CLI Server | API Server |
+|---------|------------|------------|
+| Tool Execution | Server-side | Client-side |
+| Session State | Server maintains | Client sends full history |
+| Multi-Client | Yes (SSE streaming) | Single client |
+| Context Location | Server GPU | Server GPU |
+| Protocol | Custom REST + SSE | OpenAI-compatible |
+| Use Case | Persistent AI assistant | OpenAI client integration |
 
 ---
 

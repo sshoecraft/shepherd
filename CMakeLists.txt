@@ -382,9 +382,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wno-unused-variable
         -Wno-unused-but-set-variable
         -Wno-ignored-attributes
-        -Wno-maybe-uninitialized
         -Wno-unused-function
     )
+
+    # GCC-specific warning flags
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(shepherd PRIVATE
+            -Wno-maybe-uninitialized
+        )
+    endif()
 
     # Default to Debug build if not specified (matching Makefile behavior)
     if(NOT CMAKE_BUILD_TYPE)

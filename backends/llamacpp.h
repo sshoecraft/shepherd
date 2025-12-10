@@ -41,7 +41,7 @@ public:
 
     // Helper methods
     bool is_ready() const;
-    void shutdown();
+    void shutdown() override;
     int get_context_token_count() const;
     uint32_t evict_to_free_space(uint32_t tokens_needed);
     ModelConfig get_model_config() const;

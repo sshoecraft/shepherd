@@ -1,14 +1,25 @@
 
+# Set this to your python virtual env if you have one setup and you installed tensorrt-llm in it
+VENV=~/venv
+
+LLAMACPP=OFF
+TENSORRT=OFF
+
 all:
 	(cd build && make -j16)
 
+# Build activation command if TensorRT is ON and VENV is set
+ifeq ($(TENSORRT),ON)
+ifneq ($(VENV),)
+_ACT=. $(VENV)/bin/activate &&
+endif
+endif
+
 config:
 	rm -rf build && mkdir -p build
-	cd build && (. ~/venv/bin/activate && cmake -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=ON -DENABLE_TENSORRT=ON ..)
+	cd build && $(_ACT) cmake -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
 
 install:
-#	(cd build && make install)
-#	install build/shepherd ~/bin/
 
 clean:
 	(cd build && make clean)

@@ -46,12 +46,11 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 - **Resource Access**: Read resources from MCP servers (files, databases, APIs)
 - **Prompt Templates**: Reusable prompt templates from MCP servers
 
-### 🤝 Multi-Model Collaboration (API Tools)
-- **Cross-Model Consultation**: Any backend can call other AI models as tools
-- **Second Opinions**: Get Claude's analysis while using GPT, or vice versa
-- **Model-Specific Strengths**: Leverage each model's expertise (Claude for code review, GPT for creative tasks, Gemini for reasoning)
-- **Simple Configuration**: Add AI backends as tools via CLI (`shepherd api add`)
-- **Automatic Discovery**: API tools registered alongside native tools at startup
+### 🤝 Multi-Model Collaboration (Automatic API Tools)
+- **Automatic ask_* Tools**: Configured providers automatically become tools (e.g., `ask_sonnet`, `ask_flash`)
+- **Dynamic Tool Registration**: Switch providers and tools update automatically
+- **Cross-Model Consultation**: Get Claude's analysis while using a local model, or vice versa
+- **Model-Specific Strengths**: Leverage each model's expertise (Claude for code review, Gemini for reasoning, local for privacy)
 
 ### 🖥️ CLI Server Mode (Persistent AI Session)
 - **24/7 Persistent Session**: Run Shepherd as a daemon with always-on context
@@ -218,12 +217,74 @@ For detailed build instructions, see [BUILD.md](BUILD.md).
 
 ## Configuration
 
-### Backend Selection
+Shepherd can be configured via command line, the `shepherd config` command, or the `/config` slash command in interactive mode.
 
-Shepherd automatically detects available backends at runtime. Priority order:
-1. **TensorRT-LLM** (if compiled and NVIDIA GPU detected)
-2. **llama.cpp** (if compiled)
-3. **API backends** (if API keys configured)
+### Viewing and Setting Configuration
+
+```bash
+# View all configuration
+shepherd config show
+
+# Set a configuration value
+shepherd config set streaming true
+shepherd config set max_db_size 20G
+
+# In interactive mode, use /config
+> /config show
+> /config set thinking true
+```
+
+### Providers
+
+Providers define AI backends you can switch between. Each provider specifies a backend type, model, and credentials.
+
+```bash
+# List configured providers
+shepherd provider list
+
+# Add a new provider
+shepherd provider add mysonnet anthropic --model claude-sonnet-4-5 --api-key sk-ant-...
+shepherd provider add local llamacpp --model /models/qwen-72b.gguf
+shepherd provider add mygpt openai --model gpt-4 --api-key sk-...
+
+# Show provider details
+shepherd provider show mysonnet
+
+# Use a specific provider
+shepherd provider use local
+
+# Switch providers in interactive mode
+> /provider use mysonnet
+> /provider next
+```
+
+### Automatic API Tools
+
+When you have multiple providers configured, Shepherd automatically creates **ask_* tools** for cross-model consultation. The current provider is excluded (you don't need to ask yourself).
+
+**Example**: If you're using the `local` provider and have `sonnet` and `flash` providers configured:
+
+```
+Available tools:
+  - ask_sonnet    (consult Claude Sonnet)
+  - ask_flash     (consult Gemini Flash)
+  - read, write, bash, ...
+```
+
+If you switch to `sonnet`:
+```bash
+> /provider use sonnet
+```
+
+The tools automatically update:
+```
+Available tools:
+  - ask_local     (consult local model)
+  - ask_flash     (consult Gemini Flash)
+  - read, write, bash, ...
+```
+
+This enables powerful multi-model workflows without manual configuration.
 
 ### Environment Variables
 
@@ -235,50 +296,34 @@ export SHEPHERD_INTERACTIVE=1
 export NO_COLOR=1
 ```
 
-### Configuration File (shepherd.json)
+### Configuration File
+
+The configuration file is located at `~/.config/shepherd/config.json`. While you can edit it directly, using `shepherd config set` or `/config set` is recommended.
 
 ```json
 {
-    "backend": "llamacpp",
-    "model_path": "/models/llama-3.1-70b-instruct.gguf",
-    "context_size": 131072,
-    "gpu_layers": 48,
-    "api_keys": {
-        "openai": "sk-...",
-        "anthropic": "sk-ant-..."
-    },
-    "rag": {
-        "database_path": "./shepherd_memory.db",
-        "max_size_bytes": 10737418240,
-        "enable_archival": true
-    },
-    "tools": {
-        "enabled": ["filesystem", "http", "memory", "command"],
-        "disabled": ["command_execution"]
-    },
-    "mcp_servers": [
-        {
-            "name": "filesystem",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
-        }
-    ],
-    "api_tools": [
-        {
-            "name": "ask_claude",
-            "backend": "anthropic",
-            "model": "claude-sonnet-4",
-            "api_key": "sk-ant-...",
-            "context_size": 200000
-        },
-        {
-            "name": "ask_gpt",
-            "backend": "openai",
-            "model": "gpt-4",
-            "api_key": "sk-..."
-        }
-    ]
+    "streaming": true,
+    "thinking": false,
+    "max_db_size": "10G",
+    "memory_database": "~/.local/share/shepherd/memory.db",
+    "web_search_provider": "brave",
+    "web_search_api_key": "..."
 }
+```
+
+### MCP Servers
+
+Configure Model Context Protocol servers for external tool integration:
+
+```bash
+# List MCP servers
+shepherd mcp list
+
+# Add an MCP server
+shepherd mcp add mydb python /path/to/mcp_server.py -e DB_HOST=localhost
+
+# Remove an MCP server
+shepherd mcp remove mydb
 ```
 
 ---
@@ -357,70 +402,25 @@ print(response.json())
 ./shepherd --list-tools
 ```
 
-### API Tools (Multi-Model Collaboration)
+### Multi-Model Collaboration
 
-API tools enable any backend to call other AI models as tools, allowing for cross-model consultation and collaboration.
-
-#### Configuration
+With providers configured, you can consult other AI models while using any backend:
 
 ```bash
-# Add Claude as a tool
-shepherd api add ask_claude anthropic \
-    --model claude-sonnet-4 \
-    --api-key sk-ant-...
+# Using local model, ask Claude for code review
+> Read logger.h and ask_sonnet to review it
 
-# Add GPT as a tool
-shepherd api add ask_gpt openai \
-    --model gpt-4 \
-    --api-key sk-... \
-    --max-tokens 8000
-
-# Add local Ollama model
-shepherd api add local_expert ollama \
-    --model llama3 \
-    --api-base http://localhost:11434
-
-# List configured API tools
-shepherd api list
-
-# Remove a tool
-shepherd api remove ask_claude
-```
-
-#### Usage Example
-
-```bash
-# Start with Gemini as primary backend
-shepherd --backend gemini --model gemini-2.0-flash
-
-> Read logger.h and ask the sonnet tool to review it
-
-# Gemini reads the file
 * read(file_path=logger.h)
+* ask_sonnet(prompt=Please review the following C++ header file...)
 
-# Gemini calls Claude (via sonnet tool) for code review
-* sonnet(prompt=Please review the following C++ header file for...)
-
-> # Logger Class Review
->
-> **Critical Issues:**
->
-> - **Singleton Static Initialization Order Fiasco**: The singleton pattern...
-> - **Format Function Inefficiency**: The format_helper creates multiple string copies...
-> - **Missing Error Handling**: No exception handling for file operations...
->
-> **Design Improvements:**
->
-> - **Replace Singleton with Dependency Injection**: Singletons make testing difficult...
-> - **Use RAII for File Management**: Use std::ofstream directly...
-> - **Structured Logging Support**: Support structured data in logs...
+# Claude's response appears in your local model's context
 ```
 
 **Real-world benefits:**
 
 - **Code Review**: Get Claude's detailed analysis while using a local model
 - **Cross-Validation**: Compare opinions from multiple models
-- **Model-Specific Strengths**: Use Claude for code, GPT for creative writing, Gemini for reasoning
+- **Model-Specific Strengths**: Use Claude for code, Gemini for reasoning, local for privacy
 - **Second Opinions**: Quick consultations without switching contexts
 
 ---

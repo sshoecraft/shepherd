@@ -8,6 +8,7 @@
 
 extern std::unique_ptr<Config> config;
 extern TerminalIO tio;
+extern ThreadQueue<std::string> g_output_queue;
 
 CLIClientBackend::CLIClientBackend(const std::string& url)
     : Backend(0), base_url(url) {
@@ -127,15 +128,25 @@ void CLIClientBackend::sse_listener_thread() {
                     std::string event_type = json_data.value("type", "");
                     auto event_data = json_data.value("data", nlohmann::json::object());
 
-                    if (event_type == "request_start") {
-                        std::string prompt = event_data.value("prompt", "");
-                        std::string msg = "> " + prompt + "\n";
-                        tio.write(msg.c_str(), msg.size(), Color::GREEN);
-                    } else if (event_type == "delta") {
-                        std::string delta = event_data.value("delta", "");
-                        tio.write(delta.c_str(), delta.size(), Color::DEFAULT);
-                    } else if (event_type == "response_complete") {
-                        // Don't add anything - display exactly what the model sent
+                    if (event_type == "message_added") {
+                        // Render message by role (same logic as session load)
+                        std::string role = event_data.value("role", "unknown");
+                        std::string content = event_data.value("content", "");
+                        std::string output;
+
+                        if (role == "user") {
+                            output = "\033[32m> " + content + "\033[0m\n";
+                        } else if (role == "assistant") {
+                            output = content + "\n";
+                        } else if (role == "tool") {
+                            std::string tool_name = event_data.value("tool_name", "tool");
+                            output = "\033[36m[" + tool_name + "] " + content + "\033[0m\n";
+                        }
+
+                        if (!output.empty()) {
+                            // Thread-safe: Use output queue instead of tio.write() from SSE thread
+                            g_output_queue.push(output);
+                        }
                     }
                 } catch (...) {}
                 return sse_running;

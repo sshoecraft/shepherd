@@ -155,7 +155,29 @@ static json process_request(CliServerState& state, const std::string& prompt) {
         return result;
     }
 
+    // Broadcast user message to all SSE clients
+    if (!state.session->messages.empty()) {
+        const auto& user_msg = state.session->messages.back();
+        json msg_json;
+        msg_json["role"] = user_msg.get_role();
+        msg_json["content"] = user_msg.content;
+        msg_json["tokens"] = user_msg.tokens;
+        state.broadcast_event("message_added", msg_json);
+    }
+
     accumulated_response = resp.content;
+
+    // Broadcast initial assistant response to all SSE clients
+    if (!resp.content.empty() && !state.session->messages.empty()) {
+        const auto& assistant_msg = state.session->messages.back();
+        if (assistant_msg.get_role() == "assistant") {
+            json msg_json;
+            msg_json["role"] = assistant_msg.get_role();
+            msg_json["content"] = assistant_msg.content;
+            msg_json["tokens"] = assistant_msg.tokens;
+            state.broadcast_event("message_added", msg_json);
+        }
+    }
 
     // Tool execution loop
     const int max_tool_iterations = 50;
@@ -188,6 +210,34 @@ static json process_request(CliServerState& state, const std::string& prompt) {
             // Send error to model
             std::string error_msg = "Error: " + tool_result.error;
             resp = state.session->add_message(Message::TOOL, error_msg, tool_name, tool_call.tool_call_id);
+        }
+
+        // Broadcast tool message to all SSE clients
+        if (!state.session->messages.empty()) {
+            const auto& tool_msg = state.session->messages.back();
+            json msg_json;
+            msg_json["role"] = tool_msg.get_role();
+            msg_json["content"] = tool_msg.content;
+            msg_json["tokens"] = tool_msg.tokens;
+            if (!tool_msg.tool_name.empty()) {
+                msg_json["tool_name"] = tool_msg.tool_name;
+            }
+            if (!tool_msg.tool_call_id.empty()) {
+                msg_json["tool_call_id"] = tool_msg.tool_call_id;
+            }
+            state.broadcast_event("message_added", msg_json);
+        }
+
+        // Broadcast assistant response to all SSE clients
+        if (!resp.content.empty() && !state.session->messages.empty()) {
+            const auto& assistant_msg = state.session->messages.back();
+            if (assistant_msg.get_role() == "assistant") {
+                json msg_json;
+                msg_json["role"] = assistant_msg.get_role();
+                msg_json["content"] = assistant_msg.content;
+                msg_json["tokens"] = assistant_msg.tokens;
+                state.broadcast_event("message_added", msg_json);
+            }
         }
 
         if (!resp.success) {
@@ -333,11 +383,7 @@ void CLIServer::register_endpoints(Session& session) {
         }
         LOG_DEBUG("Request from " + client_info + ": " + prompt.substr(0, 100) + (prompt.length() > 100 ? "..." : ""));
 
-        // Broadcast that a new request is starting
-        json request_event;
-        request_event["prompt"] = prompt;
-        request_event["client"] = client_info;
-        state.broadcast_event("request_start", request_event);
+        // User message will be broadcast after add_message() below
 
         // Synchronous processing (with optional streaming)
         state.processing = true;

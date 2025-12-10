@@ -930,7 +930,9 @@ int main(int argc, char** argv) {
 	return result;
 
 } catch (const std::exception& e) {
-	LOG_FATAL("Fatal error: " + std::string(e.what()));
+	std::string error_msg = std::string("Fatal error: ") + e.what();
+	LOG_FATAL(error_msg);
+	fprintf(stderr, "FATAL: %s\n", error_msg.c_str());
 
 	// For fatal errors, use MPI_Abort to terminate all ranks immediately
 	const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
@@ -940,6 +942,10 @@ int main(int argc, char** argv) {
 #endif
 	}
 
+	return 1;
+} catch (...) {
+	LOG_FATAL("Fatal error: Unknown exception");
+	fprintf(stderr, "FATAL: Unknown exception caught\n");
 	return 1;
 }
 }

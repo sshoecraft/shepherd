@@ -181,6 +181,10 @@ json Provider::to_json() const {
     }
 
     // Type-specific fields
+    if (type == "cli") {
+        if (!base_url.empty()) j["base_url"] = base_url;
+    }
+
     if (type == "llamacpp" || type == "tensorrt") {
         j["model_path"] = model_path;
         j["tp"] = tp;
@@ -474,47 +478,279 @@ int handle_provider_args(const std::vector<std::string>& args,
 			return 1;
 		}
 
-		std::cout << "Provider: " << prov->name << "\n";
-		std::cout << "  Type: " << prov->type << "\n";
+		std::cout << "=== Provider: " << prov->name << " ===\n";
 
-		if (prov->is_api()) {
-			std::cout << "  API Key: " << (prov->api_key.empty() ? "not set" : "****") << "\n";
-			if (!prov->base_url.empty()) {
-				std::cout << "  Base URL: " << prov->base_url << "\n";
-			}
-		} else if (prov->type == "llamacpp" || prov->type == "tensorrt") {
-			std::cout << "  Model Path: " << prov->model_path << "\n";
-			std::cout << "  TP: " << prov->tp << ", PP: " << prov->pp << "\n";
-			std::cout << "  GPU Layers: " << prov->gpu_layers << "\n";
+		// Core fields
+		std::cout << "type = " << prov->type << "\n";
+		if (prov->type != "cli") {
+			std::cout << "model = " << prov->model << "\n";
+		}
+		std::cout << "priority = " << prov->priority << "\n";
+		if (prov->context_size > 0) {
+			std::cout << "context_size = " << prov->context_size << "\n";
 		}
 
-		std::cout << "  Model: " << prov->model << "\n";
+		// CLI backend fields
+		if (prov->type == "cli") {
+			std::cout << "base_url = " << (prov->base_url.empty() ? "http://localhost:8000" : prov->base_url) << "\n";
+		}
 
+		// API backend fields
+		if (prov->is_api()) {
+			std::cout << "api_key = " << (prov->api_key.empty() ? "not set" : "****") << "\n";
+			if (!prov->base_url.empty()) {
+				std::cout << "base_url = " << prov->base_url << "\n";
+			}
+			if (!prov->client_id.empty()) {
+				std::cout << "client_id = " << prov->client_id << "\n";
+			}
+			if (!prov->client_secret.empty()) {
+				std::cout << "client_secret = ****\n";
+			}
+			if (!prov->token_url.empty()) {
+				std::cout << "token_url = " << prov->token_url << "\n";
+			}
+			if (!prov->token_scope.empty()) {
+				std::cout << "token_scope = " << prov->token_scope << "\n";
+			}
+			if (!prov->deployment_name.empty()) {
+				std::cout << "deployment_name = " << prov->deployment_name << "\n";
+			}
+			if (!prov->api_version.empty()) {
+				std::cout << "api_version = " << prov->api_version << "\n";
+			}
+			if (!prov->ssl_verify) {
+				std::cout << "ssl_verify = false\n";
+			}
+			if (!prov->ca_bundle_path.empty()) {
+				std::cout << "ca_bundle_path = " << prov->ca_bundle_path << "\n";
+			}
+		}
+
+		// Local backend fields
+		if (prov->type == "llamacpp" || prov->type == "tensorrt") {
+			std::cout << "model_path = " << prov->model_path << "\n";
+			std::cout << "tp = " << prov->tp << "\n";
+			std::cout << "pp = " << prov->pp << "\n";
+			std::cout << "gpu_layers = " << prov->gpu_layers << "\n";
+			if (prov->type == "tensorrt") {
+				std::cout << "gpu_id = " << prov->gpu_id << "\n";
+			}
+			if (prov->type == "llamacpp") {
+				std::cout << "n_batch = " << prov->n_batch << "\n";
+				if (prov->n_threads > 0) {
+					std::cout << "n_threads = " << prov->n_threads << "\n";
+				}
+			}
+		}
+
+		// Ollama specific
+		if (prov->type == "ollama") {
+			if (prov->num_ctx > 0) {
+				std::cout << "num_ctx = " << prov->num_ctx << "\n";
+			}
+			if (prov->num_predict != -1) {
+				std::cout << "num_predict = " << prov->num_predict << "\n";
+			}
+		}
+
+		// Sampling parameters (not used by CLI backend)
+		if (prov->type != "cli") {
+			std::cout << "temperature = " << prov->temperature << "\n";
+			std::cout << "top_p = " << prov->top_p << "\n";
+			std::cout << "top_k = " << prov->top_k << "\n";
+			std::cout << "repeat_penalty = " << prov->repeat_penalty << "\n";
+			if (prov->frequency_penalty != 0.0f) {
+				std::cout << "frequency_penalty = " << prov->frequency_penalty << "\n";
+			}
+			if (prov->presence_penalty != 0.0f) {
+				std::cout << "presence_penalty = " << prov->presence_penalty << "\n";
+			}
+			if (prov->max_tokens > 0) {
+				std::cout << "max_tokens = " << prov->max_tokens << "\n";
+			}
+			if (!prov->stop_sequences.empty()) {
+				std::cout << "stop_sequences = [";
+				for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
+					if (i > 0) std::cout << ", ";
+					std::cout << "\"" << prov->stop_sequences[i] << "\"";
+				}
+				std::cout << "]\n";
+			}
+		}
+
+		// Rate limits
+		if (prov->rate_limits.requests_per_second > 0) {
+			std::cout << "requests_per_second = " << prov->rate_limits.requests_per_second << "\n";
+		}
+		if (prov->rate_limits.requests_per_minute > 0) {
+			std::cout << "requests_per_minute = " << prov->rate_limits.requests_per_minute << "\n";
+		}
+		if (prov->rate_limits.tokens_per_minute > 0) {
+			std::cout << "tokens_per_minute = " << prov->rate_limits.tokens_per_minute << "\n";
+		}
+		if (prov->rate_limits.tokens_per_day > 0) {
+			std::cout << "tokens_per_day = " << prov->rate_limits.tokens_per_day << "\n";
+		}
 		if (prov->rate_limits.tokens_per_month > 0) {
-			std::cout << "  Monthly token limit: " << prov->rate_limits.tokens_per_month << "\n";
+			std::cout << "tokens_per_month = " << prov->rate_limits.tokens_per_month << "\n";
 		}
 		if (prov->rate_limits.max_cost_per_month > 0) {
-			std::cout << "  Monthly cost limit: $" << prov->rate_limits.max_cost_per_month << "\n";
+			std::cout << "max_cost_per_month = " << prov->rate_limits.max_cost_per_month << "\n";
 		}
 
+		// Pricing
 		if (prov->pricing.dynamic) {
-			std::cout << "  Pricing: dynamic (from API)\n";
-		} else if (prov->pricing.prompt_cost > 0 || prov->pricing.completion_cost > 0) {
-			std::cout << "  Pricing: $" << prov->pricing.prompt_cost << " / $"
-			          << prov->pricing.completion_cost << " per million tokens\n";
+			std::cout << "pricing_dynamic = true\n";
 		}
+		if (prov->pricing.prompt_cost > 0) {
+			std::cout << "prompt_cost_per_million = " << prov->pricing.prompt_cost << "\n";
+		}
+		if (prov->pricing.completion_cost > 0) {
+			std::cout << "completion_cost_per_million = " << prov->pricing.completion_cost << "\n";
+		}
+
+		std::cout << "\nUse 'provider set " << prov->name << " <field> <value>' to modify\n";
 		return 0;
 	}
 
 	if (subcmd == "edit") {
-		std::cerr << "Interactive edit not supported. Use 'provider set <name> <field> <value>'\n";
-		return 1;
+		if (args.size() < 2) {
+			std::cerr << "Usage: provider edit <name>\n";
+			return 1;
+		}
+
+		std::string name = args[1];
+		auto* prov = find_provider(name);
+		if (!prov) {
+			std::cerr << "Provider '" << name << "' not found\n";
+			return 1;
+		}
+
+		std::cout << "Editing provider: " << prov->name << "\n";
+		std::cout << "Press Enter to keep current value, or type new value:\n\n";
+
+		auto prompt = [](const std::string& field, const std::string& current) -> std::string {
+			std::cout << field << " [" << current << "]: ";
+			std::string input;
+			std::getline(std::cin, input);
+			return input.empty() ? current : input;
+		};
+
+		auto prompt_int = [&prompt](const std::string& field, int current) -> int {
+			std::string result = prompt(field, std::to_string(current));
+			try {
+				return std::stoi(result);
+			} catch (...) {
+				return current;
+			}
+		};
+
+		auto prompt_float = [&prompt](const std::string& field, float current) -> float {
+			std::string result = prompt(field, std::to_string(current));
+			try {
+				return std::stof(result);
+			} catch (...) {
+				return current;
+			}
+		};
+
+		// Core fields
+		prov->type = prompt("type", prov->type);
+		prov->priority = prompt_int("priority", prov->priority);
+
+		// Type-specific fields
+		if (prov->type == "cli") {
+			// CLI backend only needs base_url (host:port)
+			std::cout << "\n--- CLI Backend Settings ---\n";
+			std::string default_url = prov->base_url.empty() ? "http://localhost:8000" : prov->base_url;
+			prov->base_url = prompt("base_url", default_url);
+		} else if (prov->is_api()) {
+			std::cout << "\n--- API Backend Settings ---\n";
+			prov->model = prompt("model", prov->model);
+			std::string masked_key = prov->api_key.empty() ? "" : "****";
+			std::string new_key = prompt("api_key", masked_key);
+			if (new_key != masked_key && !new_key.empty()) {
+				prov->api_key = new_key;
+			}
+			if (!prov->base_url.empty() || prov->type == "ollama") {
+				prov->base_url = prompt("base_url", prov->base_url);
+			}
+
+			// Sampling parameters for API backends
+			std::cout << "\n--- Sampling Parameters ---\n";
+			prov->temperature = prompt_float("temperature", prov->temperature);
+			prov->top_p = prompt_float("top_p", prov->top_p);
+			prov->top_k = prompt_int("top_k", prov->top_k);
+		} else if (prov->type == "llamacpp" || prov->type == "tensorrt") {
+			std::cout << "\n--- Local Backend Settings ---\n";
+			prov->model = prompt("model", prov->model);
+			prov->model_path = prompt("model_path", prov->model_path);
+			prov->gpu_layers = prompt_int("gpu_layers", prov->gpu_layers);
+			prov->tp = prompt_int("tp", prov->tp);
+			prov->pp = prompt_int("pp", prov->pp);
+
+			if (prov->type == "llamacpp") {
+				prov->n_batch = prompt_int("n_batch", prov->n_batch);
+				prov->n_threads = prompt_int("n_threads", prov->n_threads);
+			} else if (prov->type == "tensorrt") {
+				prov->gpu_id = prompt_int("gpu_id", prov->gpu_id);
+			}
+
+			// Sampling parameters
+			std::cout << "\n--- Sampling Parameters ---\n";
+			prov->temperature = prompt_float("temperature", prov->temperature);
+			prov->top_p = prompt_float("top_p", prov->top_p);
+			prov->top_k = prompt_int("top_k", prov->top_k);
+			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
+		} else if (prov->type == "ollama") {
+			std::cout << "\n--- Ollama Settings ---\n";
+			prov->model = prompt("model", prov->model);
+			prov->base_url = prompt("base_url", prov->base_url.empty() ? "http://localhost:11434" : prov->base_url);
+			prov->num_ctx = prompt_int("num_ctx", prov->num_ctx);
+			prov->num_predict = prompt_int("num_predict", prov->num_predict);
+
+			// Sampling parameters
+			std::cout << "\n--- Sampling Parameters ---\n";
+			prov->temperature = prompt_float("temperature", prov->temperature);
+			prov->top_p = prompt_float("top_p", prov->top_p);
+			prov->top_k = prompt_int("top_k", prov->top_k);
+			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
+		}
+
+		// Confirm save
+		std::cout << "\nSave changes? (y/n): ";
+		std::string confirm;
+		std::getline(std::cin, confirm);
+		if (confirm == "y" || confirm == "Y" || confirm == "yes" || confirm == "Yes") {
+			prov->save();
+			std::cout << "Provider '" << name << "' updated successfully\n";
+		} else {
+			std::cout << "Edit cancelled\n";
+		}
+		return 0;
 	}
 
 	if (subcmd == "set") {
 		if (args.size() < 4) {
 			std::cerr << "Usage: provider set <name> <field> <value>\n";
-			std::cerr << "Fields: model, api_key, base_url, model_path, priority\n";
+			std::cerr << "\nCommon fields:\n";
+			std::cerr << "  type, model, priority, context_size\n";
+			std::cerr << "\nAPI backends (openai, anthropic, gemini, ollama):\n";
+			std::cerr << "  api_key, base_url, client_id, client_secret, token_url, token_scope\n";
+			std::cerr << "  deployment_name, api_version, ssl_verify, ca_bundle_path\n";
+			std::cerr << "\nLocal backends (llamacpp, tensorrt):\n";
+			std::cerr << "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, n_threads\n";
+			std::cerr << "\nOllama:\n";
+			std::cerr << "  num_ctx, num_predict\n";
+			std::cerr << "\nSampling:\n";
+			std::cerr << "  temperature, top_p, top_k, repeat_penalty, frequency_penalty,\n";
+			std::cerr << "  presence_penalty, max_tokens\n";
+			std::cerr << "\nRate limits:\n";
+			std::cerr << "  requests_per_second, requests_per_minute, tokens_per_minute,\n";
+			std::cerr << "  tokens_per_day, tokens_per_month, max_cost_per_month\n";
+			std::cerr << "\nPricing:\n";
+			std::cerr << "  pricing_dynamic, prompt_cost_per_million, completion_cost_per_million\n";
 			return 1;
 		}
 
@@ -529,27 +765,115 @@ int handle_provider_args(const std::vector<std::string>& args,
 		}
 
 		// Update specific field
-		if (field == "model") {
-			prov->model = value;
-		} else if (field == "api_key" || field == "key") {
-			prov->api_key = value;
-		} else if (field == "base_url" || field == "url") {
-			prov->base_url = value;
-		} else if (field == "model_path") {
-			prov->model_path = value;
-		} else if (field == "priority") {
-			prov->priority = std::stoi(value);
-		} else if (field == "tokens_per_month") {
-			prov->rate_limits.tokens_per_month = std::stoi(value);
-		} else if (field == "max_cost") {
-			prov->rate_limits.max_cost_per_month = std::stof(value);
-		} else {
-			std::cerr << "Unknown field: " << field << "\n";
+		bool updated = true;
+		try {
+			// Core fields
+			if (field == "type") {
+				prov->type = value;
+			} else if (field == "model") {
+				prov->model = value;
+			} else if (field == "priority") {
+				prov->priority = std::stoi(value);
+			} else if (field == "context_size") {
+				prov->context_size = std::stoull(value);
+			}
+			// API fields
+			else if (field == "api_key") {
+				prov->api_key = value;
+			} else if (field == "base_url") {
+				prov->base_url = value;
+			} else if (field == "client_id") {
+				prov->client_id = value;
+			} else if (field == "client_secret") {
+				prov->client_secret = value;
+			} else if (field == "token_url") {
+				prov->token_url = value;
+			} else if (field == "token_scope") {
+				prov->token_scope = value;
+			} else if (field == "deployment_name") {
+				prov->deployment_name = value;
+			} else if (field == "api_version") {
+				prov->api_version = value;
+			} else if (field == "ssl_verify") {
+				prov->ssl_verify = (value == "true" || value == "1" || value == "yes");
+			} else if (field == "ca_bundle_path") {
+				prov->ca_bundle_path = value;
+			}
+			// Local backend fields
+			else if (field == "model_path") {
+				prov->model_path = value;
+			} else if (field == "tp") {
+				prov->tp = std::stoi(value);
+			} else if (field == "pp") {
+				prov->pp = std::stoi(value);
+			} else if (field == "gpu_layers") {
+				prov->gpu_layers = std::stoi(value);
+			} else if (field == "gpu_id") {
+				prov->gpu_id = std::stoi(value);
+			} else if (field == "n_batch") {
+				prov->n_batch = std::stoi(value);
+			} else if (field == "n_threads") {
+				prov->n_threads = std::stoi(value);
+			}
+			// Ollama fields
+			else if (field == "num_ctx") {
+				prov->num_ctx = std::stoi(value);
+			} else if (field == "num_predict") {
+				prov->num_predict = std::stoi(value);
+			}
+			// Sampling parameters
+			else if (field == "temperature") {
+				prov->temperature = std::stof(value);
+			} else if (field == "top_p") {
+				prov->top_p = std::stof(value);
+			} else if (field == "top_k") {
+				prov->top_k = std::stoi(value);
+			} else if (field == "repeat_penalty") {
+				prov->repeat_penalty = std::stof(value);
+			} else if (field == "frequency_penalty") {
+				prov->frequency_penalty = std::stof(value);
+			} else if (field == "presence_penalty") {
+				prov->presence_penalty = std::stof(value);
+			} else if (field == "max_tokens") {
+				prov->max_tokens = std::stoi(value);
+			}
+			// Rate limits
+			else if (field == "requests_per_second") {
+				prov->rate_limits.requests_per_second = std::stoi(value);
+			} else if (field == "requests_per_minute") {
+				prov->rate_limits.requests_per_minute = std::stoi(value);
+			} else if (field == "tokens_per_minute") {
+				prov->rate_limits.tokens_per_minute = std::stoi(value);
+			} else if (field == "tokens_per_day") {
+				prov->rate_limits.tokens_per_day = std::stoi(value);
+			} else if (field == "tokens_per_month") {
+				prov->rate_limits.tokens_per_month = std::stoi(value);
+			} else if (field == "max_cost_per_month") {
+				prov->rate_limits.max_cost_per_month = std::stof(value);
+			}
+			// Pricing
+			else if (field == "pricing_dynamic") {
+				prov->pricing.dynamic = (value == "true" || value == "1" || value == "yes");
+			} else if (field == "prompt_cost_per_million") {
+				prov->pricing.prompt_cost = std::stof(value);
+			} else if (field == "completion_cost_per_million") {
+				prov->pricing.completion_cost = std::stof(value);
+			}
+			else {
+				updated = false;
+				std::cerr << "Unknown field: " << field << "\n";
+				std::cerr << "Use 'provider set' without arguments to see available fields\n";
+				return 1;
+			}
+		} catch (const std::exception& e) {
+			std::cerr << "Error setting field '" << field << "': " << e.what() << "\n";
 			return 1;
 		}
 
-		prov->save();
-		std::cout << "Provider '" << name << "' updated\n";
+		if (updated) {
+			prov->save();
+			std::cout << "Provider '" << name << "' updated: " << field << " = " << value << "\n";
+		}
 		return 0;
 	}
 

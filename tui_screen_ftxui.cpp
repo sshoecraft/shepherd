@@ -1,5 +1,6 @@
 #include "tui_screen.h"
 #include "terminal_io.h"
+#include "logger.h"
 
 #include <termios.h>
 #include <unistd.h>
@@ -109,42 +110,50 @@ std::shared_ptr<fx::ComponentBase> TUIScreen::build_ui() {
     // Input component - multiline enabled for paste support
     fx::InputOption input_option;
     input_option.multiline = true;
+    input_option.cursor_position = &cursor_position;  // Bind cursor position
+    input_option.insert = &insert_mode;  // Bind insert mode
 
-    // Remove white background but keep cursor as block
+    // Custom transform: don't invert the whole input when focused
+    // FTXUI internally applies "focused" decorator to just the cursor character
     input_option.transform = [](fx::InputState state) {
-        state.element |= fx::focusCursorBlock;
+        if (state.is_placeholder) {
+            // Show just cursor block when empty (no placeholder text)
+            if (state.focused) {
+                return fx::text(" ") | fx::inverted;
+            }
+            return fx::text("");  // Nothing when not focused and empty
+        }
+        // Don't apply inverted - let the internal cursor handling work
         return state.element;
     };
 
     input_component = fx::Input(&input_content, "", input_option);
 
-    // Handle bracketed paste and Enter key
+    // Handle Enter key to submit and manage insert mode based on cursor position
     input_component |= fx::CatchEvent([this](fx::Event event) {
-        std::string seq = event.input();
-
-        // Check for paste start/end sequences
-        if (seq.find("\x1b[200~") != std::string::npos) {
-            in_paste_mode = true;
-            return true;
-        }
-        if (seq.find("\x1b[201~") != std::string::npos) {
-            in_paste_mode = false;
-            return true;
+        // Left arrow: enable insert mode when moving into text
+        if (event == fx::Event::ArrowLeft) {
+            if (cursor_position > 0) {
+                insert_mode = true;  // Switch to insert mode when in middle of text
+            }
+            return false;  // Let FTXUI handle the actual cursor move
         }
 
-        // During paste, handle all input ourselves to preserve newlines
-        if (in_paste_mode && !seq.empty()) {
-            // Add the pasted content, preserving newlines
-            input_content += seq;
-            return true;
+        // Right arrow: disable insert mode when reaching end of text
+        if (event == fx::Event::ArrowRight) {
+            // After FTXUI processes this, cursor will be at cursor_position + 1
+            // If that's at the end, switch back to overtype (block cursor)
+            if (cursor_position + 1 >= static_cast<int>(input_content.size())) {
+                insert_mode = false;
+            }
+            return false;  // Let FTXUI handle the actual cursor move
         }
 
-        // Normal mode: Enter submits
+        // Enter submits
         if (event == fx::Event::Return) {
             on_input_submit();
             return true;
         }
-
         return false;
     });
 
@@ -168,6 +177,8 @@ std::shared_ptr<fx::ComponentBase> TUIScreen::build_ui() {
             if (elapsed.count() < 500) {
                 // Double escape - clear input
                 input_content.clear();
+                cursor_position = 0;
+                insert_mode = false;  // Block cursor when empty
                 history_index = -1;
                 saved_input.clear();
             } else {
@@ -195,6 +206,7 @@ std::shared_ptr<fx::ComponentBase> TUIScreen::build_ui() {
                     history_index--;
                 }
                 input_content = history[history_index];
+                cursor_position = static_cast<int>(input_content.size());  // Move cursor to end
             }
             return true;
         }
@@ -212,6 +224,7 @@ std::shared_ptr<fx::ComponentBase> TUIScreen::build_ui() {
                     history_index = -1;
                     input_content = saved_input;
                 }
+                cursor_position = static_cast<int>(input_content.size());  // Move cursor to end
             }
             return true;
         }
@@ -305,7 +318,6 @@ std::shared_ptr<fx::ComponentBase> TUIScreen::build_ui() {
         auto input_elem = input_component->Render();
         auto prompt_and_input = fx::hbox({
             fx::text(" > ") | fx::color(fx::Color::Green),
-            fx::text(input_content.empty() ? " " : ""),
             input_elem,
         });
         auto input_box = fx::hbox({

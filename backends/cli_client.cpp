@@ -113,39 +113,45 @@ void CLIClientBackend::sse_listener_thread() {
     std::map<std::string, std::string> headers;
     headers["Accept"] = "text/event-stream";
 
-    HttpClient sse_client;
-    SSEParser sse_parser;
+    // Reconnection loop - keep trying while sse_running is true
+    while (sse_running) {
+        HttpClient sse_client;
+        SSEParser sse_parser;
 
-    auto stream_handler = [this, &sse_parser](const std::string& chunk, void* userdata) -> bool {
-        if (!sse_running) return false;
+        auto stream_handler = [this, &sse_parser](const std::string& chunk, void* userdata) -> bool {
+            if (!sse_running) return false;
 
-        sse_parser.process_chunk(chunk, [this](const std::string& event, const std::string& data, const std::string& id) -> bool {
-            try {
-                nlohmann::json json_data = nlohmann::json::parse(data);
-                std::string event_type = json_data.value("type", "");
-                auto event_data = json_data.value("data", nlohmann::json::object());
+            sse_parser.process_chunk(chunk, [this](const std::string& event, const std::string& data, const std::string& id) -> bool {
+                try {
+                    nlohmann::json json_data = nlohmann::json::parse(data);
+                    std::string event_type = json_data.value("type", "");
+                    auto event_data = json_data.value("data", nlohmann::json::object());
 
-                if (event_type == "request_start") {
-                    std::string prompt = event_data.value("prompt", "");
-                    std::string msg = "> " + prompt + "\n";
-                    tio.write(msg.c_str(), msg.size(), Color::GREEN);
-                } else if (event_type == "delta") {
-                    std::string delta = event_data.value("delta", "");
-                    tio.write(delta.c_str(), delta.size(), Color::DEFAULT);
-                } else if (event_type == "response_complete") {
-                    // Don't add anything - display exactly what the model sent
-                }
-            } catch (...) {}
+                    if (event_type == "request_start") {
+                        std::string prompt = event_data.value("prompt", "");
+                        std::string msg = "> " + prompt + "\n";
+                        tio.write(msg.c_str(), msg.size(), Color::GREEN);
+                    } else if (event_type == "delta") {
+                        std::string delta = event_data.value("delta", "");
+                        tio.write(delta.c_str(), delta.size(), Color::DEFAULT);
+                    } else if (event_type == "response_complete") {
+                        // Don't add anything - display exactly what the model sent
+                    }
+                } catch (...) {}
+                return sse_running;
+            });
+
             return sse_running;
-        });
+        };
 
-        return sse_running;
-    };
+        HttpResponse http_resp = sse_client.get_stream(endpoint, headers, stream_handler, nullptr);
 
-    HttpResponse http_resp = sse_client.get_stream(endpoint, headers, stream_handler, nullptr);
+        if (!sse_running) break;  // Clean shutdown requested
 
-    if (!http_resp.is_success() && sse_running) {
-        LOG_WARN("SSE connection failed: " + http_resp.error_message);
+        if (!http_resp.is_success()) {
+            LOG_WARN("SSE connection lost, reconnecting in 2s...");
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
     }
 
     LOG_INFO("SSE listener thread stopped");

@@ -109,8 +109,9 @@ private:
     std::atomic<bool> quit_requested{false};
     std::atomic<bool> refresh_needed{false};
     std::atomic<bool> escape_pressed{false};  // For cancellation
-    bool in_paste_mode{false};  // Bracketed paste tracking
     std::chrono::steady_clock::time_point last_escape_time;  // For double-escape detection
+    int cursor_position{0};  // FTXUI input cursor position
+    bool insert_mode{true};  // Insert vs overtype mode
 
     // Input history
     std::vector<std::string> history;

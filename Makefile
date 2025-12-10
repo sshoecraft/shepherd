@@ -16,8 +16,12 @@ endif
 endif
 
 config:
-	rm -rf build && mkdir -p build
+	rm -rf build; mkdir -p build
 	cd build && $(_ACT) cmake -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
+
+gconfig:
+	rm -rf build; mkdir -p build
+	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-g -O0" -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
 
 install:
 

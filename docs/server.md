@@ -2,33 +2,82 @@
 
 ## Overview
 
-The Shepherd server provides an OpenAI-compatible HTTP API for inference using local backends (llama.cpp, TensorRT-LLM). It translates OpenAI-format requests into backend calls and converts responses back to OpenAI format.
+The Shepherd server system provides HTTP APIs for inference using local backends (llama.cpp, TensorRT-LLM). There are two server types:
 
-## Components
+- **API Server** - OpenAI-compatible HTTP API for external clients
+- **CLI Server** - HTTP API with local tool execution for remote agent control
 
-### server.cpp
+Both servers share a common base class (`Server`) that handles HTTP infrastructure, control socket, and lifecycle management.
 
-Thin wrapper that initializes and starts the API server:
+## Architecture
 
-```cpp
-int run_server(std::unique_ptr<Backend>& backend,
-               const std::string& server_host,
-               int server_port);
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Server (Base Class)                      │
+│  - TCP server for main API endpoints                             │
+│  - Unix socket for control commands (shutdown, status)           │
+│  - Common endpoints: /health, /status                            │
+│  - Lifecycle management (start, stop, cleanup)                   │
+└─────────────────────────────────────────────────────────────────┘
+                    │                           │
+        ┌───────────┴──────────┐    ┌───────────┴──────────┐
+        ▼                      ▼    ▼                      ▼
+┌───────────────────┐  ┌───────────────────┐
+│    APIServer      │  │    CLIServer      │
+│                   │  │                   │
+│  OpenAI-compat:   │  │  Tool execution:  │
+│  /v1/chat/compl.  │  │  /request         │
+│  /v1/models       │  │  /clear           │
+│                   │  │                   │
+│  No tool exec     │  │  Async queue      │
+│  (client does it) │  │  Processor thread │
+└───────────────────┘  └───────────────────┘
 ```
 
-### api_server.cpp
+## Server Base Class
 
-Main HTTP server implementation using cpp-httplib. Handles:
+The `Server` class (`server/server.h`, `server/server.cpp`) provides common functionality:
 
-- Request parsing and validation
-- Session construction from OpenAI messages
-- Tool extraction and formatting
-- Response conversion to OpenAI format
-- Streaming via Server-Sent Events
+### Members
 
-## API Endpoints
+- `tcp_server` - httplib::Server for main API endpoints
+- `control_server` - httplib::Server for Unix socket control
+- `running` - Atomic bool for shutdown coordination
+- `start_time` - Server start time for uptime tracking
+- `requests_processed` - Request counter
 
-### POST /v1/chat/completions
+### Virtual Methods
+
+Subclasses must implement:
+- `register_endpoints(Session& session)` - Register server-specific endpoints
+
+Subclasses may override:
+- `add_status_info(json& status)` - Add fields to status response
+- `on_server_start()` - Called before listen starts (e.g., start processor thread)
+- `on_server_stop()` - Called after listen stops (e.g., join threads)
+
+### Control Socket
+
+The server creates a Unix domain socket for local control commands:
+
+- **Path**: `/var/tmp/shepherd.sock` (falls back to `/tmp/shepherd.sock` if `/var/tmp` not writable)
+- **Permissions**: 0600 (user-only)
+- **Endpoints**:
+  - `GET /status` - Server status JSON
+  - `POST /shutdown` - Initiate graceful shutdown
+
+### Common TCP Endpoints
+
+- `GET /health` - Basic health check
+- `GET /status` - Server status with model info
+
+## API Server
+
+The API server (`server/api_server.h`, `server/api_server.cpp`) provides an OpenAI-compatible HTTP API.
+
+### Endpoints
+
+#### POST /v1/chat/completions
 
 Main chat completion endpoint. OpenAI-compatible.
 
@@ -55,15 +104,11 @@ Main chat completion endpoint. OpenAI-compatible.
   "stream": false,
   "max_tokens": 4096,
   "temperature": 0.7,
-  "top_p": 0.9,
-  "top_k": 40,
-  "repetition_penalty": 1.1,
-  "frequency_penalty": 0.0,
-  "presence_penalty": 0.0
+  "top_p": 0.9
 }
 ```
 
-**Response (non-streaming):**
+**Response:**
 ```json
 {
   "id": "chatcmpl-abc123",
@@ -86,258 +131,119 @@ Main chat completion endpoint. OpenAI-compatible.
 }
 ```
 
-**Response with tool call:**
-```json
-{
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "",
-      "tool_calls": [{
-        "id": "call_123",
-        "type": "function",
-        "function": {
-          "name": "tool_name",
-          "arguments": "{\"param\": \"value\"}"
-        }
-      }]
-    },
-    "finish_reason": "tool_calls"
-  }]
-}
-```
-
-### GET /v1/models
+#### GET /v1/models
 
 List available models.
 
-**Response:**
-```json
-{
-  "object": "list",
-  "data": [{
-    "id": "model-name",
-    "object": "model",
-    "created": 1234567890,
-    "owned_by": "shepherd",
-    "max_model_len": 32768
-  }]
-}
-```
-
-### GET /v1/models/:model_name
+#### GET /v1/models/:model_name
 
 Get specific model info.
 
-### GET /health
+## CLI Server
 
-Health check endpoint.
+The CLI server (`server/cli_server.h`, `server/cli_server.cpp`) provides tool execution for remote agent control.
 
-**Response:**
+### Endpoints
+
+#### POST /request
+
+Submit a prompt for processing with tool execution.
+
+**Request:**
 ```json
 {
-  "status": "ok",
-  "backend_connected": true
+  "prompt": "Your prompt here",
+  "stream": false,
+  "async": false
 }
 ```
 
-## Request Processing Flow
+- `stream: true` - Use Server-Sent Events for streaming response
+- `async: true` - Queue request and return immediately
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     OpenAI-format Request                        │
-│  POST /v1/chat/completions                                       │
-│  {messages: [...], tools: [...], stream: false}                  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     api_server.cpp                               │
-│  1. Parse JSON request                                           │
-│  2. Extract tools → session.tools                                │
-│  3. Extract messages → session.messages                          │
-│  4. Extract system message → session.system_message              │
-│  5. Parse sampling parameters                                    │
-│  6. Call backend->generate_from_session(session, max_tokens)     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Backend::generate_from_session()                    │
-│              (llamacpp.cpp:1187)                                 │
-│                                                                  │
-│  1. PREFIX CACHING: Compare session with backend_session         │
-│     - Find matching message prefix (already in KV cache)         │
-│     - Clear diverged messages from KV cache if needed            │
-│                                                                  │
-│  2. SYSTEM MESSAGE FORMATTING (line 1271-1306):                  │
-│     if session.system_message not empty:                         │
-│       tools = session.tools or ToolRegistry                      │
-│       formatted = chat_template->format_system_message(          │
-│                     session.system_message, tools)               │
-│       → Chat template injects tool definitions AND format        │
-│       Decode formatted system message to KV cache                │
-│                                                                  │
-│  3. ADD NEW MESSAGES (line 1308-1347):                           │
-│     For each message after matching prefix:                      │
-│       format_and_decode_message() → add to KV cache              │
-│                                                                  │
-│  4. GENERATE RESPONSE:                                           │
-│     Sample tokens until stop condition                           │
-│     Return Response with content                                 │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     Response Processing                          │
-│                     (api_server.cpp:502-571)                     │
-│  1. Strip thinking blocks (if config->thinking == false)         │
-│  2. Parse tool calls via ToolParser::parse_tool_call()           │
-│  3. Convert to OpenAI response format                            │
-│  4. Return JSON response                                         │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## generate_from_session() - The Core Interface
-
-This is the primary function connecting the server to the backend. Defined in `backends/backend.h`:
-
-```cpp
-virtual Response generate_from_session(
-    const Session& session,
-    int max_tokens = 0,
-    StreamCallback callback = nullptr
-) = 0;
-```
-
-### Session Structure
-
-The Session object passed to the backend contains:
-
-```cpp
-struct Session {
-    std::string system_message;           // System prompt text
-    std::vector<Message> messages;        // Conversation history
-    std::vector<Tool> tools;              // Available tools (from API request)
-
-    // Sampling parameters
-    float temperature, top_p, min_p;
-    int top_k;
-    float repetition_penalty, frequency_penalty, presence_penalty;
-};
-```
-
-### Key Steps in generate_from_session (llamacpp.cpp:1187)
-
-1. **Prefix Caching** (line 1200-1266)
-   - Compares incoming `session.messages` with `backend_session` (what's in KV cache)
-   - Finds longest matching prefix to avoid re-processing
-   - Clears KV cache from divergence point if conversation history changed
-
-2. **System Message Formatting** (line 1271-1306)
-   ```cpp
-   // Get tools from session or ToolRegistry
-   std::vector<Session::Tool> tools = session.tools.empty() ?
-       convert_registry_to_session_tools(ToolRegistry::instance()) : session.tools;
-
-   // Format system message WITH TOOLS via chat template
-   std::string formatted_system = chat_template->format_system_message(
-       session.system_message, tools);
-   ```
-
-   **This is where tool format instructions get injected** - the chat template adds its own format specification regardless of what's in `session.system_message`.
-
-3. **Message Processing** (line 1308-1347)
-   - Adds new messages (after matching prefix) to KV cache
-   - Each message formatted via `format_and_decode_message()`
-
-4. **Token Generation**
-   - Samples tokens using configured parameters
-   - Calls streaming callback if provided
-   - Returns Response with generated content
-
-## Tool Call Handling
-
-### Server-Side Flow
-
-1. **Tools arrive** in request `tools` array (OpenAI format)
-2. **Parsed** into `session.tools` vector
-3. **Backend** calls `chat_template->format_system_message(system_msg, tools)`
-4. **Chat template** injects tool definitions AND format instructions into system prompt
-5. **Model generates** response (may include tool call in model-specific format)
-6. **ToolParser** attempts to parse tool call from raw response text
-7. **If found**, response converted to OpenAI `tool_calls` format
-
-### Tool Call Detection
-
-The server uses `ToolParser::parse_tool_call()` to detect tool calls in model output. Supported formats:
-
-- **JSON**: `{"name": "tool", "parameters": {...}}`
-- **XML wrapped JSON**: `<tool_call>{"name": "...", "arguments": {...}}</tool_call>`
-- **Qwen XML**: `<function=name><parameter=key>value</parameter></function>`
-- **Simple XML**: `<toolname param="value"/>`
-
-### Known Issue: Tool Format Conflicts
-
-The chat template **always** appends its own tool format instructions to the system message:
-
-```cpp
-// chat_template.cpp - ChatMLTemplate::format_system_message()
-formatted += content;  // User's system message
-
-if (!tools.empty()) {
-    formatted += "\n\n# Tools\n\n...";
-    formatted += "<tool_call>\n{\"name\": ...}\n</tool_call>";  // Format instructions
+**Response (sync):**
+```json
+{
+  "success": true,
+  "response": "Final response after tool execution"
 }
 ```
 
-This means:
-- User provides system prompt with custom tool format → IGNORED
-- Chat template adds its own format instructions → MODEL SEES BOTH
-- Model may output unexpected format → PARSER FAILS
+**Response (async):**
+```json
+{
+  "success": true,
+  "queued": true,
+  "queue_position": 1
+}
+```
 
-**Workaround**: Use `--notools` to disable tool injection, then model uses only user's system prompt.
+#### POST /clear
+
+Reset conversation history.
+
+### Processor Thread
+
+The CLI server runs a background thread that processes queued async requests:
+
+```cpp
+void CLIServer::on_server_start() {
+    processor_thread = std::thread([this]() {
+        while (state.running) {
+            std::string prompt = state.get_next_input();
+            // Process request with tool execution loop
+        }
+    });
+}
+```
+
+## Control Client (shepherd ctl)
+
+The control client (`server/control.h`, `server/control.cpp`) communicates with running servers via Unix socket.
+
+### Usage
+
+```bash
+# Get server status
+shepherd ctl status
+
+# Shutdown server gracefully
+shepherd ctl shutdown
+
+# Specify socket explicitly
+shepherd ctl status --socket /tmp/shepherd-api.sock
+```
+
+### Auto-detection
+
+If no socket is specified, the client tries:
+1. `/var/tmp/shepherd.sock`
+2. `/tmp/shepherd.sock`
 
 ## Streaming
 
-When `stream: true`, the server uses Server-Sent Events (SSE):
+Both servers support Server-Sent Events for streaming:
 
 ```
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"}}]}
+data: {"delta": "Hello"}
 
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{"content":" world"}}]}
+data: {"delta": " world"}
 
-data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
+data: {"done": true, "response": "Hello world"}
 ```
-
-### Thinking Block Filtering
-
-During streaming, if `config->thinking == false`, thinking blocks are filtered:
-
-1. Buffer incoming tokens
-2. Detect `<think>` start marker → begin suppressing
-3. Detect `</think>` end marker → resume output
-4. Only non-thinking content sent to client
 
 ## Concurrency
 
-The server uses a **single mutex** to serialize all backend requests:
+The API server uses a mutex to serialize backend requests:
 
 ```cpp
-static std::mutex backend_mutex;
+std::mutex backend_mutex;
 
-svr.Post("/v1/chat/completions", [&](...) {
+tcp_server.Post("/v1/chat/completions", [this](...) {
     std::lock_guard<std::mutex> lock(backend_mutex);
     // ... handle request
 });
 ```
-
-This means:
-- One request processed at a time
-- Thread-safe for single backend instance
-- No concurrent inference (backend limitation)
 
 ## Error Handling
 
@@ -358,33 +264,31 @@ This means:
 | Status | Type | When |
 |--------|------|------|
 | 400 | `invalid_request_error` | Invalid JSON, context limit exceeded |
-| 401 | `authentication_error` | Auth failure (not used currently) |
-| 429 | `rate_limit_error` | Rate limiting (not used currently) |
 | 500 | `server_error` | Backend errors, exceptions |
-
-### Context Limit Detection
-
-The server detects context limit errors and returns 400 instead of 500:
-
-```cpp
-static bool is_context_limit_error(const std::string& error_msg) {
-    // Checks for "context limit", "context window", etc.
-}
-```
 
 ## Configuration
 
-The server inherits configuration from the global `config` object:
+### Command Line
 
-| Setting | Effect |
-|---------|--------|
-| `config->thinking` | If false, strip thinking blocks from responses |
+```bash
+# Start API server
+shepherd --apiserver --host 0.0.0.0 --port 8000
+
+# Start CLI server
+shepherd --cliserver --host 0.0.0.0 --port 8000
+```
+
+### Control Socket Path
+
+Control socket path: `/var/tmp/shepherd.sock` (or `/tmp/shepherd.sock` as fallback)
 
 ## Key Files
 
-- `server/server.cpp` - Entry point, calls api_server
-- `server/server.h` - Server interface
-- `server/api_server.cpp` - HTTP server implementation
+- `server/server.h` - Server base class interface
+- `server/server.cpp` - Server base class implementation
 - `server/api_server.h` - API server interface
-- `tools/tool_parser.cpp` - Tool call parsing
-- `backends/chat_template.cpp` - System prompt + tool formatting
+- `server/api_server.cpp` - API server implementation
+- `server/cli_server.h` - CLI server interface
+- `server/cli_server.cpp` - CLI server implementation
+- `server/control.h` - Control client interface
+- `server/control.cpp` - Control client implementation

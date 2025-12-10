@@ -69,6 +69,7 @@ set(SHEPHERD_SOURCES
     server/server.cpp
     server/api_server.cpp
     server/cli_server.cpp
+    server/control.cpp
 )
 
 # Add backend sources conditionally

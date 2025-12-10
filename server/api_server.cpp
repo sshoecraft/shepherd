@@ -3,16 +3,11 @@
 #include "../session.h"
 #include "../backends/backend.h"
 #include "../tools/tool_parser.h"
-#include "../http_client.h"
 #include "../config.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
-#include <mutex>
-#include <queue>
-#include <thread>
-#include <condition_variable>
-#include <atomic>
+#include <random>
 
 using json = nlohmann::json;
 
@@ -21,18 +16,11 @@ extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
 APIServer::APIServer(const std::string& host, int port)
-    : Server(host, port) {
+    : Server(host, port, "api") {
 }
 
 APIServer::~APIServer() {
 }
-
-int APIServer::run(Session& session) {
-    return run_api_server(backend.get(), host, port);
-}
-
-// Global mutex to serialize backend requests (single-threaded processing)
-static std::mutex backend_mutex;
 
 // Sanitize string to valid UTF-8 by replacing invalid sequences with replacement char
 static std::string sanitize_utf8(const std::string& input) {
@@ -168,7 +156,7 @@ static std::string generate_id() {
     return id;
 }
 
-// Extract tool call from response (same as server.cpp)
+// Extract tool call from response
 static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
     if (resp.content.empty()) {
         return std::nullopt;
@@ -216,17 +204,16 @@ static bool is_context_limit_error(const std::string& error_msg) {
             lower_msg.find("exceeded") != std::string::npos);
 }
 
-int run_api_server(Backend* backend, const std::string& host, int port) {
-    httplib::Server svr;
-
-    LOG_INFO("Starting API server on " + host + ":" + std::to_string(port));
-
+void APIServer::register_endpoints(Session& session) {
     // POST /v1/chat/completions - OpenAI-compatible chat completions
-    svr.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
+    tcp_server.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
         LOG_DEBUG("POST /v1/chat/completions - acquiring lock");
         // Lock to serialize requests (single-threaded processing)
         std::lock_guard<std::mutex> lock(backend_mutex);
         LOG_DEBUG("POST /v1/chat/completions - lock acquired");
+
+        // Increment request counter
+        requests_processed++;
 
         try {
             // Parse request body as JSON
@@ -240,12 +227,12 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
             }
 
             // Create session for this request
-            Session session;
+            Session request_session;
 
             bool stream = request.value("stream", false);
 
             // Parse tools from request (if provided)
-            session.tools.clear();
+            request_session.tools.clear();
             if (request.contains("tools") && request["tools"].is_array()) {
                 for (const auto& tool : request["tools"]) {
                     Session::Tool st;
@@ -269,14 +256,14 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                             st.parameters = json::object();
                         }
                     }
-                    session.tools.push_back(st);
+                    request_session.tools.push_back(st);
                 }
-                LOG_DEBUG("Parsed " + std::to_string(session.tools.size()) + " tools from request");
+                LOG_DEBUG("Parsed " + std::to_string(request_session.tools.size()) + " tools from request");
             }
 
             // Parse messages from request into session
             // OpenAI protocol sends FULL conversation history each time, so REPLACE not append
-            session.messages.clear();
+            request_session.messages.clear();
             for (const auto& msg : request["messages"]) {
                 std::string role = msg.value("role", "user");
 
@@ -300,7 +287,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 Message::Type type;
                 if (role == "system") {
                     // System messages handled separately
-                    session.system_message = content;
+                    request_session.system_message = content;
                     continue;
                 } else if (role == "user") {
                     type = Message::USER;
@@ -323,15 +310,15 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 if (msg.contains("tool_calls")) {
                     m.tool_calls_json = msg["tool_calls"].dump();
                 }
-                session.messages.push_back(m);
+                request_session.messages.push_back(m);
 
                 // Track last user/assistant messages for context preservation
                 if (type == Message::USER) {
-                    session.last_user_message_index = session.messages.size() - 1;
-                    session.last_user_message_tokens = m.tokens;
+                    request_session.last_user_message_index = request_session.messages.size() - 1;
+                    request_session.last_user_message_tokens = m.tokens;
                 } else if (type == Message::ASSISTANT) {
-                    session.last_assistant_message_index = session.messages.size() - 1;
-                    session.last_assistant_message_tokens = m.tokens;
+                    request_session.last_assistant_message_index = request_session.messages.size() - 1;
+                    request_session.last_assistant_message_tokens = m.tokens;
                 }
             }
 
@@ -343,33 +330,33 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
 
             // Parse sampling parameters from request (OpenAI-compatible)
             if (request.contains("temperature")) {
-                session.temperature = request["temperature"].get<float>();
+                request_session.temperature = request["temperature"].get<float>();
             }
             if (request.contains("top_p")) {
-                session.top_p = request["top_p"].get<float>();
+                request_session.top_p = request["top_p"].get<float>();
             }
             if (request.contains("top_k")) {
-                session.top_k = request["top_k"].get<int>();
+                request_session.top_k = request["top_k"].get<int>();
             }
             if (request.contains("min_p")) {
-                session.min_p = request["min_p"].get<float>();
+                request_session.min_p = request["min_p"].get<float>();
             }
             if (request.contains("repetition_penalty")) {
-                session.repetition_penalty = request["repetition_penalty"].get<float>();
+                request_session.repetition_penalty = request["repetition_penalty"].get<float>();
             }
             if (request.contains("presence_penalty")) {
-                session.presence_penalty = request["presence_penalty"].get<float>();
+                request_session.presence_penalty = request["presence_penalty"].get<float>();
             }
             if (request.contains("frequency_penalty")) {
-                session.frequency_penalty = request["frequency_penalty"].get<float>();
+                request_session.frequency_penalty = request["frequency_penalty"].get<float>();
             }
 
-            LOG_DEBUG("Session sampling params: temp=" + std::to_string(session.temperature) +
-                     " top_p=" + std::to_string(session.top_p) +
-                     " freq_penalty=" + std::to_string(session.frequency_penalty));
+            LOG_DEBUG("Session sampling params: temp=" + std::to_string(request_session.temperature) +
+                     " top_p=" + std::to_string(request_session.top_p) +
+                     " freq_penalty=" + std::to_string(request_session.frequency_penalty));
 
-            LOG_DEBUG("Calling generate_from_session with " + std::to_string(session.messages.size()) +
-                     " messages and " + std::to_string(session.tools.size()) + " tools (stream=" +
+            LOG_DEBUG("Calling generate_from_session with " + std::to_string(request_session.messages.size()) +
+                     " messages and " + std::to_string(request_session.tools.size()) + " tools (stream=" +
                      (stream ? "true" : "false") + ")");
 
             // Handle streaming vs non-streaming
@@ -387,10 +374,29 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                 auto thinking_end = backend->get_thinking_end_markers();
                 bool filter_thinking = !config->thinking && !thinking_start.empty();
 
+                // Capture backend pointer for lambda
+                Backend* backend_ptr = backend.get();
+
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [backend, session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking](size_t offset, httplib::DataSink& sink) mutable {
+                    [backend_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking](size_t offset, httplib::DataSink& sink) mutable {
+                        // Send initial chunk with role (vLLM/OpenAI compatible)
+                        json initial_chunk = {
+                            {"id", request_id},
+                            {"object", "chat.completion.chunk"},
+                            {"created", std::time(nullptr)},
+                            {"model", model_name},
+                            {"choices", json::array({{
+                                {"index", 0},
+                                {"delta", {{"role", "assistant"}, {"content", ""}}},
+                                {"logprobs", nullptr},
+                                {"finish_reason", nullptr}
+                            }})}
+                        };
+                        std::string initial_data = "data: " + initial_chunk.dump() + "\n\n";
+                        sink.write(initial_data.c_str(), initial_data.size());
+
                         // State for thinking block filtering during streaming
                         bool in_thinking = false;
                         std::string pending_buffer;
@@ -465,6 +471,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                                     {"choices", json::array({{
                                         {"index", 0},
                                         {"delta", {{"content", sanitize_utf8(output_delta)}}},
+                                        {"logprobs", nullptr},
                                         {"finish_reason", nullptr}
                                     }})}
                                 };
@@ -475,11 +482,11 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                         };
 
                         // Generate tokens with streaming callback
-                        Response resp = backend->generate_from_session(
-                            session, max_tokens, stream_callback
+                        Response resp = backend_ptr->generate_from_session(
+                            request_session, max_tokens, stream_callback
                         );
 
-                        // Send final chunk
+                        // Send final chunk with empty content (vLLM compatible)
                         json final_chunk = {
                             {"id", request_id},
                             {"object", "chat.completion.chunk"},
@@ -487,7 +494,8 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
                             {"model", model_name},
                             {"choices", json::array({{
                                 {"index", 0},
-                                {"delta", json::object()},
+                                {"delta", {{"content", ""}}},
+                                {"logprobs", nullptr},
                                 {"finish_reason", resp.success ? "stop" : "error"}
                             }})}
                         };
@@ -504,7 +512,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
             }
 
             // Non-streaming response
-            Response resp = backend->generate_from_session(session, max_tokens);
+            Response resp = backend->generate_from_session(request_session, max_tokens);
 
             // Check for errors
             if (!resp.success) {
@@ -540,7 +548,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
             // Check for tool calls (use stripped content)
             Response stripped_resp = resp;
             stripped_resp.content = response_content;
-            auto tool_call_opt = extract_tool_call(stripped_resp, backend);
+            auto tool_call_opt = extract_tool_call(stripped_resp, backend.get());
 
             // Build OpenAI-compatible response
             json choice = {
@@ -636,7 +644,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
     });
 
     // GET /v1/models - List available models
-    svr.Get("/v1/models", [&](const httplib::Request& req, httplib::Response& res) {
+    tcp_server.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             json model_info = {
                 {"id", backend->model_name},
@@ -660,7 +668,7 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
     });
 
     // GET /v1/models/{model_name} - Get specific model info
-    svr.Get("/v1/models/:model_name", [&](const httplib::Request& req, httplib::Response& res) {
+    tcp_server.Get("/v1/models/:model_name", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             json response = {
                 {"id", backend->model_name},
@@ -679,24 +687,4 @@ int run_api_server(Backend* backend, const std::string& host, int port) {
             res.set_content(create_error_response(500, e.what()).dump(), "application/json");
         }
     });
-
-    // GET /health - Health check
-    svr.Get("/health", [&](const httplib::Request& req, httplib::Response& res) {
-        json response = {
-            {"status", "ok"},
-            {"backend_connected", backend != nullptr}
-        };
-        res.set_content(response.dump(), "application/json");
-    });
-
-    // Start server
-    LOG_INFO("API server ready");
-    bool success = svr.listen(host.c_str(), port);
-
-    if (!success) {
-        LOG_ERROR("Failed to start API server");
-        return 1;
-    }
-
-    return 0;
 }

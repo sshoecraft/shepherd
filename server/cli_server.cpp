@@ -160,7 +160,7 @@ static json process_request(CliServerState& state, const std::string& prompt) {
         const auto& user_msg = state.session->messages.back();
         json msg_json;
         msg_json["role"] = user_msg.get_role();
-        msg_json["content"] = user_msg.content;
+        msg_json["content"] = utf8_sanitizer::sanitize_utf8(user_msg.content);
         msg_json["tokens"] = user_msg.tokens;
         state.broadcast_event("message_added", msg_json);
     }
@@ -173,7 +173,7 @@ static json process_request(CliServerState& state, const std::string& prompt) {
         if (assistant_msg.get_role() == "assistant") {
             json msg_json;
             msg_json["role"] = assistant_msg.get_role();
-            msg_json["content"] = assistant_msg.content;
+            msg_json["content"] = utf8_sanitizer::sanitize_utf8(assistant_msg.content);
             msg_json["tokens"] = assistant_msg.tokens;
             state.broadcast_event("message_added", msg_json);
         }
@@ -217,7 +217,7 @@ static json process_request(CliServerState& state, const std::string& prompt) {
             const auto& tool_msg = state.session->messages.back();
             json msg_json;
             msg_json["role"] = tool_msg.get_role();
-            msg_json["content"] = tool_msg.content;
+            msg_json["content"] = utf8_sanitizer::sanitize_utf8(tool_msg.content);
             msg_json["tokens"] = tool_msg.tokens;
             if (!tool_msg.tool_name.empty()) {
                 msg_json["tool_name"] = tool_msg.tool_name;
@@ -234,7 +234,7 @@ static json process_request(CliServerState& state, const std::string& prompt) {
             if (assistant_msg.get_role() == "assistant") {
                 json msg_json;
                 msg_json["role"] = assistant_msg.get_role();
-                msg_json["content"] = assistant_msg.content;
+                msg_json["content"] = utf8_sanitizer::sanitize_utf8(assistant_msg.content);
                 msg_json["tokens"] = assistant_msg.tokens;
                 state.broadcast_event("message_added", msg_json);
             }

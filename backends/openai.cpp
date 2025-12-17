@@ -7,7 +7,8 @@
 
 using json = nlohmann::json;
 
-OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
+OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallback callback)
+    : ApiBackend(context_size, session, callback) {
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
@@ -16,27 +17,25 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
     if (!config->json.is_null() && !config->json.empty()) {
         if (config->json.contains("deployment_name")) {
             deployment_name = config->json["deployment_name"].get<std::string>();
-            LOG_DEBUG("Azure deployment_name: " + deployment_name);
+            dout(1) << "Azure deployment_name: " + deployment_name << std::endl;
         }
         if (config->json.contains("api_version")) {
             api_version = config->json["api_version"].get<std::string>();
-            LOG_DEBUG("Azure api_version: " + api_version);
+            dout(1) << "Azure api_version: " + api_version << std::endl;
         }
     }
-
-    // Don't assume streaming - will test during initialize()
 
     // Initialize model_config with generic defaults to avoid uninitialized memory
     model_config = ModelConfig::create_generic();
 
     // Detect model configuration from Models database (if model is specified)
-    // If model is empty, it will be auto-detected in initialize() and config will be set there
+    // If model is empty, it will be auto-detected below
     if (!model_name.empty()) {
         model_config = Models::detect_from_api_model("openai", model_name);
         max_output_tokens = model_config.max_output_tokens;
-        LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
+        dout(1) << "Detected model config: context=" + std::to_string(model_config.context_window) +
                   ", max_output=" + std::to_string(model_config.max_output_tokens) +
-                  ", param_name=" + model_config.max_tokens_param_name);
+                  ", param_name=" + model_config.max_tokens_param_name << std::endl;
     }
 
     // Set API endpoint from config (api_base or default)
@@ -53,7 +52,7 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
             }
             // Build Azure URL
             api_endpoint = api_endpoint + "/openai/deployments/" + deployment_name + "/chat/completions";
-            LOG_INFO("Using Azure OpenAI endpoint: " + api_endpoint + "?api-version=" + api_version);
+            dout(1) << "Using Azure OpenAI endpoint: " + api_endpoint + "?api-version=" + api_version << std::endl;
         } else {
             // Standard OpenAI format
             // Ensure it has /chat/completions endpoint
@@ -64,7 +63,7 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
                     api_endpoint += "/chat/completions";
                 }
             }
-            LOG_INFO("Using custom API endpoint: " + api_endpoint);
+            dout(1) << "Using custom API endpoint: " + api_endpoint << std::endl;
         }
     }
     // else: keep default api_endpoint = "https://api.openai.com/v1/chat/completions" from header
@@ -73,6 +72,79 @@ OpenAIBackend::OpenAIBackend(size_t context_size) : ApiBackend(context_size) {
 
     // Parse backend-specific config if available
     parse_backend_config();
+
+    // --- Initialization (formerly in initialize()) ---
+
+    // Validate API key (only required for actual OpenAI API, not local servers)
+    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
+    if (api_key.empty() && is_openai_api) {
+        std::cerr << "OpenAI API key is required for api.openai.com" << std::endl;
+        throw std::runtime_error("OpenAI API key not configured");
+    }
+
+    // Auto-detect model if not specified
+    if (model_name.empty()) {
+        dout(1) << "No model specified, querying server for available models" << std::endl;
+        auto models = get_models();
+        if (!models.empty()) {
+            model_name = models[0];
+            dout(1) << "Using model from server: " + model_name << std::endl;
+            model_config = Models::detect_from_api_model("openai", model_name);
+            max_output_tokens = model_config.max_output_tokens;
+        } else {
+            dout(1) << std::string("WARNING: ") +"Failed to query server for model, will use first API response to determine" << std::endl;
+        }
+    }
+
+    // Query API for context size first (server knows its own limits)
+    if (this->context_size == 0) {
+        size_t api_context_size = query_model_context_size(model_name);
+        if (api_context_size > 0) {
+            this->context_size = api_context_size;
+            dout(1) << "Using API's context size: " + std::to_string(this->context_size) << std::endl;
+        }
+    }
+
+    // Fall back to local model config if API didn't provide context size
+    if (this->context_size == 0 && model_config.context_window > 0) {
+        this->context_size = model_config.context_window;
+        dout(1) << "Using model config's context size: " + std::to_string(this->context_size) << std::endl;
+    }
+
+    // If we still don't have a context size, require user to specify it
+    if (this->context_size == 0) {
+        throw std::runtime_error(
+            "Cannot determine context size for model '" + model_name + "'. "
+            "Please specify --context-size explicitly. "
+            "Check your model's config.json or documentation for the correct max_seq_len value."
+        );
+    }
+
+    // NOTE: Context safety margin disabled - now sending proper sampling params (top_p, top_k)
+    // which should prevent runaway generation at high context
+    // // Apply safety margin to auto-detected context size
+    // // This accounts for server-side prompt caching and other overhead
+    // // Reduce by 10% or 4096 tokens, whichever is smaller
+    // size_t original_context = this->context_size;
+    // size_t margin = std::min(this->context_size / 10, (size_t)4096);
+    // if (margin > 0 && this->context_size > margin) {
+    //     this->context_size -= margin;
+    //     dout(1) << "Applied context safety margin: " + std::to_string(original_context) +
+    //               " -> " + std::to_string(this->context_size) +
+    //               " (reduced by " + std::to_string(margin) + " tokens)" << std::endl;
+    // }
+
+    // Calibrate token counts (if enabled in config)
+    if (config->calibration) {
+        dout(1) << "Calibrating token counts..." << std::endl;
+        calibrate_token_counts(session);
+    } else {
+        dout(1) << "Calibration disabled, using default estimates" << std::endl;
+        session.system_message_tokens = estimate_message_tokens(session.system_message);
+        session.last_prompt_tokens = session.system_message_tokens;
+    }
+
+    dout(1) << "OpenAI backend initialized successfully" << std::endl;
 }
 
 OpenAIBackend::~OpenAIBackend() {
@@ -116,7 +188,7 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
             resp.error.find("is too large") != std::string::npos &&
             resp.error.find("your request has") != std::string::npos) {
 
-            LOG_DEBUG("Detected MAX_TOKENS_TOO_HIGH error, parsing...");
+            dout(1) << "Detected MAX_TOKENS_TOO_HIGH error, parsing..." << std::endl;
 
             // Parse actual prompt tokens: "your request has 20956 input tokens"
             size_t request_pos = resp.error.find("your request has ");
@@ -148,13 +220,13 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
                         if (resp.overflow_tokens < 0) resp.overflow_tokens = 0;
 
                         resp.code = Response::MAX_TOKENS_TOO_HIGH;
-                        LOG_DEBUG("Parsed MAX_TOKENS_TOO_HIGH: actual_prompt=" + std::to_string(resp.actual_prompt_tokens) +
+                        dout(1) << "Parsed MAX_TOKENS_TOO_HIGH: actual_prompt=" + std::to_string(resp.actual_prompt_tokens) +
                                   ", max_tokens=" + std::to_string(max_tokens_requested) +
                                   ", max_context=" + std::to_string(max_context) +
-                                  ", overflow=" + std::to_string(resp.overflow_tokens));
+                                  ", overflow=" + std::to_string(resp.overflow_tokens) << std::endl;
                     }
                 } catch (const std::exception& e) {
-                    LOG_DEBUG("Failed to parse MAX_TOKENS_TOO_HIGH details: " + std::string(e.what()));
+                    dout(1) << "Failed to parse MAX_TOKENS_TOO_HIGH details: " + std::string(e.what()) << std::endl;
                 }
             }
         }
@@ -164,7 +236,8 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
 
     // Parse successful response
     try {
-        nlohmann::json json_resp = nlohmann::json::parse(http_response.body);
+        std::string sanitized_body = utf8_sanitizer::sanitize_utf8(http_response.body);
+        nlohmann::json json_resp = nlohmann::json::parse(sanitized_body);
 
         // Extract content
         if (json_resp.contains("choices") && !json_resp["choices"].empty()) {
@@ -222,7 +295,7 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
                                         }
                                     }
                                 } catch (const std::exception& e) {
-                                    LOG_WARN("Failed to parse tool call arguments: " + std::string(e.what()));
+                                    dout(1) << std::string("WARNING: ") +"Failed to parse tool call arguments: " + std::string(e.what()) << std::endl;
                                 }
                             }
                         }
@@ -245,10 +318,10 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
 
             // Log full usage info
             int total = usage.value("total_tokens", resp.prompt_tokens + resp.completion_tokens);
-            LOG_DEBUG("API Usage - prompt_tokens: " + std::to_string(resp.prompt_tokens) +
+            dout(1) << "API Usage - prompt_tokens: " + std::to_string(resp.prompt_tokens) +
                      ", completion_tokens: " + std::to_string(resp.completion_tokens) +
-                     ", total_tokens: " + std::to_string(total));
-            LOG_DEBUG("Full usage JSON: " + usage.dump());
+                     ", total_tokens: " + std::to_string(total) << std::endl;
+            dout(1) << "Full usage JSON: " + usage.dump() << std::endl;
         }
 
         resp.success = true;
@@ -264,148 +337,37 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
     return resp;
 }
 
-void OpenAIBackend::initialize(Session& session) {
-    LOG_INFO("Initializing OpenAI backend...");
+std::vector<std::string> OpenAIBackend::fetch_models() {
+    std::vector<std::string> result;
 
-    // Validate API key (only required for actual OpenAI API, not local servers)
-    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
-    if (api_key.empty() && is_openai_api) {
-        LOG_ERROR("OpenAI API key is required for api.openai.com");
-        throw std::runtime_error("OpenAI API key not configured");
-    }
-
-    // Auto-detect model if not specified
-    if (model_name.empty()) {
-        LOG_INFO("No model specified, querying server for available models");
-        std::string queried_model = query_available_model();
-        if (!queried_model.empty()) {
-            model_name = queried_model;
-            LOG_INFO("Using model from server: " + model_name);
-
-            // Save context_window from server query before detect_from_api_model overwrites it
-            size_t server_context = model_config.context_window;
-            model_config = Models::detect_from_api_model("openai", model_name);
-            max_output_tokens = model_config.max_output_tokens;
-
-            // Restore server-reported context if it was found
-            if (server_context > 0) {
-                model_config.context_window = server_context;
-                LOG_INFO("Using server-reported context size: " + std::to_string(server_context));
-            } else {
-                // Server didn't report context size, and model is unknown
-                // Don't use the provider default - it's misleading
-                model_config.context_window = 0;
-            }
-        } else {
-            LOG_WARN("Failed to query server for model, will use first API response to determine");
-        }
-    }
-
-    // Set context size from model config if not already set
-    if (context_size == 0 && model_config.context_window > 0) {
-        context_size = model_config.context_window;
-        LOG_INFO("Using model's context size: " + std::to_string(context_size));
-    }
-
-    // If we still don't have a context size, require user to specify it
-    if (context_size == 0) {
-        throw std::runtime_error(
-            "Cannot determine context size for model '" + model_name + "'. "
-            "Please specify --context-size explicitly. "
-            "Check your model's config.json or documentation for the correct max_seq_len value."
-        );
-    }
-
-    // Call base class initialize() which handles calibration
-    ApiBackend::initialize(session);
-
-    LOG_INFO("OpenAI backend initialized successfully");
-}
-
-std::string OpenAIBackend::query_available_model() {
-    // Check prerequisites for making API call
     if (!http_client || api_key.empty()) {
-        LOG_ERROR("HTTP client or API key not available for model query");
-        return "";
+        return result;
     }
 
-    // Try standard /v1/models endpoint first (implemented by 90%+ of servers)
-    LOG_INFO("Querying server for available models");
     std::string response = make_get_request("/models");
-
     if (response.empty()) {
-        LOG_WARN("Failed to query /models endpoint");
-        return "";
+        return result;
     }
 
-    std::string model_id;
     try {
         auto j = json::parse(response);
-
-        if (j.contains("data") && j["data"].is_array() && !j["data"].empty()) {
-            // Get the first model from the list
-            auto first_model = j["data"][0];
-            if (first_model.contains("id") && first_model["id"].is_string()) {
-                model_id = first_model["id"].get<std::string>();
-                LOG_INFO("Found model from server: " + model_id);
-
-                // Extract max_model_len if available (vLLM/Shepherd server format)
-                if (first_model.contains("max_model_len") && first_model["max_model_len"].is_number()) {
-                    int max_context = first_model["max_model_len"].get<int>();
-                    model_config.context_window = max_context;
-                    LOG_INFO("Server reported context size from /models: " + std::to_string(max_context));
+        if (j.contains("data") && j["data"].is_array()) {
+            for (const auto& model : j["data"]) {
+                if (model.contains("id") && model["id"].is_string()) {
+                    result.push_back(model["id"].get<std::string>());
                 }
             }
-        }
-
-        if (model_id.empty()) {
-            LOG_WARN("No models found in /v1/models response");
-            return "";
         }
     } catch (const json::exception& e) {
-        LOG_WARN("Failed to parse /v1/models response: " + std::string(e.what()));
-        return "";
+        dout(1) << "Failed to parse /models response: " + std::string(e.what()) << std::endl;
     }
 
-    // If we didn't get context size from /v1/models, try llama.cpp /props endpoint as fallback
-    if (model_config.context_window == 0) {
-        // /props is at root level, not under /v1, so extract base URL
-        std::string base_url = api_endpoint;
-        size_t v1_pos = base_url.find("/v1/");
-        if (v1_pos != std::string::npos) {
-            base_url = base_url.substr(0, v1_pos);
-        }
-        std::string props_url = base_url + "/props";
-
-        std::map<std::string, std::string> headers;
-        // Don't send auth header for llama.cpp /props endpoint
-        HttpResponse props_resp = http_client->get(props_url, headers);
-
-        if (props_resp.is_success() && !props_resp.body.empty()) {
-            try {
-                auto props = json::parse(props_resp.body);
-                if (props.contains("default_generation_settings")) {
-                    auto settings = props["default_generation_settings"];
-                    if (settings.contains("n_ctx") && settings["n_ctx"].is_number()) {
-                        int n_ctx = settings["n_ctx"].get<int>();
-                        model_config.context_window = n_ctx;
-                        LOG_INFO("Server reported context size from /props: " + std::to_string(n_ctx));
-                    }
-                }
-            } catch (const json::exception& e) {
-                LOG_DEBUG("Failed to parse /props endpoint: " + std::string(e.what()));
-            }
-        }
-    }
-
-    return model_id;
+    return result;
 }
-
-
 
 std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
     if (!http_client) {
-        LOG_ERROR("HTTP client not initialized");
+        std::cerr << "HTTP client not initialized" << std::endl;
         return "";
     }
 
@@ -431,7 +393,7 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
             std::string error_msg = response.error_message.empty()
                 ? "Could not connect to server"
                 : response.error_message;
-            LOG_ERROR("Connection failed: " + error_msg);
+            std::cerr << "Connection failed: " + error_msg << std::endl;
             throw BackendError("Failed to connect to API server at " + full_url + ": " + error_msg +
                              "\nPlease check that the server is running and accessible.");
         }
@@ -447,12 +409,12 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
             } catch (...) {
                 error_msg = response.error_message.empty() ? error_msg : response.error_message;
             }
-            LOG_ERROR("Authentication failed: " + error_msg);
+            std::cerr << "Authentication failed: " + error_msg << std::endl;
             throw BackendError("Authentication failed: " + error_msg);
         }
 
-        LOG_ERROR("GET request failed with status " + std::to_string(response.status_code) +
-                  ": " + response.error_message);
+        std::cerr << "GET request failed with status " + std::to_string(response.status_code) +
+                  ": " + response.error_message << std::endl;
         return "";
     }
 
@@ -476,7 +438,7 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     // OpenAI format: "This model's maximum context length is 16385 tokens. However, your messages resulted in 44366 tokens."
     // Shepherd server format: "would need 54721 tokens but limit is 32768 tokens"
 
-    LOG_DEBUG("extract_tokens_to_evict: parsing error message: " + error_message);
+    dout(1) << "extract_tokens_to_evict: parsing error message: " + error_message << std::endl;
 
     int actual_tokens = -1;
     int max_tokens = -1;
@@ -485,7 +447,7 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     size_t need_pos = error_message.find("would need ");
     size_t limit_pos = error_message.find("but limit is ");
     if (need_pos != std::string::npos && limit_pos != std::string::npos) {
-        LOG_DEBUG("Found shepherd server format markers");
+        dout(1) << "Found shepherd server format markers" << std::endl;
         try {
             size_t start = need_pos + 11;
             size_t end = error_message.find(" tokens", start);
@@ -494,9 +456,9 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
             start = limit_pos + 13;
             end = error_message.find(" tokens", start);
             max_tokens = std::stoi(error_message.substr(start, end - start));
-            LOG_DEBUG("Parsed shepherd format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens));
+            dout(1) << "Parsed shepherd format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens) << std::endl;
         } catch (const std::exception& e) {
-            LOG_DEBUG("Exception parsing shepherd format: " + std::string(e.what()));
+            dout(1) << "Exception parsing shepherd format: " + std::string(e.what()) << std::endl;
         }
     }
 
@@ -504,26 +466,26 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     if (actual_tokens == -1 || max_tokens == -1) {
         size_t max_pos = error_message.find("maximum context length is ");
         size_t resulted_pos = error_message.find("resulted in ");
-        LOG_DEBUG("OpenAI classic format search: max_pos=" + std::to_string(max_pos) + ", resulted_pos=" + std::to_string(resulted_pos));
+        dout(1) << "OpenAI classic format search: max_pos=" + std::to_string(max_pos) + ", resulted_pos=" + std::to_string(resulted_pos) << std::endl;
         if (max_pos != std::string::npos && resulted_pos != std::string::npos) {
-            LOG_DEBUG("Found OpenAI classic format markers");
+            dout(1) << "Found OpenAI classic format markers" << std::endl;
             try {
                 size_t start = max_pos + 26;
                 size_t end = error_message.find(" tokens", start);
-                LOG_DEBUG("Parsing max_tokens from position " + std::to_string(start) + " to " + std::to_string(end));
+                dout(1) << "Parsing max_tokens from position " + std::to_string(start) + " to " + std::to_string(end) << std::endl;
                 std::string max_str = error_message.substr(start, end - start);
-                LOG_DEBUG("max_tokens string: '" + max_str + "'");
+                dout(1) << "max_tokens string: '" + max_str + "'" << std::endl;
                 max_tokens = std::stoi(max_str);
 
                 start = resulted_pos + 12;
                 end = error_message.find(" tokens", start);
-                LOG_DEBUG("Parsing actual_tokens from position " + std::to_string(start) + " to " + std::to_string(end));
+                dout(1) << "Parsing actual_tokens from position " + std::to_string(start) + " to " + std::to_string(end) << std::endl;
                 std::string actual_str = error_message.substr(start, end - start);
-                LOG_DEBUG("actual_tokens string: '" + actual_str + "'");
+                dout(1) << "actual_tokens string: '" + actual_str + "'" << std::endl;
                 actual_tokens = std::stoi(actual_str);
-                LOG_DEBUG("Parsed OpenAI classic format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens));
+                dout(1) << "Parsed OpenAI classic format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens) << std::endl;
             } catch (const std::exception& e) {
-                LOG_DEBUG("Exception parsing OpenAI classic format: " + std::string(e.what()));
+                dout(1) << "Exception parsing OpenAI classic format: " + std::string(e.what()) << std::endl;
             }
         }
     }
@@ -534,7 +496,7 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
         size_t max_pos = error_message.find("maximum context length is ");
         size_t request_pos = error_message.find("your request has ");
         if (too_large_pos != std::string::npos && max_pos != std::string::npos && request_pos != std::string::npos) {
-            LOG_DEBUG("Found vLLM MAX_TOKENS_TOO_HIGH format markers");
+            dout(1) << "Found vLLM MAX_TOKENS_TOO_HIGH format markers" << std::endl;
             try {
                 // Parse max_tokens_requested from "is too large: 27790"
                 size_t start = too_large_pos + 14;  // After "is too large: "
@@ -553,13 +515,13 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
 
                 // Calculate overflow: how many tokens we need to free
                 int overflow = actual_prompt + max_tokens_requested - max_context;
-                LOG_DEBUG("Parsed vLLM MAX_TOKENS_TOO_HIGH: actual_prompt=" + std::to_string(actual_prompt) +
+                dout(1) << "Parsed vLLM MAX_TOKENS_TOO_HIGH: actual_prompt=" + std::to_string(actual_prompt) +
                          ", max_tokens_requested=" + std::to_string(max_tokens_requested) +
                          ", max_context=" + std::to_string(max_context) +
-                         ", overflow=" + std::to_string(overflow));
+                         ", overflow=" + std::to_string(overflow) << std::endl;
                 return overflow > 0 ? overflow : -1;
             } catch (const std::exception& e) {
-                LOG_DEBUG("Exception parsing vLLM MAX_TOKENS_TOO_HIGH format: " + std::string(e.what()));
+                dout(1) << "Exception parsing vLLM MAX_TOKENS_TOO_HIGH format: " + std::string(e.what()) << std::endl;
             }
         }
     }
@@ -568,9 +530,9 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     if (actual_tokens == -1 || max_tokens == -1) {
         size_t max_pos = error_message.find("maximum context length is ");
         size_t request_pos = error_message.find("your request has ");
-        LOG_DEBUG("vLLM format search: max_pos=" + std::to_string(max_pos) + ", request_pos=" + std::to_string(request_pos));
+        dout(1) << "vLLM format search: max_pos=" + std::to_string(max_pos) + ", request_pos=" + std::to_string(request_pos) << std::endl;
         if (max_pos != std::string::npos && request_pos != std::string::npos) {
-            LOG_DEBUG("Found vLLM format markers");
+            dout(1) << "Found vLLM format markers" << std::endl;
             try {
                 size_t start = max_pos + 26;
                 size_t end = error_message.find(" tokens", start);
@@ -579,9 +541,9 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
                 start = request_pos + 17;
                 end = error_message.find(" ", start);
                 actual_tokens = std::stoi(error_message.substr(start, end - start));
-                LOG_DEBUG("Parsed vLLM format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens));
+                dout(1) << "Parsed vLLM format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens) << std::endl;
             } catch (const std::exception& e) {
-                LOG_DEBUG("Exception parsing vLLM format: " + std::string(e.what()));
+                dout(1) << "Exception parsing vLLM format: " + std::string(e.what()) << std::endl;
             }
         }
     }
@@ -590,9 +552,9 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
     if (actual_tokens == -1 || max_tokens == -1) {
         size_t max_pos = error_message.find("maximum context length is ");
         size_t requested_pos = error_message.find("you requested ");
-        LOG_DEBUG("OpenAI detailed format search: max_pos=" + std::to_string(max_pos) + ", requested_pos=" + std::to_string(requested_pos));
+        dout(1) << "OpenAI detailed format search: max_pos=" + std::to_string(max_pos) + ", requested_pos=" + std::to_string(requested_pos) << std::endl;
         if (max_pos != std::string::npos && requested_pos != std::string::npos) {
-            LOG_DEBUG("Found OpenAI detailed format markers");
+            dout(1) << "Found OpenAI detailed format markers" << std::endl;
             try {
                 size_t start = max_pos + 26;
                 size_t end = error_message.find(" tokens", start);
@@ -601,21 +563,21 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
                 start = requested_pos + 14;
                 end = error_message.find(" tokens", start);
                 actual_tokens = std::stoi(error_message.substr(start, end - start));
-                LOG_DEBUG("Parsed OpenAI detailed format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens));
+                dout(1) << "Parsed OpenAI detailed format: actual=" + std::to_string(actual_tokens) + ", max=" + std::to_string(max_tokens) << std::endl;
             } catch (const std::exception& e) {
-                LOG_DEBUG("Exception parsing OpenAI detailed format: " + std::string(e.what()));
+                dout(1) << "Exception parsing OpenAI detailed format: " + std::string(e.what()) << std::endl;
             }
         }
     }
 
     if (actual_tokens > 0 && max_tokens > 0) {
         int to_evict = actual_tokens - max_tokens;
-        LOG_DEBUG("Tokens to evict: " + std::to_string(to_evict));
+        dout(1) << "Tokens to evict: " + std::to_string(to_evict) << std::endl;
         return to_evict;
     }
 
     // Can't parse - return error
-    LOG_DEBUG("Failed to parse token count from error message: " + error_message);
+    dout(1) << "Failed to parse token count from error message: " + error_message << std::endl;
     return -1;
 }
 
@@ -639,15 +601,15 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
         jmsg["content"] = msg.content;
 
         // Restore tool_calls for assistant messages that made tool calls
-        if (msg.type == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
+        if (msg.role == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
             try {
                 jmsg["tool_calls"] = nlohmann::json::parse(msg.tool_calls_json);
             } catch (const std::exception& e) {
-                LOG_WARN("Failed to parse stored tool_calls: " + std::string(e.what()));
+                dout(1) << std::string("WARNING: ") +"Failed to parse stored tool_calls: " + std::string(e.what()) << std::endl;
             }
         }
 
-        if (msg.type == Message::TOOL && !msg.tool_call_id.empty()) {
+        if (msg.role == Message::TOOL_RESPONSE && !msg.tool_call_id.empty()) {
             jmsg["tool_call_id"] = msg.tool_call_id;
         }
         messages.push_back(jmsg);
@@ -691,31 +653,35 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
 
     // Add sampling parameters
     request["temperature"] = temperature;
+    request["top_p"] = top_p;
+    if (top_k > 0) {
+        request["top_k"] = top_k;  // Only send if explicitly set (not all APIs support this)
+    }
     request["frequency_penalty"] = frequency_penalty;
     request["presence_penalty"] = presence_penalty;
     // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
 
     // Add stop sequences if configured
-    LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
+    dout(1) << "stop_sequences.size()=" + std::to_string(stop_sequences.size()) << std::endl;
     if (!stop_sequences.empty()) {
         json stop_array = json::array();
         for (const auto& seq : stop_sequences) {
             stop_array.push_back(seq);
         }
         request["stop"] = stop_array;
-        LOG_DEBUG("Added stop sequences to request: " + stop_array.dump());
+        dout(1) << "Added stop sequences to request: " + stop_array.dump() << std::endl;
     }
 
     // Add special headers if any
     if (!model_config.special_headers.empty()) {
-        LOG_DEBUG("Model has " + std::to_string(model_config.special_headers.size()) + " special headers");
+        dout(1) << "Model has " + std::to_string(model_config.special_headers.size()) + " special headers" << std::endl;
     }
 
     return request;
 }
 
 nlohmann::json OpenAIBackend::build_request(const Session& session,
-                                             Message::Type type,
+                                             Message::Role role,
                                              const std::string& content,
                                              const std::string& tool_name,
                                              const std::string& tool_id,
@@ -738,15 +704,15 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
         jmsg["content"] = msg.content;
 
         // Restore tool_calls for assistant messages that made tool calls
-        if (msg.type == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
+        if (msg.role == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
             try {
                 jmsg["tool_calls"] = nlohmann::json::parse(msg.tool_calls_json);
             } catch (const std::exception& e) {
-                LOG_WARN("Failed to parse stored tool_calls: " + std::string(e.what()));
+                dout(1) << std::string("WARNING: ") +"Failed to parse stored tool_calls: " + std::string(e.what()) << std::endl;
             }
         }
 
-        if (msg.type == Message::TOOL && !msg.tool_call_id.empty()) {
+        if (msg.role == Message::TOOL_RESPONSE && !msg.tool_call_id.empty()) {
             jmsg["tool_call_id"] = msg.tool_call_id;
         }
         messages.push_back(jmsg);
@@ -754,16 +720,16 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
 
     // Add the new message being sent
     nlohmann::json new_msg;
-    // Convert Message::Type to role string
-    std::string role;
-    switch (type) {
-        case Message::SYSTEM: role = "system"; break;
-        case Message::USER: role = "user"; break;
-        case Message::ASSISTANT: role = "assistant"; break;
-        case Message::TOOL: role = "tool"; break;
-        case Message::FUNCTION: role = "function"; break;
+    // Convert Message::Role to role string
+    std::string role_str;
+    switch (role) {
+        case Message::SYSTEM: role_str = "system"; break;
+        case Message::USER: role_str = "user"; break;
+        case Message::ASSISTANT: role_str = "assistant"; break;
+        case Message::TOOL_RESPONSE: role_str = "tool"; break;
+        case Message::FUNCTION: role_str = "function"; break;
     }
-    new_msg["role"] = role;
+    new_msg["role"] = role_str;
     new_msg["content"] = content;
     if (!tool_name.empty()) new_msg["name"] = tool_name;
     if (!tool_id.empty()) new_msg["tool_call_id"] = tool_id;
@@ -771,8 +737,9 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     
     request["messages"] = messages;
 
-    LOG_DEBUG("Built request with " + std::to_string(messages.size()) + " messages (session has " +
-             std::to_string(session.messages.size()) + " messages)");
+    dout(1) << "Built request with " + std::to_string(messages.size()) + " messages (session has " +
+             std::to_string(session.messages.size()) + " messages" << std::endl;
+
 
     // Add tools if present
     if (!session.tools.empty()) {
@@ -810,19 +777,23 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
 
     // Add sampling parameters
     request["temperature"] = temperature;
+    request["top_p"] = top_p;
+    if (top_k > 0) {
+        request["top_k"] = top_k;  // Only send if explicitly set (not all APIs support this)
+    }
     request["frequency_penalty"] = frequency_penalty;
     request["presence_penalty"] = presence_penalty;
     // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
 
     // Add stop sequences if configured
-    LOG_DEBUG("stop_sequences.size()=" + std::to_string(stop_sequences.size()));
+    dout(1) << "stop_sequences.size()=" + std::to_string(stop_sequences.size()) << std::endl;
     if (!stop_sequences.empty()) {
         json stop_array = json::array();
         for (const auto& seq : stop_sequences) {
             stop_array.push_back(seq);
         }
         request["stop"] = stop_array;
-        LOG_DEBUG("Added stop sequences to request: " + stop_array.dump());
+        dout(1) << "Added stop sequences to request: " + stop_array.dump() << std::endl;
     }
 
     return request;
@@ -848,19 +819,19 @@ std::map<std::string, std::string> OpenAIBackend::get_api_headers() {
     if (ensure_valid_oauth_token() && !oauth_token_.access_token.empty()) {
         // Use OAuth bearer token
         headers["Authorization"] = oauth_token_.token_type + " " + oauth_token_.access_token;
-        LOG_DEBUG("Using OAuth token for authorization");
+        dout(1) << "Using OAuth token for authorization" << std::endl;
     } else if (!api_key.empty()) {
         // Use API key
         headers["Authorization"] = "Bearer " + api_key;
-        LOG_DEBUG("Using API key for authorization");
+        dout(1) << "Using API key for authorization" << std::endl;
     } else {
-        LOG_WARN("No authentication configured (neither OAuth nor API key)");
+        dout(1) << std::string("WARNING: ") +"No authentication configured (neither OAuth nor API key)" << std::endl;
     }
 
     // Add model-specific special headers if any
     for (const auto& [key, value] : model_config.special_headers) {
         headers[key] = value;
-        LOG_DEBUG("Adding special header: " + key + " = " + value);
+        dout(1) << "Adding special header: " + key + " = " + value << std::endl;
     }
 #endif
     return headers;
@@ -878,24 +849,29 @@ std::string OpenAIBackend::get_api_endpoint() {
 #endif
 }
 
-Response OpenAIBackend::add_message_stream(Session& session,
-                                          Message::Type type,
-                                          const std::string& content,
-                                          StreamCallback callback,
-                                          const std::string& tool_name,
-                                          const std::string& tool_id,
-                                          int prompt_tokens,
-                                          int max_tokens) {
-    LOG_INFO("*** OpenAIBackend::add_message_stream CALLED ***");
-    LOG_DEBUG("OpenAIBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
-             ", max_tokens=" + std::to_string(max_tokens));
+void OpenAIBackend::add_message(Session& session,
+                                    Message::Role role,
+                                    const std::string& content,
+                                    const std::string& tool_name,
+                                    const std::string& tool_id,
+                                    
+                                    int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "*** OpenAIBackend::add_message (streaming) ***" << std::endl;
+    dout(1) << "OpenAIBackend::add_message: max_tokens=" + std::to_string(max_tokens) << std::endl;
 
     const int MAX_RETRIES = 3;
     int retry = 0;
 
     while (retry < MAX_RETRIES) {
         // Build request with entire session + new message + max_tokens
-        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+        nlohmann::json request = build_request(session, role, content, tool_name, tool_id, max_tokens);
 
         // Add streaming flag
         request["stream"] = true;
@@ -903,7 +879,16 @@ Response OpenAIBackend::add_message_stream(Session& session,
         // Request usage information in streaming response (Azure OpenAI support)
         request["stream_options"] = {{"include_usage", true}};
 
-        LOG_DEBUG("Sending streaming request to API with max_tokens=" + std::to_string(max_tokens));
+        // Debug: show session state before sending
+        int session_token_sum = 0;
+        for (const auto& msg : session.messages) {
+            session_token_sum += msg.tokens;
+        }
+        dout(1) << "Sending streaming request: max_tokens=" + std::to_string(max_tokens) +
+                 ", session.total_tokens=" + std::to_string(session.total_tokens) +
+                 ", session.messages=" + std::to_string(session.messages.size()) +
+                 ", sum(msg.tokens)=" + std::to_string(session_token_sum) +
+                 ", system_tokens=" + std::to_string(session.system_message_tokens) << std::endl;
 
         // Get headers and endpoint from backend
         auto headers = get_api_headers();
@@ -911,6 +896,12 @@ Response OpenAIBackend::add_message_stream(Session& session,
 
         // Enforce rate limits before making request
         enforce_rate_limits();
+
+        // Fire USER event callback before sending to provider
+        // This displays the user prompt when accepted
+        if (role == Message::USER && !content.empty()) {
+            callback(CallbackEvent::USER_PROMPT, content, "", "");
+        }
 
         // Streaming state
         Response accumulated_resp;
@@ -934,9 +925,13 @@ Response OpenAIBackend::add_message_stream(Session& session,
 
                     // Parse JSON data
                     try {
+                        dout(3) << "SSE raw data: " << data.substr(0, 300) << std::endl;
+
                         // Sanitize UTF-8 before parsing JSON (Azure OpenAI can return invalid UTF-8)
                         std::string sanitized_data = utf8_sanitizer::sanitize_utf8(data);
                         json delta_json = json::parse(sanitized_data);
+
+                        dout(3) << "SSE JSON: " << delta_json.dump().substr(0, 200) << std::endl;
 
                         // Extract delta content
                         if (delta_json.contains("choices") && !delta_json["choices"].empty()) {
@@ -957,18 +952,21 @@ Response OpenAIBackend::add_message_stream(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Only stream content if we haven't seen tool calls or <tool_call> tag
-                                    // The model outputs <tool_call> XML in content before tool_calls delta arrives
-                                    if (accumulated_resp.tool_calls.empty() &&
-                                        accumulated_content.find("<tool_call>") == std::string::npos) {
-                                        // Invoke user callback with delta
-                                        if (callback) {
-                                            if (!callback(delta_text, accumulated_content, accumulated_resp)) {
-                                                // User requested stop
-                                                return false;
-                                            }
+                                    dout(2) << "SSE delta content: [" << delta_text << "] tool_calls.size=" << accumulated_resp.tool_calls.size() << std::endl;
+
+                                    // Only stream content if we haven't seen tool calls
+                                    // The unified output() filter handles tool call detection
+                                    if (accumulated_resp.tool_calls.empty()) {
+                                        // Route through unified output filter
+                                        if (!output(delta_text)) {
+                                            // User requested cancellation
+                                            return false;
                                         }
+                                    } else {
+                                        dout(2) << "SSE: skipping output due to tool_calls present" << std::endl;
                                     }
+                                } else {
+                                    dout(2) << "SSE delta: no content (has_content=" << delta.contains("content") << " is_null=" << (delta.contains("content") ? delta["content"].is_null() : false) << ")" << std::endl;
                                 }
 
                                 // Handle tool_calls delta (incremental)
@@ -1009,6 +1007,8 @@ Response OpenAIBackend::add_message_stream(Session& session,
                             const auto& usage = delta_json["usage"];
                             accumulated_resp.prompt_tokens = usage.value("prompt_tokens", 0);
                             accumulated_resp.completion_tokens = usage.value("completion_tokens", 0);
+                            dout(1) << "SSE parsed usage: prompt_tokens=" << accumulated_resp.prompt_tokens
+                                    << ", completion_tokens=" << accumulated_resp.completion_tokens << std::endl;
                         }
                         // Fallback: parse llama.cpp timings format if usage not present
                         else if (delta_json.contains("timings")) {
@@ -1018,7 +1018,7 @@ Response OpenAIBackend::add_message_stream(Session& session,
                         }
 
                     } catch (const std::exception& e) {
-                        LOG_WARN("Failed to parse SSE data: " + std::string(e.what()));
+                        dout(1) << std::string("WARNING: ") +"Failed to parse SSE data: " + std::string(e.what()) << std::endl;
                     }
 
                     return true; // Continue processing
@@ -1051,23 +1051,27 @@ Response OpenAIBackend::add_message_stream(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 // Evict messages
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 retry++;
-                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
-                        std::to_string(MAX_RETRIES) + ")");
+                dout(1) << "Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + "" << std::endl;
+
                 continue; // Retry
             }
 
-            return accumulated_resp; // Return error
+            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
+
+        // Flush any remaining output from the filter
+        flush_output();
 
         // Success - update session with messages
         if (stream_complete && accumulated_resp.success) {
@@ -1094,12 +1098,12 @@ Response OpenAIBackend::add_message_stream(Session& session,
             }
 
             // Add messages to session
-            Message user_msg(type, content, new_message_tokens);
+            Message user_msg(role, content, new_message_tokens);
             user_msg.tool_name = tool_name;
             user_msg.tool_call_id = tool_id;
             session.messages.push_back(user_msg);
 
-            if (type == Message::USER) {
+            if (role == Message::USER) {
                 session.last_user_message_index = session.messages.size() - 1;
                 session.last_user_message_tokens = new_message_tokens;
             }
@@ -1128,7 +1132,7 @@ Response OpenAIBackend::add_message_stream(Session& session,
                             }
                         }
                     } catch (const std::exception& e) {
-                        LOG_WARN("Failed to parse tool call arguments: " + std::string(e.what()));
+                        dout(1) << std::string("WARNING: ") +"Failed to parse tool call arguments: " + std::string(e.what()) << std::endl;
                     }
                 }
             }
@@ -1174,9 +1178,16 @@ Response OpenAIBackend::add_message_stream(Session& session,
                 }
                 session.total_tokens = total;
             }
+
+            // Send tool calls via callback
+            for (const auto& tc : accumulated_resp.tool_calls) {
+                // Use empty JSON object if no arguments provided
+                std::string args = tc.raw_json.empty() ? "{}" : tc.raw_json;
+                callback(CallbackEvent::TOOL_CALL, args, tc.name, tc.tool_call_id);
+            }
         }
 
-        return accumulated_resp;
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
     }
 
     Response err_resp;
@@ -1184,21 +1195,21 @@ Response OpenAIBackend::add_message_stream(Session& session,
     err_resp.code = Response::ERROR;
     err_resp.finish_reason = "error";
     err_resp.error = "Max retries exceeded trying to fit context";
-    return err_resp;
+    callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
 }
 
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     // Check prerequisites for making API call
     if (!http_client || api_key.empty()) {
-        LOG_ERROR("HTTP client or API key not available for model query");
+        std::cerr << "HTTP client or API key not available for model query" << std::endl;
         return 0;
     }
 
     // Make GET request to /models (list endpoint)
-    LOG_INFO("Querying model list from /models");
+    dout(1) << "Querying model list from /models" << std::endl;
     std::string response = make_get_request("/models");
-    LOG_INFO("Model list response (" + std::to_string(response.length()) + " bytes): " +
-             (response.length() > 200 ? response.substr(0, 200) + "..." : response));
+    dout(1) << "Model list response (" + std::to_string(response.length()) + " bytes): " +
+             (response.length() > 200 ? response.substr(0, 200) + "..." : response) << std::endl;
 
     // Parse JSON response to find our model and extract context size
     if (!response.empty()) {
@@ -1210,26 +1221,26 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                 // First, try exact match by ID
                 for (const auto& model_obj : j["data"]) {
                     if (model_obj.contains("id") && model_obj["id"].get<std::string>() == model_name) {
-                        LOG_INFO("Found exact model match in list: " + model_name);
+                        dout(1) << "Found exact model match in list: " + model_name << std::endl;
 
                         // Try max_model_len (vLLM/llama.cpp format)
                         if (model_obj.contains("max_model_len") && model_obj["max_model_len"].is_number()) {
                             size_t context_size = model_obj["max_model_len"].get<size_t>();
-                            LOG_INFO("Parsed max_model_len from API: " + std::to_string(context_size));
+                            dout(1) << "Parsed max_model_len from API: " + std::to_string(context_size) << std::endl;
                             return context_size;
                         }
 
                         // Try context_window (some OpenAI-compatible APIs)
                         if (model_obj.contains("context_window") && model_obj["context_window"].is_number()) {
                             size_t context_size = model_obj["context_window"].get<size_t>();
-                            LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
+                            dout(1) << "Parsed context_window from API: " + std::to_string(context_size) << std::endl;
                             return context_size;
                         }
 
                         // Try context_length (official OpenAI format)
                         if (model_obj.contains("context_length") && model_obj["context_length"].is_number()) {
                             size_t context_size = model_obj["context_length"].get<size_t>();
-                            LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
+                            dout(1) << "Parsed context_length from API: " + std::to_string(context_size) << std::endl;
                             return context_size;
                         }
 
@@ -1237,7 +1248,7 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                         if (model_obj.contains("meta") && model_obj["meta"].is_object()) {
                             if (model_obj["meta"].contains("n_ctx_train") && model_obj["meta"]["n_ctx_train"].is_number()) {
                                 size_t context_size = model_obj["meta"]["n_ctx_train"].get<size_t>();
-                                LOG_INFO("Parsed n_ctx_train from API: " + std::to_string(context_size));
+                                dout(1) << "Parsed n_ctx_train from API: " + std::to_string(context_size) << std::endl;
                                 return context_size;
                             }
                         }
@@ -1245,30 +1256,30 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                 }
 
                 // No exact match found - use first available model (common for llama.cpp/single-model servers)
-                LOG_INFO("No exact match for '" + model_name + "', using first available model from list");
+                dout(1) << "No exact match for '" + model_name + "', using first available model from list" << std::endl;
                 const auto& model_obj = j["data"][0];
 
                 std::string actual_model_id = model_obj.contains("id") ? model_obj["id"].get<std::string>() : "unknown";
-                LOG_INFO("Using model: " + actual_model_id);
+                dout(1) << "Using model: " + actual_model_id << std::endl;
 
                 // Try max_model_len (vLLM/llama.cpp format)
                 if (model_obj.contains("max_model_len") && model_obj["max_model_len"].is_number()) {
                     size_t context_size = model_obj["max_model_len"].get<size_t>();
-                    LOG_INFO("Parsed max_model_len from API: " + std::to_string(context_size));
+                    dout(1) << "Parsed max_model_len from API: " + std::to_string(context_size) << std::endl;
                     return context_size;
                 }
 
                 // Try context_window (some OpenAI-compatible APIs)
                 if (model_obj.contains("context_window") && model_obj["context_window"].is_number()) {
                     size_t context_size = model_obj["context_window"].get<size_t>();
-                    LOG_INFO("Parsed context_window from API: " + std::to_string(context_size));
+                    dout(1) << "Parsed context_window from API: " + std::to_string(context_size) << std::endl;
                     return context_size;
                 }
 
                 // Try context_length (official OpenAI format)
                 if (model_obj.contains("context_length") && model_obj["context_length"].is_number()) {
                     size_t context_size = model_obj["context_length"].get<size_t>();
-                    LOG_INFO("Parsed context_length from API: " + std::to_string(context_size));
+                    dout(1) << "Parsed context_length from API: " + std::to_string(context_size) << std::endl;
                     return context_size;
                 }
 
@@ -1276,19 +1287,19 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                 if (model_obj.contains("meta") && model_obj["meta"].is_object()) {
                     if (model_obj["meta"].contains("n_ctx_train") && model_obj["meta"]["n_ctx_train"].is_number()) {
                         size_t context_size = model_obj["meta"]["n_ctx_train"].get<size_t>();
-                        LOG_INFO("Parsed n_ctx_train from API: " + std::to_string(context_size));
+                        dout(1) << "Parsed n_ctx_train from API: " + std::to_string(context_size) << std::endl;
                         return context_size;
                     }
                 }
 
-                LOG_INFO("Model found but no context size field detected");
+                dout(1) << "Model found but no context size field detected" << std::endl;
             }
         } catch (const json::exception& e) {
-            LOG_WARN("Failed to parse model list JSON: " + std::string(e.what()));
+            dout(1) << std::string("WARNING: ") +"Failed to parse model list JSON: " + std::string(e.what()) << std::endl;
         }
     }
 
     // Unable to query context size from API - return 0 and let caller handle fallback
-    LOG_WARN("Could not query context size from API for model: " + model_name);
+    dout(1) << std::string("WARNING: ") +"Could not query context size from API for model: " + model_name << std::endl;
     return 0;
 }

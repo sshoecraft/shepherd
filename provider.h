@@ -5,11 +5,13 @@
 #include <vector>
 #include <optional>
 #include <memory>
+#include <functional>
 #include "nlohmann/json.hpp"
+#include "backend.h"
 
 // Forward declarations
-class Backend;
 class Session;
+class Tools;
 
 /// @brief Represents a single provider configuration
 /// Unified class that holds all provider-type-specific fields
@@ -48,6 +50,7 @@ public:
     int gpu_id = 0;                 // TensorRT GPU ID
     int n_batch = 512;
     int n_threads = 0;              // 0=auto
+    std::string cache_type = "f16"; // KV cache type: f16, f32, q8_0, q4_0
 
     // Sampling parameters (shared by most backends)
     float temperature = 0.7f;
@@ -90,7 +93,8 @@ public:
     static std::string get_providers_dir();
 
     // Create backend from this provider config
-    std::unique_ptr<Backend> connect(Session& session);
+    // callback: Optional event callback for streaming output
+    std::unique_ptr<Backend> connect(Session& session, Backend::EventCallback callback = nullptr);
 
     // Serialization
     nlohmann::json to_json() const;
@@ -109,19 +113,25 @@ public:
 
 // Common provider command implementation (takes parsed args)
 // Returns 0 on success, 1 on error
+// callback: function to emit output
 // backend and session are optional - needed for "use" and "next" commands
 // providers is optional - if null, loads from disk; if provided, uses that list
 // current_provider is optional - name of current provider for display
+// tools is optional - needed for rebuilding provider tools after switching
 int handle_provider_args(const std::vector<std::string>& args,
+                         std::function<void(const std::string&)> callback,
                          std::unique_ptr<Backend>* backend = nullptr,
                          Session* session = nullptr,
                          std::vector<Provider>* providers = nullptr,
-                         std::string* current_provider = nullptr);
+                         std::string* current_provider = nullptr,
+                         Tools* tools = nullptr);
 
 // Common model command implementation (takes parsed args)
 // Returns 0 on success, 1 on error
+// callback: function to emit output
 // backend is optional - needed for runtime model changes
 int handle_model_args(const std::vector<std::string>& args,
+                      std::function<void(const std::string&)> callback,
                       std::unique_ptr<Backend>* backend = nullptr,
                       std::vector<Provider>* providers = nullptr,
                       std::string* current_provider = nullptr);

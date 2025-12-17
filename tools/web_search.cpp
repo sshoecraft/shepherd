@@ -1,8 +1,8 @@
 #include "web_search.h"
 #include "http_client.h"
 #include "nlohmann/json.hpp"
-#include "logger.h"
 #include "shepherd.h"
+
 #include <sstream>
 
 using json = nlohmann::json;
@@ -10,7 +10,7 @@ using json = nlohmann::json;
 // BraveSearchProvider implementation
 BraveSearchProvider::BraveSearchProvider(const std::string& api_key)
     : api_key_(api_key) {
-    LOG_INFO("Initialized Brave Search provider");
+    dout(1) << "Initialized Brave Search provider" << std::endl;
 }
 
 std::vector<WebSearchResult> BraveSearchProvider::search(const std::string& query) {
@@ -42,7 +42,7 @@ std::vector<WebSearchResult> BraveSearchProvider::search(const std::string& quer
         HttpResponse response = client.get(url, headers);
 
         if (!response.is_success()) {
-            LOG_ERROR("Brave Search API request failed: " + response.error_message);
+            std::cerr << "Brave Search API request failed: " + response.error_message << std::endl;
             return results;
         }
 
@@ -61,7 +61,7 @@ std::vector<WebSearchResult> BraveSearchProvider::search(const std::string& quer
         }
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Brave Search error: " + std::string(e.what()));
+        std::cerr << "Brave Search error: " + std::string(e.what()) << std::endl;
     }
 
     return results;
@@ -97,7 +97,7 @@ std::vector<WebSearchResult> DuckDuckGoProvider::search(const std::string& query
         HttpResponse response = client.get(url, headers);
 
         if (!response.is_success()) {
-            LOG_ERROR("DuckDuckGo API request failed: " + response.error_message);
+            std::cerr << "DuckDuckGo API request failed: " + response.error_message << std::endl;
             return results;
         }
 
@@ -126,7 +126,7 @@ std::vector<WebSearchResult> DuckDuckGoProvider::search(const std::string& query
         }
 
     } catch (const std::exception& e) {
-        LOG_ERROR("DuckDuckGo error: " + std::string(e.what()));
+        std::cerr << "DuckDuckGo error: " + std::string(e.what()) << std::endl;
     }
 
     return results;
@@ -135,7 +135,7 @@ std::vector<WebSearchResult> DuckDuckGoProvider::search(const std::string& query
 // SearXNGProvider implementation
 SearXNGProvider::SearXNGProvider(const std::string& instance_url)
     : instance_url_(instance_url) {
-    LOG_INFO("Initialized SearXNG provider with instance: " + instance_url);
+    dout(1) << "Initialized SearXNG provider with instance: " + instance_url << std::endl;
 }
 
 std::vector<WebSearchResult> SearXNGProvider::search(const std::string& query) {
@@ -166,7 +166,7 @@ std::vector<WebSearchResult> SearXNGProvider::search(const std::string& query) {
         HttpResponse response = client.get(url, headers);
 
         if (!response.is_success()) {
-            LOG_ERROR("SearXNG request failed: " + response.error_message);
+            std::cerr << "SearXNG request failed: " + response.error_message << std::endl;
             return results;
         }
 
@@ -185,7 +185,7 @@ std::vector<WebSearchResult> SearXNGProvider::search(const std::string& query) {
         }
 
     } catch (const std::exception& e) {
-        LOG_ERROR("SearXNG error: " + std::string(e.what()));
+        std::cerr << "SearXNG error: " + std::string(e.what()) << std::endl;
     }
 
     return results;
@@ -208,7 +208,7 @@ WebSearch& WebSearch::instance() {
 void WebSearch::initialize(const std::string& provider, const std::string& api_key, const std::string& instance_url) {
     if (provider == "brave") {
         if (api_key.empty()) {
-            LOG_ERROR("Brave Search requires an API key");
+            std::cerr << "Brave Search requires an API key" << std::endl;
             return;
         }
         provider_ = std::make_unique<BraveSearchProvider>(api_key);
@@ -216,21 +216,21 @@ void WebSearch::initialize(const std::string& provider, const std::string& api_k
         provider_ = std::make_unique<DuckDuckGoProvider>();
     } else if (provider == "searxng") {
         if (instance_url.empty()) {
-            LOG_ERROR("SearXNG requires an instance URL");
+            std::cerr << "SearXNG requires an instance URL" << std::endl;
             return;
         }
         provider_ = std::make_unique<SearXNGProvider>(instance_url);
     } else {
-        LOG_ERROR("Unknown search provider: " + provider);
+        std::cerr << "Unknown search provider: " + provider << std::endl;
         return;
     }
 
-    LOG_INFO("Web search initialized with provider: " + provider);
+    dout(1) << "Web search initialized with provider: " + provider << std::endl;
 }
 
 std::vector<WebSearchResult> WebSearch::search(const std::string& query) {
     if (!provider_) {
-        LOG_WARN("Web search not initialized");
+        dout(1) << "WARNING: Web search not initialized" << std::endl;
         return {};
     }
 

@@ -2,7 +2,7 @@
 #pragma once
 
 #include "shepherd.h"
-#include "backends/backend.h"
+#include "backend.h"
 #include "nlohmann/json.hpp"
 #include "http_client.h"
 #include <vector>
@@ -15,7 +15,7 @@
 class ApiBackend : public Backend {
 public:
     // Common API backend configuration (all API backends can use these)
-    long timeout_seconds = 120;
+    long timeout_seconds = 300;  // 5 minutes default
     int max_retries = 3;
     long connect_timeout_seconds = 30;
 
@@ -28,39 +28,27 @@ public:
     float repeat_penalty = 1.2f;     // Ollama, TensorRT-LLM (as repetition_penalty)
     std::vector<std::string> stop_sequences;  // Stop generation at these sequences
 
-    explicit ApiBackend(size_t max_context_tokens);
+    ApiBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     virtual ~ApiBackend() = default;
 
     // Parse backend configuration (sampling parameters)
     void parse_backend_config() override;
 
-    // Initialize backend (query context size if needed, calibrate tokens)
-    void initialize(Session& session) override;
-
     // Main transactional message interface with eviction
-    Response add_message(Session& session,
-                        Message::Type type,
-                        const std::string& content,
-                        const std::string& tool_name = "",
-                        const std::string& tool_id = "",
-                        int prompt_tokens = 0,
-                        int max_tokens = 0) override;
+    // All output flows through callback (CONTENT, TOOL_CALL, ERROR, STOP)
+    void add_message(Session& session,
+                    Message::Role role,
+                    const std::string& content,
+                    const std::string& tool_name = "",
+                    const std::string& tool_id = "",
+                    int max_tokens = 0) override;
 
-    // Streaming version - base implementation (backends override for real streaming)
-    Response add_message_stream(Session& session,
-                              Message::Type type,
-                              const std::string& content,
-                              StreamCallback callback,
-                              const std::string& tool_name = "",
-                              const std::string& tool_id = "",
-                              int prompt_tokens = 0,
-                              int max_tokens = 0) override;
-
-    // Stateless generation from Session (for server with prefix caching)
-    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
+    // Generation from Session (for server with prefix caching)
+    // All output flows through callback, session token counts are updated
+    void generate_from_session(Session& session, int max_tokens = 0) override;
 
     // Count tokens for a message (formats JSON and estimates using EMA)
-    int count_message_tokens(Message::Type type,
+    int count_message_tokens(Message::Role role,
                             const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
@@ -124,14 +112,14 @@ protected:
 
     /// @brief Build API request JSON from session and new message (for add_message)
     /// @param session Current session state
-    /// @param type Type of new message (USER, ASSISTANT, TOOL, etc.)
+    /// @param role Role of new message (USER, ASSISTANT, TOOL_RESPONSE, etc.)
     /// @param content Content of new message
     /// @param tool_name Tool name if this is a tool result
     /// @param tool_id Tool call ID if required by API
     /// @param max_tokens Maximum tokens for assistant response (0 = no limit)
     /// @return JSON object ready to send
     virtual nlohmann::json build_request(const Session& session,
-                                         Message::Type type,
+                                         Message::Role role,
                                          const std::string& content,
                                          const std::string& tool_name,
                                          const std::string& tool_id,
@@ -188,8 +176,8 @@ protected:
 
 protected:
     /// @brief Adaptive token estimation using EMA
-    /// Starts at 2.5 chars/token (conservative for code-heavy content), refines based on API responses
-    float chars_per_token = 2.5f;
+    /// Starts at 1.75 chars/token (conservative for dense content like hex), refines based on API responses
+    float chars_per_token = 1.75f;
 
     /// @brief Baseline token count from first API call (System + warmup User message)
     /// This is the fixed baseline we use for all subsequent delta calculations
@@ -298,7 +286,7 @@ struct ApiResponse {
 class ApiBackend : public Backend {
 public:
     // Common API backend configuration (all API backends can use these)
-    long timeout_seconds = 120;
+    long timeout_seconds = 300;  // 5 minutes default
     int max_retries = 3;
     long connect_timeout_seconds = 30;
 
@@ -366,8 +354,8 @@ protected:
     bool tools_built_ = false;
 
     /// @brief Adaptive token estimation using EMA
-    /// Starts at 2.5 chars/token (conservative for code-heavy content), refines based on API responses
-    float chars_per_token = 2.5f;
+    /// Starts at 1.75 chars/token (conservative for dense content like hex), refines based on API responses
+    float chars_per_token = 1.75f;
 
     /// @brief Baseline token count from first API call (System + warmup User message)
     /// This is the fixed baseline we use for all subsequent delta calculations

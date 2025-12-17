@@ -1,6 +1,6 @@
+#include "shepherd.h"
 #include "http_client.h"
-#include "logger.h"
-#include "terminal_io.h"
+
 #include <sstream>
 #include <cstring>
 #include <fstream>
@@ -8,13 +8,13 @@
 HttpClient::HttpClient() {
     curl_ = curl_easy_init();
     if (!curl_) {
-        LOG_ERROR("Failed to initialize CURL for HttpClient");
+        std::cerr << "Failed to initialize CURL for HttpClient" << std::endl;
     }
     multi_handle_ = curl_multi_init();
     if (!multi_handle_) {
-        LOG_ERROR("Failed to initialize CURL multi handle for HttpClient");
+        std::cerr << "Failed to initialize CURL multi handle for HttpClient" << std::endl;
     }
-    LOG_DEBUG("HttpClient initialized");
+    dout(1) << "HttpClient initialized" << std::endl;
 }
 
 HttpClient::~HttpClient() {
@@ -26,27 +26,27 @@ HttpClient::~HttpClient() {
         curl_easy_cleanup(curl_);
         curl_ = nullptr;
     }
-    LOG_DEBUG("HttpClient destroyed");
+    dout(1) << "HttpClient destroyed" << std::endl;
 }
 
 void HttpClient::set_timeout(long timeout_seconds) {
     timeout_seconds_ = timeout_seconds;
-    LOG_DEBUG("HttpClient timeout set to " + std::to_string(timeout_seconds) + " seconds");
+    dout(1) << "HttpClient timeout set to " + std::to_string(timeout_seconds) + " seconds" << std::endl;
 }
 
 void HttpClient::set_ssl_verify(bool verify) {
     ssl_verify_ = verify;
-    LOG_DEBUG("HttpClient SSL verify: " + std::string(verify ? "enabled" : "disabled"));
+    dout(1) << "HttpClient SSL verify: " + std::string(verify ? "enabled" : "disabled") << std::endl;
 }
 
 void HttpClient::set_ca_bundle(const std::string& ca_bundle_path) {
     ca_bundle_path_ = ca_bundle_path;
-    LOG_DEBUG("HttpClient CA bundle: " + ca_bundle_path);
+    dout(1) << "HttpClient CA bundle: " + ca_bundle_path << std::endl;
 }
 
 void HttpClient::set_verbose(bool verbose) {
     verbose_ = verbose;
-    LOG_DEBUG("HttpClient verbose: " + std::string(verbose ? "enabled" : "disabled"));
+    dout(1) << "HttpClient verbose: " + std::string(verbose ? "enabled" : "disabled") << std::endl;
 }
 
 #ifdef ENABLE_API_BACKENDS
@@ -153,7 +153,7 @@ HttpResponse HttpClient::get(const std::string& url,
         return response;
     }
 
-    LOG_DEBUG("HTTP GET: " + url);
+    dout(1) << "HTTP GET: " + url << std::endl;
 
     configure_curl();
 
@@ -185,13 +185,13 @@ HttpResponse HttpClient::get(const std::string& url,
 
     if (res != CURLE_OK) {
         response.error_message = curl_easy_strerror(res);
-        LOG_ERROR("HTTP GET failed: " + response.error_message);
+        std::cerr << "HTTP GET failed: " + response.error_message << std::endl;
     } else {
-        LOG_DEBUG("HTTP GET completed with status: " + std::to_string(response.status_code));
+        dout(1) << "HTTP GET completed with status: " + std::to_string(response.status_code) << std::endl;
     }
 #else
     response.error_message = "API backends not compiled in";
-    LOG_ERROR("HttpClient::get() called but API backends not compiled in");
+    std::cerr << "HttpClient::get() called but API backends not compiled in" << std::endl;
 #endif
 
     return response;
@@ -209,7 +209,7 @@ HttpResponse HttpClient::get_stream(const std::string& url,
         return response;
     }
 
-    LOG_DEBUG("HTTP GET (streaming): " + url);
+    dout(1) << "HTTP GET (streaming): " + url << std::endl;
 
     configure_curl();
 
@@ -250,16 +250,16 @@ HttpResponse HttpClient::get_stream(const std::string& url,
         response.error_message = curl_easy_strerror(res);
         // CURLE_WRITE_ERROR (23) happens when callback returns false - intentional cancellation
         if (res == CURLE_WRITE_ERROR) {
-            LOG_DEBUG("HTTP GET (streaming) stopped by callback");
+            dout(1) << "HTTP GET (streaming) stopped by callback" << std::endl;
         } else {
-            LOG_ERROR("HTTP GET (streaming) failed: " + response.error_message);
+            std::cerr << "HTTP GET (streaming) failed: " + response.error_message << std::endl;
         }
     } else {
-        LOG_DEBUG("HTTP GET (streaming) completed with status: " + std::to_string(response.status_code));
+        dout(1) << "HTTP GET (streaming) completed with status: " + std::to_string(response.status_code) << std::endl;
     }
 #else
     response.error_message = "API backends not compiled in";
-    LOG_ERROR("HttpClient::get_stream() called but API backends not compiled in");
+    std::cerr << "HttpClient::get_stream() called but API backends not compiled in" << std::endl;
 #endif
 
     return response;
@@ -276,20 +276,20 @@ HttpResponse HttpClient::post(const std::string& url,
         return response;
     }
 
-    LOG_DEBUG("HTTP POST: " + url);
-    LOG_DEBUG("POST body length: " + std::to_string(body.length()));
+    dout(1) << "HTTP POST: " + url << std::endl;
+    dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
-        LOG_DEBUG("POST body:\n" + body);
+        dout(1) << "POST body:\n" + body << std::endl;
 #if 0
         // Also write to file for easy inspection
         std::ofstream dump_file("/tmp/shepherd_request.json");
         if (dump_file.is_open()) {
             dump_file << body;
             dump_file.close();
-            LOG_DEBUG("Request saved to /tmp/shepherd_request.json");
+            dout(1) << "Request saved to /tmp/shepherd_request.json" << std::endl;
         }
 #endif
     }
@@ -329,21 +329,21 @@ HttpResponse HttpClient::post(const std::string& url,
 
     if (res != CURLE_OK) {
         response.error_message = curl_easy_strerror(res);
-        LOG_ERROR("HTTP POST failed: " + response.error_message);
+        std::cerr << "HTTP POST failed: " + response.error_message << std::endl;
     } else {
-        LOG_DEBUG("HTTP POST completed with status: " + std::to_string(response.status_code));
+        dout(1) << "HTTP POST completed with status: " + std::to_string(response.status_code) << std::endl;
         if (response.body.length() > 100) {
-            LOG_DEBUG("Response body (first 100 chars): " + response.body.substr(0, 100));
+            dout(1) << "Response body (first 100 chars): " + response.body.substr(0, 100) << std::endl;
             if (g_debug_level >= 5) {
-                LOG_DEBUG("Full response body:\n" + response.body);
+                dout(1) << "Full response body:\n" + response.body << std::endl;
             }
         } else {
-            LOG_DEBUG("Response body: " + response.body);
+            dout(1) << "Response body: " + response.body << std::endl;
         }
     }
 #else
     response.error_message = "API backends not compiled in";
-    LOG_ERROR("HttpClient::post() called but API backends not compiled in");
+    std::cerr << "HttpClient::post() called but API backends not compiled in" << std::endl;
 #endif
 
     return response;
@@ -362,13 +362,13 @@ HttpResponse HttpClient::post_stream(const std::string& url,
         return response;
     }
 
-    LOG_DEBUG("HTTP POST (streaming): " + url);
-    LOG_DEBUG("POST body length: " + std::to_string(body.length()));
+    dout(1) << "HTTP POST (streaming): " + url << std::endl;
+    dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
-        LOG_DEBUG("POST body:\n" + body);
+        dout(1) << "POST body:\n" + body << std::endl;
     }
 
     configure_curl();
@@ -410,13 +410,13 @@ HttpResponse HttpClient::post_stream(const std::string& url,
 
     if (res != CURLE_OK) {
         response.error_message = curl_easy_strerror(res);
-        LOG_ERROR("HTTP POST (streaming) failed: " + response.error_message);
+        std::cerr << "HTTP POST (streaming) failed: " + response.error_message << std::endl;
     } else {
-        LOG_DEBUG("HTTP POST (streaming) completed with status: " + std::to_string(response.status_code));
+        dout(1) << "HTTP POST (streaming) completed with status: " + std::to_string(response.status_code) << std::endl;
     }
 #else
     response.error_message = "API backends not compiled in";
-    LOG_ERROR("HttpClient::post_stream() called but API backends not compiled in");
+    std::cerr << "HttpClient::post_stream() called but API backends not compiled in" << std::endl;
 #endif
 
     return response;
@@ -435,13 +435,13 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
         return response;
     }
 
-    LOG_DEBUG("HTTP POST (streaming cancellable): " + url);
-    LOG_DEBUG("POST body length: " + std::to_string(body.length()));
+    dout(1) << "HTTP POST (streaming cancellable): " + url << std::endl;
+    dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
-        LOG_DEBUG("POST body:\n" + body);
+        dout(1) << "POST body:\n" + body << std::endl;
     }
 
     configure_curl();
@@ -470,15 +470,11 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, header_list);
     }
 
-    // Enable raw mode for escape key detection
-    tio.set_raw_mode();
-
     // Add handle to multi interface
     CURLMcode mres = curl_multi_add_handle(multi_handle_, curl_);
     if (mres != CURLM_OK) {
         response.error_message = "Failed to add handle to multi interface";
-        LOG_ERROR("curl_multi_add_handle failed: " + std::string(curl_multi_strerror(mres)));
-        tio.restore_terminal();
+        std::cerr << "curl_multi_add_handle failed: " + std::string(curl_multi_strerror(mres)) << std::endl;
         if (header_list) {
             curl_slist_free_all(header_list);
         }
@@ -494,22 +490,18 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
         // Perform transfers
         mres = curl_multi_perform(multi_handle_, &still_running);
         if (mres != CURLM_OK) {
-            LOG_ERROR("curl_multi_perform failed: " + std::string(curl_multi_strerror(mres)));
+            std::cerr << "curl_multi_perform failed: " + std::string(curl_multi_strerror(mres)) << std::endl;
             break;
         }
 
-        // Check for escape key
-        if (tio.check_escape_pressed()) {
-            LOG_INFO("Escape key pressed, cancelling request");
-            cancelled = true;
-            break;
-        }
+        // TODO: escape key cancellation removed with TerminalIO
+        // Would need a different mechanism to cancel requests
 
         // Wait for activity with short timeout (100ms for responsive cancellation)
         if (still_running) {
             mres = curl_multi_poll(multi_handle_, nullptr, 0, 100, nullptr);
             if (mres != CURLM_OK) {
-                LOG_ERROR("curl_multi_poll failed: " + std::string(curl_multi_strerror(mres)));
+                std::cerr << "curl_multi_poll failed: " + std::string(curl_multi_strerror(mres)) << std::endl;
                 break;
             }
         }
@@ -531,9 +523,6 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
     // Remove handle from multi interface
     curl_multi_remove_handle(multi_handle_, curl_);
 
-    // Restore terminal
-    tio.restore_terminal();
-
     // Clean up headers
     if (header_list) {
         curl_slist_free_all(header_list);
@@ -543,16 +532,16 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
     if (cancelled) {
         response.error_message = "Request cancelled by user";
         response.status_code = 0;
-        LOG_INFO("HTTP POST (streaming cancellable) cancelled");
+        dout(1) << "HTTP POST (streaming cancellable) cancelled" << std::endl;
     } else if (curl_result != CURLE_OK) {
         response.error_message = curl_easy_strerror(curl_result);
-        LOG_ERROR("HTTP POST (streaming cancellable) failed: " + response.error_message);
+        std::cerr << "HTTP POST (streaming cancellable) failed: " + response.error_message << std::endl;
     } else {
-        LOG_DEBUG("HTTP POST (streaming cancellable) completed with status: " + std::to_string(response.status_code));
+        dout(1) << "HTTP POST (streaming cancellable) completed with status: " + std::to_string(response.status_code) << std::endl;
     }
 #else
     response.error_message = "API backends not compiled in";
-    LOG_ERROR("HttpClient::post_stream_cancellable() called but API backends not compiled in");
+    std::cerr << "HttpClient::post_stream_cancellable() called but API backends not compiled in" << std::endl;
 #endif
 
     return response;

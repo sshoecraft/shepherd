@@ -12,31 +12,20 @@
 /// Simple client that POSTs prompts to /request and gets responses
 class CLIClientBackend : public Backend {
 public:
-    explicit CLIClientBackend(const std::string& base_url);
+    CLIClientBackend(const std::string& base_url, Session& session, EventCallback callback);
     ~CLIClientBackend() override;
 
-    void initialize(Session& session) override;
 
-    Response add_message(Session& session,
-                        Message::Type type,
-                        const std::string& content,
-                        const std::string& tool_name = "",
-                        const std::string& tool_id = "",
-                        int prompt_tokens = 0,
-                        int max_tokens = 0) override;
+    void add_message(Session& session,
+                    Message::Role role,
+                    const std::string& content,
+                    const std::string& tool_name = "",
+                    const std::string& tool_id = "",
+                    int max_tokens = 0) override;
 
-    Response add_message_stream(Session& session,
-                               Message::Type type,
-                               const std::string& content,
-                               StreamCallback callback,
-                               const std::string& tool_name = "",
-                               const std::string& tool_id = "",
-                               int prompt_tokens = 0,
-                               int max_tokens = 0) override;
+    void generate_from_session(Session& session, int max_tokens = 0) override;
 
-    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
-
-    int count_message_tokens(Message::Type type,
+    int count_message_tokens(Message::Role role,
                             const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
@@ -52,5 +41,5 @@ private:
     std::atomic<bool> sse_running{false};
     void sse_listener_thread();
 
-    Response send_request(const std::string& prompt, StreamCallback callback = nullptr);
+    Response send_request(const std::string& prompt, EventCallback callback = nullptr);
 };

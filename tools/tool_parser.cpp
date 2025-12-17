@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "tool_parser.h"
-#include "../logger.h"
 #include "../nlohmann/json.hpp"
+
 #include <sstream>
 #include <regex>
 
@@ -125,7 +126,7 @@ bool has_tool_call(const std::string& response,
             auto json_response = nlohmann::json::parse(str);
             if (json_response.contains("name") &&
                 (json_response.contains("parameters") || json_response.contains("arguments"))) {
-                LOG_DEBUG("Found valid tool call");
+                dout(1) << "Found valid tool call" << std::endl;
                 return true;
             }
         } catch (const nlohmann::json::exception&) {
@@ -141,7 +142,7 @@ bool has_tool_call(const std::string& response,
     // Try fixing single quotes (Python-style strings)
     std::string fixed_json = fix_single_quotes(json_str);
     if (fixed_json != json_str && try_parse(fixed_json)) {
-        LOG_DEBUG("Found valid tool call after fixing single quotes");
+        dout(1) << "Found valid tool call after fixing single quotes" << std::endl;
         return true;
     }
 
@@ -164,8 +165,8 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
     size_t tool_call_start = response.find("<tool_call>");
     size_t function_start = response.find("<function=");
 
-    LOG_DEBUG("XML tool call search: tool_call_start=" + std::to_string(tool_call_start) +
-              ", function_start=" + std::to_string(function_start));
+    dout(1) << "XML tool call search: tool_call_start=" + std::to_string(tool_call_start) +
+              ", function_start=" + std::to_string(function_start) << std::endl;
 
     // Determine where the tool call markup starts (for extracting content before it)
     size_t markup_start = std::string::npos;
@@ -192,7 +193,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
     if (use_tool_call_wrapper) {
         size_t tool_call_end = response.find("</tool_call>", tool_call_start);
         if (tool_call_end == std::string::npos) {
-            LOG_DEBUG("Found <tool_call> but no closing </tool_call>, trying <function= fallback");
+            dout(1) << "Found <tool_call> but no closing </tool_call>, trying <function= fallback" << std::endl;
             // Fall through to try <function= without wrapper
         } else {
             std::string tool_call_content = response.substr(tool_call_start, tool_call_end - tool_call_start + 12);
@@ -203,7 +204,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
             std::smatch tool_name_match;
             if (std::regex_search(tool_call_content, tool_name_match, tool_name_regex)) {
                 std::string tool_name = tool_name_match[1].str();
-                LOG_DEBUG("Found tool name in <tool_call>: " + tool_name);
+                dout(1) << "Found tool name in <tool_call>: " + tool_name << std::endl;
 
                 // Extract arg_key/arg_value pairs
                 std::map<std::string, std::any> tool_params;
@@ -229,7 +230,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                     }
 
                     tool_params[key] = value;
-                    LOG_DEBUG("  Parameter: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : ""));
+                    dout(1) << "  Parameter: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : "") << std::endl;
                 }
 
                 // Build JSON from parameters for raw_json field
@@ -277,7 +278,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                             }
                         }
 
-                        LOG_DEBUG("Parsed JSON inside <tool_call> tags: " + tool_name);
+                        dout(1) << "Parsed JSON inside <tool_call> tags: " + tool_name << std::endl;
 
                         ToolCall tc;
                         tc.name = tool_name;
@@ -288,7 +289,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                         return tc;
                     }
                 } catch (const nlohmann::json::exception& e) {
-                    LOG_DEBUG("Failed to parse JSON inside <tool_call>: " + std::string(e.what()));
+                    dout(1) << "Failed to parse JSON inside <tool_call>: " + std::string(e.what()) << std::endl;
                 }
             }
 
@@ -298,7 +299,7 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
                 result->content = content_before;
                 return result;
             }
-            LOG_DEBUG("Failed to parse <tool_call> content, trying <function= fallback");
+            dout(1) << "Failed to parse <tool_call> content, trying <function= fallback" << std::endl;
             // Fall through to try <function= without wrapper
         }
     }
@@ -306,16 +307,16 @@ std::optional<ToolCall> parse_xml_tool_call(const std::string& response) {
     // Lenient mode: accept <function=name> without outer <tool_call> wrapper
     if (function_start != std::string::npos) {
         size_t function_end = response.find("</function>", function_start);
-        LOG_DEBUG("Lenient mode: function_end=" + std::to_string(function_end));
+        dout(1) << "Lenient mode: function_end=" + std::to_string(function_end) << std::endl;
         if (function_end == std::string::npos) {
-            LOG_DEBUG("Found <function= but no closing </function>");
+            dout(1) << "Found <function= but no closing </function>" << std::endl;
             // Show a snippet to help debug
             std::string snippet = response.substr(function_start, std::min(size_t(200), response.length() - function_start));
-            LOG_DEBUG("Response snippet: " + snippet);
+            dout(1) << "Response snippet: " + snippet << std::endl;
             return std::nullopt;
         }
         std::string function_content = response.substr(function_start, function_end - function_start + 11);
-        LOG_DEBUG("Found function block without <tool_call> wrapper (lenient parsing)");
+        dout(1) << "Found function block without <tool_call> wrapper (lenient parsing)" << std::endl;
 
         auto result = parse_xml_function_block(function_content);
         if (result.has_value()) {
@@ -336,12 +337,12 @@ std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content)
     std::regex function_regex("<function=([^>]+)>");
     std::smatch function_match;
     if (!std::regex_search(xml_content, function_match, function_regex)) {
-        LOG_DEBUG("Failed to extract function name from XML function block");
+        dout(1) << "Failed to extract function name from XML function block" << std::endl;
         return std::nullopt;
     }
 
     std::string tool_name = function_match[1].str();
-    LOG_DEBUG("Extracted XML tool call: " + tool_name);
+    dout(1) << "Extracted XML tool call: " + tool_name << std::endl;
 
     // Extract parameters: <parameter=key>value</parameter>
     std::map<std::string, std::any> tool_params;
@@ -361,10 +362,10 @@ std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content)
         }
 
         tool_params[param_name] = param_value;
-        LOG_DEBUG("  Parameter: " + param_name + " = " + param_value.substr(0, 50) + (param_value.length() > 50 ? "..." : ""));
+        dout(1) << "  Parameter: " + param_name + " = " + param_value.substr(0, 50) + (param_value.length() > 50 ? "..." : "") << std::endl;
     }
 
-    LOG_DEBUG("Successfully parsed XML function block with " + std::to_string(tool_params.size()) + " parameters");
+    dout(1) << "Successfully parsed XML function block with " + std::to_string(tool_params.size()) + " parameters" << std::endl;
     return ToolCall(tool_name, tool_params, xml_content, "");
 }
 
@@ -416,7 +417,7 @@ std::optional<ToolCall> parse_tools_block(const std::string& response) {
         }
 
         std::string tool_name = json_obj["name"].get<std::string>();
-        LOG_DEBUG("Found <tools> block tool call: " + tool_name);
+        dout(1) << "Found <tools> block tool call: " + tool_name << std::endl;
 
         // Get arguments/parameters
         nlohmann::json args;
@@ -454,11 +455,11 @@ std::optional<ToolCall> parse_tools_block(const std::string& response) {
         tc.tool_call_id = "";
         tc.content = content_before;
 
-        LOG_DEBUG("Successfully parsed <tools> block with " + std::to_string(tool_params.size()) + " parameters");
+        dout(1) << "Successfully parsed <tools> block with " + std::to_string(tool_params.size()) + " parameters" << std::endl;
         return tc;
 
     } catch (const nlohmann::json::exception& e) {
-        LOG_DEBUG("Failed to parse JSON in <tools> block: " + std::string(e.what()));
+        dout(1) << "Failed to parse JSON in <tools> block: " + std::string(e.what()) << std::endl;
     }
 
     return std::nullopt;
@@ -477,7 +478,7 @@ std::optional<ToolCall> parse_xml_wrapped_json(const std::string& response) {
         std::string tool_name = match[1].str();
         std::string json_content = "{" + match[2].str() + "}";
 
-        LOG_DEBUG("Found XML-wrapped JSON tool call: " + tool_name);
+        dout(1) << "Found XML-wrapped JSON tool call: " + tool_name << std::endl;
 
         try {
             auto json_obj = nlohmann::json::parse(json_content);
@@ -495,7 +496,7 @@ std::optional<ToolCall> parse_xml_wrapped_json(const std::string& response) {
                 } else {
                     tool_params[key] = value.dump();
                 }
-                LOG_DEBUG("  Parameter: " + key + " = " + value.dump().substr(0, 50));
+                dout(1) << "  Parameter: " + key + " = " + value.dump().substr(0, 50) << std::endl;
             }
 
             // Extract content before the tag
@@ -512,11 +513,11 @@ std::optional<ToolCall> parse_xml_wrapped_json(const std::string& response) {
             tc.tool_call_id = "";
             tc.content = content_before;
 
-            LOG_DEBUG("Successfully parsed XML-wrapped JSON with " + std::to_string(tool_params.size()) + " parameters");
+            dout(1) << "Successfully parsed XML-wrapped JSON with " + std::to_string(tool_params.size()) + " parameters" << std::endl;
             return tc;
 
         } catch (const nlohmann::json::exception& e) {
-            LOG_DEBUG("Failed to parse JSON in XML wrapper: " + std::string(e.what()));
+            dout(1) << "Failed to parse JSON in XML wrapper: " + std::string(e.what()) << std::endl;
         }
     }
 
@@ -548,7 +549,7 @@ std::optional<ToolCall> parse_bracket_tool_call(const std::string& response) {
     }
     inner = inner.substr(first);
 
-    LOG_DEBUG("Parsing bracket tool call: [tool_call:" + inner + "]");
+    dout(1) << "Parsing bracket tool call: [tool_call:" + inner + "]" << std::endl;
 
     std::string tool_name;
     std::map<std::string, std::any> tool_params;
@@ -565,7 +566,7 @@ std::optional<ToolCall> parse_bracket_tool_call(const std::string& response) {
             std::string arg_value = inner.substr(arg_start, arg_end - arg_start);
             // Use "command" as default param name - common for execute_command tool
             tool_params["command"] = arg_value;
-            LOG_DEBUG("  Extracted arg: command = " + arg_value);
+            dout(1) << "  Extracted arg: command = " + arg_value << std::endl;
         }
     } else {
         // No arguments - just tool name
@@ -578,7 +579,7 @@ std::optional<ToolCall> parse_bracket_tool_call(const std::string& response) {
         return std::nullopt;
     }
 
-    LOG_DEBUG("Successfully parsed bracket tool call: " + tool_name);
+    dout(1) << "Successfully parsed bracket tool call: " + tool_name << std::endl;
 
     // Extract content before the tool call
     std::string content_before;
@@ -652,7 +653,7 @@ std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
             std::string tool_name = match[1].str();
             std::string attrs_str = match[2].str();
 
-            LOG_DEBUG("Found simple XML tag tool call: " + tool_name);
+            dout(1) << "Found simple XML tag tool call: " + tool_name << std::endl;
 
             // Parse attributes: key="value" or key='value'
             std::map<std::string, std::any> tool_params;
@@ -664,7 +665,7 @@ std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
                 std::string key = (*attr_it)[1].str();
                 std::string value = (*attr_it)[2].str();
                 tool_params[key] = value;
-                LOG_DEBUG("  Attribute: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : ""));
+                dout(1) << "  Attribute: " + key + " = " + value.substr(0, 50) + (value.length() > 50 ? "..." : "") << std::endl;
             }
 
             if (!tool_params.empty()) {
@@ -686,7 +687,7 @@ std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
                 tc.tool_call_id = "";
                 tc.content = content_before;
 
-                LOG_DEBUG("Successfully parsed simple XML tag with " + std::to_string(tool_params.size()) + " attributes");
+                dout(1) << "Successfully parsed simple XML tag with " + std::to_string(tool_params.size()) + " attributes" << std::endl;
                 return tc;
             }
         }
@@ -736,7 +737,7 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         return std::nullopt;
     }
 
-    LOG_DEBUG("Found potential JSON tool call in response");
+    dout(1) << "Found potential JSON tool call in response" << std::endl;
 
     try {
         // Find where the JSON starts to extract content before it
@@ -749,7 +750,7 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         // Extract the JSON part
         std::string json_str = extract_json(response);
         if (json_str.empty()) {
-            LOG_DEBUG("Failed to extract JSON from response");
+            dout(1) << "Failed to extract JSON from response" << std::endl;
             return std::nullopt;
         }
 
@@ -760,19 +761,19 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
         } catch (const nlohmann::json::exception&) {
             // Try fixing single quotes (Python-style strings)
             std::string fixed_json = fix_single_quotes(json_str);
-            LOG_DEBUG("Retrying JSON parse with fixed quotes: " + fixed_json.substr(0, 100));
+            dout(1) << "Retrying JSON parse with fixed quotes: " + fixed_json.substr(0, 100) << std::endl;
             json_response = nlohmann::json::parse(fixed_json);
             json_str = fixed_json;  // Use fixed version for raw_json
         }
 
         // Check for required fields (accept both "parameters" and "arguments")
         if (!json_response.contains("name")) {
-            LOG_DEBUG("JSON missing required 'name' field");
+            dout(1) << "JSON missing required 'name' field" << std::endl;
             return std::nullopt;
         }
 
         if (!json_response.contains("parameters") && !json_response.contains("arguments")) {
-            LOG_DEBUG("JSON missing required 'parameters' or 'arguments' field");
+            dout(1) << "JSON missing required 'parameters' or 'arguments' field" << std::endl;
             return std::nullopt;
         }
 
@@ -807,11 +808,11 @@ std::optional<ToolCall> parse_tool_call(const std::string& response,
             }
         }
 
-        LOG_DEBUG("Successfully parsed JSON tool call: " + tool_name);
+        dout(1) << "Successfully parsed JSON tool call: " + tool_name << std::endl;
         return ToolCall(tool_name, tool_params, json_str, tool_call_id, content_before);
 
     } catch (const nlohmann::json::exception& e) {
-        LOG_DEBUG("Failed to parse tool call JSON: " + std::string(e.what()));
+        dout(1) << "Failed to parse tool call JSON: " + std::string(e.what()) << std::endl;
         return std::nullopt;
     }
 }

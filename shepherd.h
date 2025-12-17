@@ -6,7 +6,6 @@
 // This file contains core functionality used across the Shepherd codebase.
 // Include this in all .cpp files to get access to:
 // - Global system flags
-// - Common logging facilities
 // - Standard library headers used throughout the codebase
 // ============================================================================
 
@@ -30,8 +29,6 @@ using json = nlohmann::json;
 #endif
 
 // Core Shepherd headers
-#include "logger.h"
-#include "debug.h"
 #include "config.h"
 #include "session.h"
 
@@ -72,3 +69,6 @@ namespace shepherd {
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
 }
+
+// Debug output stream - returns cerr if level <= g_debug_level, else null stream
+std::ostream& dout(int level);

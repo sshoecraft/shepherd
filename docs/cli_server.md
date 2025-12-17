@@ -21,7 +21,8 @@ public:
     CLIServer(const std::string& host, int port);
     ~CLIServer();
 
-    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+    void init(Session& session, bool no_mcp, bool no_tools) override;
+    int run(Session& session) override;
 };
 ```
 
@@ -65,25 +66,27 @@ Main request endpoint for prompts.
 ```json
 {
     "prompt": "user message",
-    "stream": true,
-    "async": false
+    "stream": true
 }
 ```
 
 **Parameters:**
 - `prompt` - The user message to process
 - `stream` - Enable SSE streaming (default: false)
-- `async` - Queue request and return immediately (default: false, v2.7.0+)
 
 **Response (streaming):**
 
 Server-Sent Events (SSE) format:
 ```
-data: {"delta": "Hello"}
+data: {"type": "delta", "content": "Hello"}
 
-data: {"delta": " world"}
+data: {"type": "delta", "content": " world"}
 
-data: {"done": true, "response": "Hello world"}
+data: {"type": "tool_call", "name": "read_file", "args": {...}}
+
+data: {"type": "tool_result", "success": true, "content": "..."}
+
+data: {"type": "response_complete", "finish_reason": "stop"}
 ```
 
 **Response (non-streaming):**
@@ -94,40 +97,84 @@ data: {"done": true, "response": "Hello world"}
 }
 ```
 
-**Response (async mode):**
-```json
-{
-    "success": true,
-    "queued": true,
-    "queue_position": 1
-}
+### GET /updates
+
+SSE endpoint for real-time event streaming. Clients connect here to receive events broadcast by the server.
+
+### GET /status
+
+Server status and session info.
+
+## Streaming (v2.13.0)
+
+The CLI server uses EventCallback for streaming:
+
+```cpp
+auto stream_callback = [&](Message::Type type,
+                           const std::string& content,
+                           const std::string& tool_name,
+                           const std::string& tool_call_id) -> bool {
+    if (content.empty()) return true;
+
+    // Filter tool calls from stream
+    pending_buffer += content;
+    size_t marker_pos = find_earliest_marker(pending_buffer, markers);
+
+    if (marker_pos != std::string::npos) {
+        // Output up to marker, buffer the rest
+        std::string output = pending_buffer.substr(0, marker_pos);
+        pending_buffer = pending_buffer.substr(marker_pos);
+        if (!output.empty()) {
+            broadcast_sse("delta", {{"content", output}});
+        }
+    } else {
+        broadcast_sse("delta", {{"content", pending_buffer}});
+        pending_buffer.clear();
+    }
+    return true;
+};
+
+// Unified add_message with callback
+Response resp = session->add_message(Message::USER, prompt, stream_callback);
 ```
 
-When `async: true` is set, the request is added to the input queue and returns immediately. The prompt is processed in order by a background thread. Use `/status` to monitor processing.
+## Backend Support
 
-## Streaming Support
-
-The CLI server supports real-time token streaming using SSE. When `stream: true` is set in the request:
-
-1. Server calls `session->add_message_stream()` with a streaming callback
-2. Each generated token is sent as an SSE event with the delta
-3. Final event includes `done: true` and the complete response
-4. Connection closes immediately after the done event
-
-### Backend Requirements
-
-For streaming to work, the backend must implement `add_message_stream()`:
+All backends support EventCallback streaming:
 
 | Backend | Streaming Support |
 |---------|------------------|
-| LlamaCpp | Yes (passes callback to generate) |
-| TensorRT | Yes (passes callback to generate) |
+| LlamaCpp | Yes (callback per token) |
+| TensorRT | Yes (callback per token) |
 | Anthropic | Yes (SSE parsing) |
 | OpenAI | Yes (SSE parsing) |
-| Gemini | Yes (SSE parsing via streamGenerateContent) |
+| Gemini | Yes (SSE parsing) |
 | Ollama | Yes (NDJSON parsing) |
 
-Backends without `add_message_stream()` fall back to the base `Backend::add_message_stream()` which calls `add_message()` and returns the complete response in a single callback invocation.
+Backends without streaming invoke callback once with full response.
+
+## Tool Execution Flow
+
+```
+Client                   CLIServer                Backend
+  │                         │                        │
+  ├──POST /request─────────►│                        │
+  │                         ├───add_message(cb)─────►│
+  │                         │◄──callback(delta)──────┤
+  │◄──SSE: delta────────────┤                        │
+  │                         │    [tool call parsed]  │
+  │◄──SSE: tool_call────────┤                        │
+  │                         │                        │
+  │                         │ ┌─execute_tool()       │
+  │                         │ │  (local)             │
+  │                         │ └────────────────────► │
+  │◄──SSE: tool_result──────┤                        │
+  │                         │                        │
+  │                         ├───add_message(result)─►│
+  │                         │◄──callback(delta)──────┤
+  │◄──SSE: delta────────────┤                        │
+  │◄──SSE: complete─────────┤                        │
+```
 
 ## Differences from API Server
 
@@ -136,29 +183,37 @@ Backends without `add_message_stream()` fall back to the base `Backend::add_mess
 | Tool Execution | Local | Client-side |
 | Purpose | Remote prompt input, local tools | Full OpenAI compatibility |
 | Use Case | Secure tool environment | API compatibility |
-| Streaming Format | SSE with delta/done | OpenAI SSE chunks |
+| SSE Events | Typed (delta, tool_call, etc) | OpenAI format chunks |
+
+## CLI Client Backend
+
+For connecting to remote CLI servers:
+
+```cpp
+class CLIClientBackend : public ApiBackend {
+    Response add_message(Session& session, Message::Type type,
+                        const std::string& content,
+                        EventCallback callback = nullptr, ...) override;
+private:
+    std::string base_url;
+    void sse_listener_thread();  // Receives server events
+};
+```
+
+The SSE listener receives typed events and displays them:
+- `delta` → `tio.write(content, Message::ASSISTANT)`
+- `tool_call` → `tio.write("* name(...)", Message::TOOL_REQUEST)`
+- `tool_result` → `tio.write("✓ ...", Message::TOOL_RESPONSE)`
+
+**Note**: CLIClientBackend writes directly to tio because it's a proxy displaying remote server events, not generating content locally.
 
 ## Security Considerations
 
 The CLI server executes tools locally with the permissions of the shepherd process. Bind to localhost (`127.0.0.1`) unless network access is intended and secured.
 
-## Implementation Notes
-
-### Connection Closing
-
-The content provider lambda must return `false` after calling `sink.done()` to signal httplib that the response is complete. Returning `true` causes httplib to wait for more content, resulting in a delay before the connection closes.
-
-```cpp
-sink.done();
-return false;  // Signal no more content
-```
-
-### Client Stream Handling
-
-The CLI client (`cli_client.cpp`) uses `post_stream_cancellable()` for streaming requests. The stream handler always returns `true` to curl to avoid "Failed writing" errors, using a `stream_complete` flag internally to track completion.
-
 ## Version History
 
+- **2.13.0** - Unified EventCallback (no add_message_stream)
+- **2.7.0** - Added async request queuing
+- **2.6.1** - Added streaming support with SSE
 - **2.6.0** - Initial CLI server implementation
-- **2.6.1** - Added streaming support with SSE, CLI client backend, and add_message_stream for all backends
-- **2.7.0** - Added async request queuing with `async: true` parameter

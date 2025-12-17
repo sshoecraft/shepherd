@@ -1,11 +1,17 @@
 #pragma once
 
-#include "backends/backend.h"
+#include "backend.h"
 #include "provider.h"
 #include "session.h"
+#include "tools/tools.h"
 #include <string>
 #include <memory>
 #include <vector>
+#include <map>
+#include <any>
+
+// Forward declaration
+class Tools;
 
 /// @brief Base class for all frontend presentation layers (CLI, Server)
 /// Manages backend, providers, and session lifecycle
@@ -14,29 +20,49 @@ public:
     Frontend();
     virtual ~Frontend();
 
-    /// @brief Factory method to create appropriate frontend
+    /// @brief Event callback for streaming output from backend
+    /// Derived classes override to handle output (display, SSE, etc.)
+    /// @param event Event type (CONTENT, TOOL_CALL, ERROR, STOP, etc.)
+    /// @param content Event content (text delta, error message, finish_reason, etc.)
+    /// @param name Tool name (for TOOL_CALL), error type (for ERROR)
+    /// @param id Tool call ID for correlation
+    /// @return true to continue generation, false to cancel
+    virtual bool on_event(CallbackEvent event,
+                          const std::string& content,
+                          const std::string& name,
+                          const std::string& id) { return true; }
+
+    /// @brief Factory method to create and initialize appropriate frontend
     /// @param mode Frontend mode: "cli", "api-server", "cli-server"
     /// @param host Server host (for server modes)
     /// @param port Server port (for server modes)
     /// @param cmdline_provider Optional provider from command-line override
-    static std::unique_ptr<Frontend> create(const std::string& mode,
-                                             const std::string& host,
-                                             int port,
-                                             Provider* cmdline_provider = nullptr);
-
-    /// @brief Initialize the frontend (register tools, connect to provider, etc)
-    /// @param session Session to initialize with tools
     /// @param no_mcp If true, skip MCP initialization
     /// @param no_tools If true, skip all tool initialization
-    /// @param provider_name Specific provider to connect to (empty = auto-select)
-    virtual void init(Session& session,
-                      bool no_mcp = false,
-                      bool no_tools = false,
-                      const std::string& provider_name = "") {}
+    static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
+                                            Provider* cmdline_provider = nullptr,
+                                            bool no_mcp = false, bool no_tools = false);
+
+    /// @brief Initialize the frontend (register tools, etc) - called by create()
+    virtual void init(bool no_mcp = false, bool no_tools = false) {}
+
+protected:
+    /// @brief Common tool initialization for CLI and CLIServer
+    /// Extracted to eliminate code duplication
+    static void init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools);
+
+public:
 
     /// @brief Start the frontend main loop
     /// Pure virtual - subclasses implement their specific behavior
-    virtual int run(Session& session) = 0;
+    /// Connects to provider internally before running
+    virtual int run() = 0;
+
+    /// @brief Handle slash commands (e.g., /provider, /model, /clear)
+    /// @param input The full input string starting with /
+    /// @param tools Tools reference for /tools command
+    /// @return true if command was handled, false if not recognized
+    bool handle_slash_commands(const std::string& input, Tools& tools);
 
     /// @brief Get provider by name (returns nullptr if not found)
     Provider* get_provider(const std::string& name);
@@ -45,15 +71,29 @@ public:
     std::vector<std::string> list_providers() const;
 
     /// @brief Connect to next available provider
-    /// @param session Session for backend initialization
     /// @return true if connected, false if all providers fail
-    bool connect_next_provider(Session& session);
+    bool connect_next_provider();
 
     /// @brief Connect to a specific provider by name
     /// @param name Provider name
-    /// @param session Session for backend initialization
     /// @return true if connected, false if connection fails
-    bool connect_provider(const std::string& name, Session& session);
+    bool connect_provider(const std::string& name);
+
+    /// @brief Execute a tool, truncate result based on context, and add to session
+    /// This is the common implementation for CLI, TUI, and CLI-server.
+    /// API server does NOT use this - it returns tool calls to the client.
+    /// @param tools The Tools instance
+    /// @param tool_name Name of the tool to execute
+    /// @param parameters Tool parameters
+    /// @param tool_call_id Tool call ID for correlation
+    /// @return ToolResult with success/summary/error for display
+    ToolResult execute_tool(Tools& tools,
+                            const std::string& tool_name,
+                            const std::map<std::string, std::any>& parameters,
+                            const std::string& tool_call_id);
+
+    // Session owned by frontend (source of truth for conversation state)
+    Session session;
 
     // Provider list owned by frontend
     std::vector<Provider> providers;
@@ -61,4 +101,7 @@ public:
 
     // Backend owned by frontend after connect
     std::unique_ptr<Backend> backend;
+
+    // Callback for streaming output - must be set by subclass before connecting
+    Backend::EventCallback callback;
 };

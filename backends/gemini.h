@@ -13,7 +13,7 @@ public:
     ModelConfig model_config;
     // model_name is inherited from Backend base class
 
-    explicit GeminiBackend(size_t context_size);
+    GeminiBackend(size_t context_size, Session& session, EventCallback callback);
     ~GeminiBackend() override;
 
     // Implement pure virtual methods from ApiBackend
@@ -22,7 +22,7 @@ public:
     nlohmann::json build_request_from_session(const Session& session, int max_tokens) override;
 
     nlohmann::json build_request(const Session& session,
-                                  Message::Type type,
+                                  Message::Role role,
                                   const std::string& content,
                                   const std::string& tool_name,
                                   const std::string& tool_id,
@@ -34,14 +34,13 @@ public:
     std::string get_api_endpoint() override;
     std::string get_streaming_endpoint();
 
-    // Override to provide streaming support
-    Response add_message_stream(Session& session, Message::Type type, const std::string& content,
-                               StreamCallback callback,
-                               const std::string& tool_name = "", const std::string& tool_id = "",
-                               int prompt_tokens = 0, int max_tokens = 0) override;
+    // Override add_message to provide true streaming
+    void add_message(Session& session, Message::Role role, const std::string& content,
+                    const std::string& tool_name = "", const std::string& tool_id = "",
+                    int max_tokens = 0) override;
 
-    // Override initialize to add Gemini-specific setup
-    void initialize(Session& session) override;
+protected:
+    std::vector<std::string> fetch_models() override;
 
 private:
     size_t query_model_context_size(const std::string& model_name) override;

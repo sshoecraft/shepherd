@@ -20,19 +20,13 @@ struct common_chat_templates;
 /// @brief Backend manager for llama.cpp local models
 class LlamaCppBackend : public Backend {
 public:
-    explicit LlamaCppBackend(size_t max_context_tokens);
+    LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     ~LlamaCppBackend() override;
 
-    // New Backend interface
-    void initialize(Session& session) override;
-    Response add_message(Session& session, Message::Type type, const std::string& content,
-                        const std::string& tool_name = "", const std::string& tool_id = "",
-                        int prompt_tokens = 0, int max_tokens = 0) override;
-    Response add_message_stream(Session& session, Message::Type type, const std::string& content,
-                               StreamCallback callback,
-                               const std::string& tool_name = "", const std::string& tool_id = "",
-                               int prompt_tokens = 0, int max_tokens = 0) override;
-    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
+    void add_message(Session& session, Message::Role role, const std::string& content,
+                    const std::string& tool_name = "", const std::string& tool_id = "",
+                    int max_tokens = 0) override;
+    void generate_from_session(Session& session, int max_tokens = 0) override;
 
     std::vector<std::string> get_tool_call_markers() const override;
     std::vector<std::string> get_tool_call_end_markers() const override;
@@ -68,13 +62,16 @@ public:
     int tensor_parallel = 0;
     int pipeline_parallel = 0;
 
+    // KV cache type (f16, f32, q8_0, q4_0)
+    std::string cache_type = "f16";
+
 protected:
     void parse_backend_config() override;
 
 private:
     // Internal methods (not part of public interface)
     bool initialize_old(const std::string& model_path, const std::string& api_key = "", const std::string& template_path = "");
-    std::string generate(int max_tokens = 0, StreamCallback callback = nullptr);
+    std::string generate(int max_tokens = 0, EventCallback callback = nullptr);
 
     /// @brief Run inference using llama.cpp
     /// @param prompt_text The text to generate from
@@ -82,7 +79,7 @@ private:
     /// @param suppress_streaming Don't stream output (for tool calls)
     /// @param callback Optional streaming callback for token-by-token output
     /// @return Generated text response
-    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, StreamCallback callback = nullptr);
+    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, EventCallback callback = nullptr);
 
     /// @brief Parse JSON arguments from tool call
     std::map<std::string, std::any> parse_json_to_args(const std::string& json);
@@ -103,12 +100,12 @@ private:
     void log_token_state(const std::string& context) const;
 
     /// @brief Count tokens for a message (formats through chat template and tokenizes)
-    /// @param type Message type (USER, ASSISTANT, TOOL)
+    /// @param role Message role (USER, ASSISTANT, TOOL_RESPONSE)
     /// @param content Message content
-    /// @param tool_name Tool name (for TOOL messages)
-    /// @param tool_id Tool call ID (for TOOL messages)
+    /// @param tool_name Tool name (for TOOL_RESPONSE messages)
+    /// @param tool_id Tool call ID (for TOOL_RESPONSE messages)
     /// @return Token count for the formatted message
-    int count_message_tokens(Message::Type type,
+    int count_message_tokens(Message::Role role,
                             const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
@@ -134,6 +131,11 @@ private:
 
     bool initialized = false;
     int last_assistant_kv_tokens = 0;
+    int last_completion_tokens = 0;  // Tokens generated in last response (for KV tracking)
+
+    // Server mode context-full signaling (can't throw from C callback)
+    bool context_full_in_server_mode = false;
+    int context_full_tokens_needed = 0;
 
     // Chat templates for tool handling - use void* to avoid complex forward declarations
     void* chat_templates = nullptr;

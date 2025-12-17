@@ -1,7 +1,7 @@
+#include "shepherd.h"
 #include "scheduler.h"
-#include "terminal_io.h"
-#include "logger.h"
 #include <fstream>
+
 #include <filesystem>
 #include <chrono>
 #include <ctime>
@@ -76,14 +76,14 @@ void Scheduler::load() {
     schedules.clear();
 
     if (!std::filesystem::exists(config_path)) {
-        LOG_DEBUG("Schedule file does not exist: " + config_path);
+        dout(1) << "Schedule file does not exist: " + config_path << std::endl;
         return;
     }
 
     try {
         std::ifstream file(config_path);
         if (!file.is_open()) {
-            LOG_DEBUG("Could not open schedule file: " + config_path);
+            dout(1) << "Could not open schedule file: " + config_path << std::endl;
             return;
         }
 
@@ -96,9 +96,9 @@ void Scheduler::load() {
             }
         }
 
-        LOG_DEBUG("Loaded " + std::to_string(schedules.size()) + " schedules");
+        dout(1) << "Loaded " + std::to_string(schedules.size()) + " schedules" << std::endl;
     } catch (const std::exception& e) {
-        LOG_DEBUG("Error loading schedules: " + std::string(e.what()));
+        dout(1) << "Error loading schedules: " + std::string(e.what()) << std::endl;
     }
 }
 
@@ -118,10 +118,10 @@ void Scheduler::save() {
         std::ofstream file(config_path);
         if (file.is_open()) {
             file << j.dump(2);
-            LOG_DEBUG("Saved " + std::to_string(schedules.size()) + " schedules");
+            dout(1) << "Saved " + std::to_string(schedules.size()) + " schedules" << std::endl;
         }
     } catch (const std::exception& e) {
-        LOG_DEBUG("Error saving schedules: " + std::string(e.what()));
+        dout(1) << "Error saving schedules: " + std::string(e.what()) << std::endl;
     }
 }
 
@@ -316,7 +316,7 @@ void Scheduler::start() {
 
     alarm(secs);
 
-    LOG_DEBUG("Scheduler started with SIGALRM (next check in " + std::to_string(secs) + "s)");
+    dout(1) << "Scheduler started with SIGALRM (next check in " + std::to_string(secs) + "s)" << std::endl;
 }
 
 void Scheduler::stop() {
@@ -329,7 +329,7 @@ void Scheduler::stop() {
     // Restore default signal handler
     signal(SIGALRM, SIG_DFL);
 
-    LOG_DEBUG("Scheduler stopped");
+    dout(1) << "Scheduler stopped" << std::endl;
 }
 
 void Scheduler::check_and_fire() {
@@ -356,10 +356,11 @@ void Scheduler::check_and_fire() {
         }
 
         if (matches_time(expr, tm_now)) {
-            LOG_DEBUG("Firing schedule: " + entry.name + " with prompt: " + entry.prompt.substr(0, 50));
+            dout(1) << "Firing schedule: " + entry.name + " with prompt: " + entry.prompt.substr(0, 50) << std::endl;
 
-            // Inject prompt into input queue
-            tio.add_input(entry.prompt);
+            // TODO: Need a way to inject scheduled prompts without TerminalIO
+            // tio.add_input(entry.prompt);
+            std::cerr << "[Scheduler] Would inject: " << entry.prompt.substr(0, 50) << "..." << std::endl;
 
             // Update last_run
             entry.last_run = current_iso_time();
@@ -572,22 +573,30 @@ std::string Scheduler::format_next_run(const std::string& cron) {
 }
 
 // Common scheduler command implementation
-int handle_sched_args(const std::vector<std::string>& args) {
+int handle_sched_args(const std::vector<std::string>& args,
+                      std::function<void(const std::string&)> callback) {
 	// Create and load scheduler
 	Scheduler scheduler;
 	scheduler.load();
+
+	// Helper to format schedule entry
+	auto fmt_entry = [](const Scheduler::ScheduleEntry& entry) {
+		std::string status = entry.enabled ? "enabled " : "disabled";
+		char buf[256];
+		snprintf(buf, sizeof(buf), "  [%s]  %-20s  %-16s  %s\n",
+			status.c_str(), entry.name.c_str(), ("\"" + entry.cron + "\"").c_str(), entry.prompt.c_str());
+		return std::string(buf);
+	};
 
 	// No args shows list
 	if (args.empty()) {
 		auto entries = scheduler.list();
 		if (entries.empty()) {
-			std::cout << "No schedules configured\n";
+			callback("No schedules configured\n");
 		} else {
-			std::cout << "Schedules:\n";
+			callback("Schedules:\n");
 			for (const auto& entry : entries) {
-				std::string status = entry.enabled ? "enabled " : "disabled";
-				printf("  [%s]  %-20s  %-16s  %s\n",
-					status.c_str(), entry.name.c_str(), ("\"" + entry.cron + "\"").c_str(), entry.prompt.c_str());
+				callback(fmt_entry(entry));
 			}
 		}
 		return 0;
@@ -595,16 +604,26 @@ int handle_sched_args(const std::vector<std::string>& args) {
 
 	std::string subcmd = args[0];
 
+	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+		callback("Usage: /sched [subcommand]\n"
+		    "Subcommands:\n"
+		    "  list                           - List all schedules\n"
+		    "  add <name> \"<cron>\" \"<prompt>\" - Add schedule\n"
+		    "  remove <name>                  - Remove schedule\n"
+		    "  enable <name>                  - Enable schedule\n"
+		    "  disable <name>                 - Disable schedule\n"
+		    "  (no args)                      - List all schedules\n");
+		return 0;
+	}
+
 	if (subcmd == "list") {
 		auto entries = scheduler.list();
 		if (entries.empty()) {
-			std::cout << "No schedules configured\n";
+			callback("No schedules configured\n");
 		} else {
-			std::cout << "Schedules:\n";
+			callback("Schedules:\n");
 			for (const auto& entry : entries) {
-				std::string status = entry.enabled ? "enabled " : "disabled";
-				printf("  [%s]  %-20s  %-16s  %s\n",
-					status.c_str(), entry.name.c_str(), ("\"" + entry.cron + "\"").c_str(), entry.prompt.c_str());
+				callback(fmt_entry(entry));
 			}
 		}
 		return 0;
@@ -612,18 +631,18 @@ int handle_sched_args(const std::vector<std::string>& args) {
 
 	if (subcmd == "add") {
 		if (args.size() < 4) {
-			std::cerr << "Usage: sched add <name> \"<cron>\" \"<prompt>\"\n";
-			std::cerr << "\nCron format: minute hour day month weekday\n";
-			std::cerr << "  minute:  0-59\n";
-			std::cerr << "  hour:    0-23\n";
-			std::cerr << "  day:     1-31\n";
-			std::cerr << "  month:   1-12\n";
-			std::cerr << "  weekday: 0-6 (0=Sunday)\n";
-			std::cerr << "\nSpecial characters: * (any), - (range), , (list), / (step)\n";
-			std::cerr << "\nExamples:\n";
-			std::cerr << "  sched add daily-summary \"0 9 * * *\" \"Give me a summary\"\n";
-			std::cerr << "  sched add hourly \"0 * * * *\" \"What time is it?\"\n";
-			return 1;
+			callback("Usage: /sched add <name> \"<cron>\" \"<prompt>\"\n"
+			    "\nCron format: minute hour day month weekday\n"
+			    "  minute:  0-59\n"
+			    "  hour:    0-23\n"
+			    "  day:     1-31\n"
+			    "  month:   1-12\n"
+			    "  weekday: 0-6 (0=Sunday)\n"
+			    "\nSpecial characters: * (any), - (range), , (list), / (step)\n"
+			    "\nExamples:\n"
+			    "  /sched add daily-summary \"0 9 * * *\" \"Give me a summary\"\n"
+			    "  /sched add hourly \"0 * * * *\" \"What time is it?\"\n");
+			return 0;
 		}
 
 		std::string name = args[1];
@@ -632,90 +651,90 @@ int handle_sched_args(const std::vector<std::string>& args) {
 
 		std::string error;
 		if (!Scheduler::validate_cron(cron, error)) {
-			std::cerr << "Error: " << error << "\n";
+			callback("Error: " + error + "\n");
 			return 1;
 		}
 
 		std::string id = scheduler.add(name, cron, prompt);
 		if (id.empty()) {
-			std::cerr << "Error: Failed to add schedule (name may already exist)\n";
+			callback("Error: Failed to add schedule (name may already exist)\n");
 			return 1;
 		}
 
-		std::cout << "Added schedule '" << name << "' (id: " << id << ")\n";
-		std::cout << "Next run: " << Scheduler::format_next_run(cron) << "\n";
+		callback("Added schedule '" + name + "' (id: " + id + ")\n");
+		callback("Next run: " + Scheduler::format_next_run(cron) + "\n");
 		return 0;
 	}
 
 	if (subcmd == "remove") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: sched remove <name|id>\n";
-			return 1;
+			callback("Usage: /sched remove <name|id>\n");
+			return 0;
 		}
 
 		std::string id_or_name = args[1];
 		if (scheduler.remove(id_or_name)) {
-			std::cout << "Removed schedule '" << id_or_name << "'\n";
+			callback("Removed schedule '" + id_or_name + "'\n");
 			return 0;
 		} else {
-			std::cerr << "Error: Schedule not found: " << id_or_name << "\n";
+			callback("Error: Schedule not found: " + id_or_name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "enable") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: sched enable <name|id>\n";
-			return 1;
+			callback("Usage: /sched enable <name|id>\n");
+			return 0;
 		}
 
 		std::string id_or_name = args[1];
 		if (scheduler.enable(id_or_name)) {
-			std::cout << "Enabled schedule '" << id_or_name << "'\n";
+			callback("Enabled schedule '" + id_or_name + "'\n");
 			return 0;
 		} else {
-			std::cerr << "Error: Schedule not found: " << id_or_name << "\n";
+			callback("Error: Schedule not found: " + id_or_name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "disable") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: sched disable <name|id>\n";
-			return 1;
+			callback("Usage: /sched disable <name|id>\n");
+			return 0;
 		}
 
 		std::string id_or_name = args[1];
 		if (scheduler.disable(id_or_name)) {
-			std::cout << "Disabled schedule '" << id_or_name << "'\n";
+			callback("Disabled schedule '" + id_or_name + "'\n");
 			return 0;
 		} else {
-			std::cerr << "Error: Schedule not found: " << id_or_name << "\n";
+			callback("Error: Schedule not found: " + id_or_name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "show") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: sched show <name|id>\n";
-			return 1;
+			callback("Usage: /sched show <name|id>\n");
+			return 0;
 		}
 
 		std::string id_or_name = args[1];
 		const auto* entry = scheduler.get(id_or_name);
 		if (!entry) {
-			std::cerr << "Error: Schedule not found: " << id_or_name << "\n";
+			callback("Error: Schedule not found: " + id_or_name + "\n");
 			return 1;
 		}
 
-		std::cout << "Schedule: " << entry->name << "\n";
-		std::cout << "  ID:       " << entry->id << "\n";
-		std::cout << "  Cron:     " << entry->cron << "\n";
-		std::cout << "  Prompt:   " << entry->prompt << "\n";
-		std::cout << "  Enabled:  " << (entry->enabled ? "yes" : "no") << "\n";
-		std::cout << "  Created:  " << entry->created << "\n";
-		std::cout << "  Last run: " << (entry->last_run.empty() ? "never" : entry->last_run) << "\n";
-		std::cout << "  Next run: " << Scheduler::format_next_run(entry->cron) << "\n";
+		callback("Schedule: " + entry->name + "\n");
+		callback("  ID:       " + entry->id + "\n");
+		callback("  Cron:     " + entry->cron + "\n");
+		callback("  Prompt:   " + entry->prompt + "\n");
+		callback("  Enabled:  " + std::string(entry->enabled ? "yes" : "no") + "\n");
+		callback("  Created:  " + entry->created + "\n");
+		callback("  Last run: " + (entry->last_run.empty() ? "never" : entry->last_run) + "\n");
+		callback("  Next run: " + Scheduler::format_next_run(entry->cron) + "\n");
 		return 0;
 	}
 
@@ -724,12 +743,12 @@ int handle_sched_args(const std::vector<std::string>& args) {
 			// Show next run for all schedules
 			auto entries = scheduler.list();
 			if (entries.empty()) {
-				std::cout << "No schedules configured\n";
+				callback("No schedules configured\n");
 			} else {
-				std::cout << "Next scheduled runs:\n";
+				callback("Next scheduled runs:\n");
 				for (const auto& entry : entries) {
 					if (entry.enabled) {
-						std::cout << "  " << entry.name << ": " << Scheduler::format_next_run(entry.cron) << "\n";
+						callback("  " + entry.name + ": " + Scheduler::format_next_run(entry.cron) + "\n");
 					}
 				}
 			}
@@ -739,16 +758,16 @@ int handle_sched_args(const std::vector<std::string>& args) {
 		std::string id_or_name = args[1];
 		const auto* entry = scheduler.get(id_or_name);
 		if (!entry) {
-			std::cerr << "Error: Schedule not found: " << id_or_name << "\n";
+			callback("Error: Schedule not found: " + id_or_name + "\n");
 			return 1;
 		}
 
-		std::cout << entry->name << ": " << Scheduler::format_next_run(entry->cron) << "\n";
+		callback(entry->name + ": " + Scheduler::format_next_run(entry->cron) + "\n");
 		return 0;
 	}
 
-	std::cerr << "Unknown sched subcommand: " << subcmd << "\n";
-	std::cerr << "Available: list, add, remove, enable, disable, show, next\n";
+	callback("Unknown sched subcommand: " + subcmd + "\n");
+	callback("Available: list, add, remove, enable, disable, show, next\n");
 	return 1;
 }
 
@@ -796,7 +815,8 @@ bool handle_sched_command(const std::string& input) {
 	if (!token.empty()) args.push_back(token);
 	if (!quoted_arg.empty()) args.push_back(quoted_arg);
 
-	// Call common implementation
-	int result = handle_sched_args(args);
+	// Call common implementation with stdout output
+	auto out = [](const std::string& msg) { std::cout << msg; };
+	int result = handle_sched_args(args, out);
 	return result == 0;
 }

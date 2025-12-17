@@ -2,6 +2,7 @@
 #include "session.h"
 #include "shepherd.h"
 
+
 // Global instance
 GenerationThread* g_generation_thread = nullptr;
 
@@ -22,7 +23,7 @@ void GenerationThread::start() {
 
     running = true;
     worker = std::thread(&GenerationThread::worker_loop, this);
-    LOG_DEBUG("GenerationThread started");
+    dout(1) << "GenerationThread started" << std::endl;
 }
 
 void GenerationThread::stop() {
@@ -41,7 +42,7 @@ void GenerationThread::stop() {
         worker.join();
     }
 
-    LOG_DEBUG("GenerationThread stopped");
+    dout(1) << "GenerationThread stopped" << std::endl;
 }
 
 void GenerationThread::submit(const GenerationRequest& request) {
@@ -52,11 +53,11 @@ void GenerationThread::submit(const GenerationRequest& request) {
         complete = false;
     }
     request_cv.notify_one();
-    LOG_DEBUG("GenerationThread: request submitted");
+    dout(1) << "GenerationThread: request submitted" << std::endl;
 }
 
 void GenerationThread::worker_loop() {
-    LOG_DEBUG("GenerationThread worker_loop started");
+    dout(1) << "GenerationThread worker_loop started" << std::endl;
 
     while (running) {
         // Wait for a request
@@ -72,34 +73,28 @@ void GenerationThread::worker_loop() {
 
         // Process the request
         busy = true;
-        LOG_DEBUG("GenerationThread: starting generation, type=" + std::to_string(static_cast<int>(current_request.type)));
+        dout(1) << "GenerationThread: starting generation, role=" + std::to_string(static_cast<int>(current_request.role)) << std::endl;
 
         try {
-            // This is the blocking call - session.add_message()
-            // Tokens stream to g_output_queue via backend callbacks
-            last_response = session->add_message(
-                current_request.type,
+            // Call session->add_message - all output flows through backend callback
+            // (CONTENT, TOOL_CALL, ERROR, STOP events)
+            session->add_message(
+                current_request.role,
                 current_request.content,
                 current_request.tool_name,
                 current_request.tool_id,
-                current_request.prompt_tokens,
                 current_request.max_tokens
             );
 
-            LOG_DEBUG("GenerationThread: generation complete, success=" +
-                      std::string(last_response.success ? "true" : "false") +
-                      ", finish_reason=" + last_response.finish_reason);
+            dout(1) << "GenerationThread: generation complete" << std::endl;
 
         } catch (const std::exception& e) {
-            last_response = Response{};
-            last_response.success = false;
-            last_response.error = e.what();
-            LOG_ERROR("GenerationThread exception: " + std::string(e.what()));
+            std::cerr << "GenerationThread exception: " + std::string(e.what()) << std::endl;
         }
 
         busy = false;
         complete = true;
     }
 
-    LOG_DEBUG("GenerationThread worker_loop ended");
+    dout(1) << "GenerationThread worker_loop ended" << std::endl;
 }

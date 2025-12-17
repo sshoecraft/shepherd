@@ -1,10 +1,12 @@
 #include "ollama.h"
 #include "shepherd.h"
 #include "nlohmann/json.hpp"
+#include "../tools/utf8_sanitizer.h"
 
 using json = nlohmann::json;
 
-OllamaBackend::OllamaBackend(size_t context_size) : ApiBackend(context_size) {
+OllamaBackend::OllamaBackend(size_t context_size, Session& session, EventCallback callback)
+    : ApiBackend(context_size, session, callback) {
     // Initialize with config values
     model_name = config->model;
 
@@ -18,42 +20,71 @@ OllamaBackend::OllamaBackend(size_t context_size) : ApiBackend(context_size) {
             }
             api_endpoint += "api/chat";
         }
-        LOG_INFO("Using custom Ollama endpoint: " + api_endpoint);
+        dout(1) << "Using custom Ollama endpoint: " + api_endpoint << std::endl;
     }
     // else: keep default api_endpoint = "http://localhost:11434/api/chat"
 
     // Parse backend-specific config if available
     parse_backend_config();
-}
 
-OllamaBackend::~OllamaBackend() {
-}
-
-void OllamaBackend::initialize(Session& session) {
-    LOG_INFO("Initializing Ollama backend...");
+    // --- Initialization ---
 
     // Auto-detect model if not specified
     if (model_name.empty()) {
-        LOG_INFO("No model specified, querying server for available models");
-        std::string queried_model = query_available_model();
-        if (!queried_model.empty()) {
-            model_name = queried_model;
-            LOG_INFO("Using model from server: " + model_name);
+        dout(1) << "No model specified, querying server for available models" << std::endl;
+        auto models = get_models();
+        if (!models.empty()) {
+            model_name = models[0];
+            dout(1) << "Using model from server: " + model_name << std::endl;
         } else {
-            LOG_WARN("Failed to query server for model, will use first API response to determine");
+            dout(1) << std::string("WARNING: ") +"Failed to query server for model, will use first API response to determine" << std::endl;
         }
     }
 
-    // Call base class initialize() which handles context size query and calibration
-    ApiBackend::initialize(session);
+    // Query context size if not set
+    if (this->context_size == 0) {
+        size_t api_context_size = query_model_context_size(model_name);
+        if (api_context_size > 0) {
+            this->context_size = api_context_size;
+            dout(1) << "Using API's context size: " + std::to_string(this->context_size) << std::endl;
+        }
+    }
+
+    // NOTE: Context safety margin disabled - ollama already sends proper sampling params (top_p, top_k)
+    // // Apply safety margin to auto-detected context size
+    // // This accounts for server-side caching and other overhead
+    // // Reduce by 10% or 4096 tokens, whichever is smaller
+    // if (this->context_size > 0) {
+    //     size_t original_context = this->context_size;
+    //     size_t margin = std::min(this->context_size / 10, (size_t)4096);
+    //     if (margin > 0 && this->context_size > margin) {
+    //         this->context_size -= margin;
+    //         dout(1) << "Applied context safety margin: " + std::to_string(original_context) +
+    //                   " -> " + std::to_string(this->context_size) +
+    //                   " (reduced by " + std::to_string(margin) + " tokens)" << std::endl;
+    //     }
+    // }
+
+    // Calibrate token counts (if enabled in config)
+    if (config->calibration) {
+        dout(1) << "Calibrating token counts..." << std::endl;
+        calibrate_token_counts(session);
+    } else {
+        dout(1) << "Calibration disabled, using default estimates" << std::endl;
+        session.system_message_tokens = estimate_message_tokens(session.system_message);
+        session.last_prompt_tokens = session.system_message_tokens;
+    }
 
     // Force auto-eviction for Ollama backend
     // Ollama silently truncates messages when context is full (no error returned),
     // so we MUST proactively evict to prevent data loss
     session.auto_evict = true;
-    LOG_INFO("Auto-eviction enabled for Ollama (prevents silent truncation)");
+    dout(1) << "Auto-eviction enabled for Ollama (prevents silent truncation)" << std::endl;
 
-    LOG_INFO("Ollama backend initialized successfully");
+    dout(1) << "Ollama backend initialized successfully" << std::endl;
+}
+
+OllamaBackend::~OllamaBackend() {
 }
 
 Response OllamaBackend::parse_http_response(const HttpResponse& http_response) {
@@ -88,7 +119,8 @@ Response OllamaBackend::parse_http_response(const HttpResponse& http_response) {
 
     // Parse successful response
     try {
-        json json_resp = json::parse(http_response.body);
+        std::string sanitized_body = utf8_sanitizer::sanitize_utf8(http_response.body);
+        json json_resp = json::parse(sanitized_body);
 
         // Check for native Ollama /api/chat format (has "message" directly)
         if (json_resp.contains("message") && json_resp["message"].is_object()) {
@@ -150,7 +182,7 @@ Response OllamaBackend::parse_http_response(const HttpResponse& http_response) {
                                     }
                                 }
                             } catch (const std::exception& e) {
-                                LOG_DEBUG("Failed to parse tool arguments: " + std::string(e.what()));
+                                dout(1) << "Failed to parse tool arguments: " + std::string(e.what()) << std::endl;
                             }
                         }
                     }
@@ -207,7 +239,7 @@ Response OllamaBackend::parse_http_response(const HttpResponse& http_response) {
                                         }
                                     }
                                 } catch (const std::exception& e) {
-                                    LOG_DEBUG("Failed to parse tool arguments: " + std::string(e.what()));
+                                    dout(1) << "Failed to parse tool arguments: " + std::string(e.what()) << std::endl;
                                 }
                             }
                         }
@@ -266,7 +298,7 @@ nlohmann::json OllamaBackend::build_request_from_session(const Session& session,
     for (const auto& msg : session.messages) {
         json message;
 
-        switch (msg.type) {
+        switch (msg.role) {
             case Message::USER:
                 message["role"] = "user";
                 message["content"] = msg.content;
@@ -277,7 +309,8 @@ nlohmann::json OllamaBackend::build_request_from_session(const Session& session,
                 message["content"] = msg.content;
                 break;
 
-            case Message::TOOL:
+            case Message::TOOL_RESPONSE:
+            case Message::FUNCTION:
                 message["role"] = "tool";
                 message["content"] = msg.content;
                 if (!msg.tool_call_id.empty()) {
@@ -347,7 +380,7 @@ nlohmann::json OllamaBackend::build_request_from_session(const Session& session,
 }
 
 nlohmann::json OllamaBackend::build_request(const Session& session,
-                                              Message::Type type,
+                                              Message::Role role,
                                               const std::string& content,
                                               const std::string& tool_name,
                                               const std::string& tool_id,
@@ -375,7 +408,7 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
     for (const auto& msg : session.messages) {
         json message;
 
-        switch (msg.type) {
+        switch (msg.role) {
             case Message::USER:
                 message["role"] = "user";
                 message["content"] = msg.content;
@@ -384,10 +417,10 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
             case Message::ASSISTANT:
                 message["role"] = "assistant";
                 message["content"] = msg.content;
-                // Note: Tool calls are embedded in the content as text, not structured
                 break;
 
-            case Message::TOOL:
+            case Message::TOOL_RESPONSE:
+            case Message::FUNCTION:
                 message["role"] = "tool";
                 message["content"] = msg.content;
                 if (!msg.tool_call_id.empty()) {
@@ -407,13 +440,19 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
 
     // Add the new message
     json new_message;
-    switch (type) {
+    switch (role) {
         case Message::USER:
             new_message["role"] = "user";
             new_message["content"] = content;
             break;
 
-        case Message::TOOL:
+        case Message::ASSISTANT:
+            new_message["role"] = "assistant";
+            new_message["content"] = content;
+            break;
+
+        case Message::TOOL_RESPONSE:
+        case Message::FUNCTION:
             new_message["role"] = "tool";
             new_message["content"] = content;
             if (!tool_id.empty()) {
@@ -546,28 +585,33 @@ std::string OllamaBackend::get_api_endpoint() {
     return api_endpoint;
 }
 
-Response OllamaBackend::add_message_stream(Session& session,
-                                          Message::Type type,
-                                          const std::string& content,
-                                          StreamCallback callback,
-                                          const std::string& tool_name,
-                                          const std::string& tool_id,
-                                          int prompt_tokens,
-                                          int max_tokens) {
-    LOG_DEBUG("OllamaBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
-             ", max_tokens=" + std::to_string(max_tokens));
+void OllamaBackend::add_message(Session& session,
+                                    Message::Role role,
+                                    const std::string& content,
+                                    const std::string& tool_name,
+                                    const std::string& tool_id,
+                                    
+                                    int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "OllamaBackend::add_message (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
 
     const int MAX_RETRIES = 3;
     int retry = 0;
 
     while (retry < MAX_RETRIES) {
         // Build request with entire session + new message
-        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+        nlohmann::json request = build_request(session, role, content, tool_name, tool_id, max_tokens);
 
         // Ensure streaming is enabled (default for Ollama)
         request["stream"] = true;
 
-        LOG_DEBUG("Sending streaming request to Ollama API");
+        dout(1) << "Sending streaming request to Ollama API" << std::endl;
 
         // Get headers and endpoint
         auto headers = get_api_headers();
@@ -575,6 +619,12 @@ Response OllamaBackend::add_message_stream(Session& session,
 
         // Enforce rate limits
         enforce_rate_limits();
+
+        // Fire USER event callback before sending to provider
+        // This displays the user prompt when accepted
+        if (role == Message::USER && !content.empty()) {
+            callback(CallbackEvent::USER_PROMPT, content, "", "");
+        }
 
         // Streaming state
         Response accumulated_resp;
@@ -607,12 +657,10 @@ Response OllamaBackend::add_message_stream(Session& session,
                             accumulated_content += delta_text;
                             accumulated_resp.content = accumulated_content;
 
-                            // Invoke user callback with delta
-                            if (callback) {
-                                if (!callback(delta_text, accumulated_content, accumulated_resp)) {
-                                    stream_complete = true;
-                                    return true;
-                                }
+                            // Route through unified output filter
+                            if (!output(delta_text)) {
+                                stream_complete = true;
+                                return true;
                             }
                         }
 
@@ -659,7 +707,7 @@ Response OllamaBackend::add_message_stream(Session& session,
                     }
 
                 } catch (const std::exception& e) {
-                    LOG_WARN("Failed to parse Ollama NDJSON line: " + std::string(e.what()));
+                    dout(1) << std::string("WARNING: ") +"Failed to parse Ollama NDJSON line: " + std::string(e.what()) << std::endl;
                 }
             }
 
@@ -686,36 +734,40 @@ Response OllamaBackend::add_message_stream(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 retry++;
-                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
-                        std::to_string(MAX_RETRIES) + ")");
+                dout(1) << "Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + "" << std::endl;
+
                 continue;
             }
 
-            return accumulated_resp;
+            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
+
+        // Flush any remaining output from the filter
+        flush_output();
 
         // Success - update session with messages
         if (stream_complete && accumulated_resp.success) {
-            // Estimate token counts if not provided by API
-            int new_message_tokens = prompt_tokens > 0 ? prompt_tokens : estimate_message_tokens(content);
+            // Estimate token counts
+            int new_message_tokens = estimate_message_tokens(content);
 
             // Add user message to session
-            Message user_msg(type, content, new_message_tokens);
+            Message user_msg(role, content, new_message_tokens);
             user_msg.tool_name = tool_name;
             user_msg.tool_call_id = tool_id;
             session.messages.push_back(user_msg);
             session.total_tokens += new_message_tokens;
 
-            if (type == Message::USER) {
+            if (role == Message::USER) {
                 session.last_user_message_index = session.messages.size() - 1;
                 session.last_user_message_tokens = new_message_tokens;
             }
@@ -742,19 +794,16 @@ Response OllamaBackend::add_message_stream(Session& session,
             }
         }
 
-        LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
+        dout(1) << "add_message complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
                   ", completion_tokens=" + std::to_string(accumulated_resp.completion_tokens) +
-                  ", finish_reason=" + accumulated_resp.finish_reason);
+                  ", finish_reason=" + accumulated_resp.finish_reason << std::endl;
 
-        return accumulated_resp;
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
     }
 
     // Max retries reached
-    Response error_resp;
-    error_resp.success = false;
-    error_resp.code = Response::ERROR;
-    error_resp.error = "Max retries reached";
-    return error_resp;
+    callback(CallbackEvent::ERROR, "Max retries reached", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 }
 
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
@@ -763,7 +812,7 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
     // Try to query from Ollama's /api/show endpoint
     try {
         if (!http_client) {
-            LOG_WARN("HTTP client not initialized for Ollama");
+            dout(1) << std::string("WARNING: ") +"HTTP client not initialized for Ollama" << std::endl;
             return DEFAULT_CONTEXT_SIZE;
         }
 
@@ -798,7 +847,7 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
                     if (key.find("context_length") != std::string::npos) {
                         if (value.is_number()) {
                             size_t ctx_size = value.get<size_t>();
-                            LOG_DEBUG("Found context_length in model_info[\"" + key + "\"]: " + std::to_string(ctx_size));
+                            dout(1) << "Found context_length in model_info[\"" + key + "\"]: " + std::to_string(ctx_size) << std::endl;
                             return ctx_size;
                         }
                     }
@@ -819,21 +868,22 @@ size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
             }
         }
     } catch (const std::exception& e) {
-        LOG_DEBUG("Failed to query Ollama model context size: " + std::string(e.what()));
+        dout(1) << "Failed to query Ollama model context size: " + std::string(e.what()) << std::endl;
     }
 
-    LOG_WARN("Could not query context size for model " + model_name);
+    dout(1) << std::string("WARNING: ") +"Could not query context size for model " + model_name << std::endl;
     return 0;  // Let base class try probing
 }
 
-std::string OllamaBackend::query_available_model() {
+std::vector<std::string> OllamaBackend::fetch_models() {
+    std::vector<std::string> result;
+
     try {
         if (!http_client) {
-            LOG_WARN("HTTP client not initialized for Ollama");
-            return "";
+            return result;
         }
 
-        // Build URL for /api/tags endpoint (strip /api/chat from endpoint)
+        // Build URL for /api/tags endpoint
         std::string base_url = api_endpoint;
         size_t pos = base_url.find("/api/chat");
         if (pos != std::string::npos) {
@@ -841,35 +891,24 @@ std::string OllamaBackend::query_available_model() {
         }
         std::string tags_url = base_url + "/api/tags";
 
-        // Prepare headers
         std::map<std::string, std::string> headers;
         headers["Content-Type"] = "application/json";
 
-        // Make GET request to /api/tags
-        LOG_DEBUG("Querying Ollama for available models: " + tags_url);
         HttpResponse response = http_client->get(tags_url, headers);
 
         if (response.is_success()) {
             json resp = json::parse(response.body);
-
-            // Parse models list - look for first available model
-            if (resp.contains("models") && resp["models"].is_array() && !resp["models"].empty()) {
-                const auto& models = resp["models"];
-                for (const auto& model : models) {
+            if (resp.contains("models") && resp["models"].is_array()) {
+                for (const auto& model : resp["models"]) {
                     if (model.contains("name") && model["name"].is_string()) {
-                        std::string name = model["name"].get<std::string>();
-                        LOG_INFO("Found Ollama model: " + name);
-                        return name;
+                        result.push_back(model["name"].get<std::string>());
                     }
                 }
             }
-        } else {
-            LOG_DEBUG("Failed to query Ollama models: " + response.error_message);
         }
     } catch (const std::exception& e) {
-        LOG_DEBUG("Failed to query Ollama available models: " + std::string(e.what()));
+        dout(1) << "Failed to query Ollama models: " + std::string(e.what()) << std::endl;
     }
 
-    LOG_WARN("Could not query available models from Ollama");
-    return "";
+    return result;
 }

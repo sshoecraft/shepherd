@@ -4,6 +4,7 @@
 #include "tools.h"
 #include <map>
 
+
 // Simple HTTP client using curl command (for cross-platform compatibility)
 class SimpleHTTPClient {
 private:
@@ -137,19 +138,17 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
 
         result["status_code"] = response.status_code;
         result["body"] = response.body;
+        result["content"] = response.body;
         result["success"] = response.success;
+
+        // Build summary: "STATUS_CODE (N bytes)"
+        std::string status_text = response.success ? "OK" : "Failed";
+        result["summary"] = std::to_string(response.status_code) + " " + status_text +
+                           " (" + std::to_string(response.body.size()) + " bytes)";
 
         if (!response.error.empty()) {
             result["error"] = response.error;
         }
-
-//		dprintf(1,"HTTPRequest: " + method + " " + url + " -> " + response.status_code + "\n");
-#if 0
-        if (g_debug_level) {
-            std::cout << "HTTPRequest: " << method << " " << url
-                      << " -> " << response.status_code << std::endl;
-        }
-#endif
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error making HTTP request: ") + e.what();
@@ -186,7 +185,13 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
 
         result["status_code"] = response.status_code;
         result["body"] = response.body;
+        result["content"] = response.body;
         result["success"] = response.success;
+
+        // Build summary: "STATUS_CODE (N bytes)"
+        std::string status_text = response.success ? "OK" : "Failed";
+        result["summary"] = std::to_string(response.status_code) + " " + status_text +
+                           " (" + std::to_string(response.body.size()) + " bytes)";
 
         if (!response.error.empty()) {
             result["error"] = response.error;
@@ -234,7 +239,13 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
 
         result["status_code"] = response.status_code;
         result["body"] = response.body;
+        result["content"] = response.body;
         result["success"] = response.success;
+
+        // Build summary: "STATUS_CODE (N bytes)"
+        std::string status_text = response.success ? "OK" : "Failed";
+        result["summary"] = std::to_string(response.status_code) + " " + status_text +
+                           " (" + std::to_string(response.body.size()) + " bytes)";
 
         if (!response.error.empty()) {
             result["error"] = response.error;
@@ -257,5 +268,5 @@ void register_http_tools(Tools& tools) {
     tools.register_tool(std::make_unique<HTTPGetTool>());
     tools.register_tool(std::make_unique<HTTPPostTool>());
 
-    LOG_DEBUG("Registered HTTP tools: http_request, http_get, http_post");
+    dout(1) << "Registered HTTP tools: http_request, http_get, http_post" << std::endl;
 }

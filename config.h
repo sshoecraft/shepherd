@@ -3,6 +3,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <functional>
 #include <stdexcept>
 #include "nlohmann/json.hpp"
 
@@ -63,6 +64,8 @@ public:
     bool streaming;
     bool thinking;        // Show thinking/reasoning blocks in output
     bool auto_provider;   // Auto-switch to next provider on connection failure
+    bool tui;             // Enable TUI mode (boxed input, status line)
+    int tui_history;      // TUI scrollback buffer size (lines)
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
     // Legacy/runtime fields (not saved to config, only used for command-line overrides)
@@ -88,4 +91,6 @@ private:
 
 // Common config command implementation (takes parsed args)
 // Returns 0 on success, 1 on error
-int handle_config_args(const std::vector<std::string>& args);
+// callback: function to emit output
+int handle_config_args(const std::vector<std::string>& args,
+                       std::function<void(const std::string&)> callback);

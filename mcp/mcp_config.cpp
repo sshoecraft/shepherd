@@ -1,8 +1,9 @@
+#include "shepherd.h"
 #include "mcp_config.h"
 #include "mcp_server.h"
 #include "mcp_client.h"
-#include "../logger.h"
 #include <fstream>
+
 #include <iostream>
 #include <iomanip>
 
@@ -57,7 +58,7 @@ std::vector<MCPServerEntry> MCPConfig::load(const std::string& config_path) {
             }
         }
     } catch (const nlohmann::json::exception& e) {
-        LOG_ERROR("Failed to parse MCP config: " + std::string(e.what()));
+        std::cerr << "Failed to parse MCP config: " + std::string(e.what()) << std::endl;
     }
 
     return servers;
@@ -71,7 +72,7 @@ bool MCPConfig::save(const std::string& config_path, const std::vector<MCPServer
         try {
             config = nlohmann::json::parse(infile);
         } catch (const nlohmann::json::exception& e) {
-            LOG_ERROR("Failed to parse existing config: " + std::string(e.what()));
+            std::cerr << "Failed to parse existing config: " + std::string(e.what()) << std::endl;
             config = nlohmann::json::object();
         }
         infile.close();
@@ -89,7 +90,7 @@ bool MCPConfig::save(const std::string& config_path, const std::vector<MCPServer
     // Write back to file
     std::ofstream outfile(config_path);
     if (!outfile.is_open()) {
-        LOG_ERROR("Failed to open config file for writing: " + config_path);
+        std::cerr << "Failed to open config file for writing: " + config_path << std::endl;
         return false;
     }
 
@@ -136,27 +137,28 @@ bool MCPConfig::remove_server(const std::string& config_path, const std::string&
     return save(config_path, servers);
 }
 
-void MCPConfig::list_servers(const std::string& config_path, bool check_health) {
+void MCPConfig::list_servers(const std::string& config_path,
+                             std::function<void(const std::string&)> callback,
+                             bool check_health) {
     auto servers = load(config_path);
 
     if (servers.empty()) {
-        std::cout << "No MCP servers configured" << std::endl;
+        callback("No MCP servers configured\n");
         return;
     }
 
     if (check_health) {
-        std::cout << "Checking MCP server health...\n" << std::endl;
+        callback("Checking MCP server health...\n\n");
     }
 
     for (const auto& server : servers) {
-        std::cout << server.name << ": " << server.command;
+        std::string line = server.name + ": " + server.command;
         for (const auto& arg : server.args) {
-            std::cout << " " << arg;
+            line += " " + arg;
         }
 
         if (check_health) {
             // Test server connection
-            std::string status;
             try {
                 MCPServer::Config srv_config;
                 srv_config.name = server.name;
@@ -170,14 +172,13 @@ void MCPConfig::list_servers(const std::string& config_path, bool check_health) 
                 MCPClient client(std::move(srv));
                 client.initialize();
 
-                status = " - ✓ Connected";
+                line += " - ✓ Connected";
             } catch (const std::exception& e) {
-                status = " - ✗ Failed";
+                line += " - ✗ Failed";
             }
-            std::cout << status;
         }
 
-        std::cout << std::endl;
+        callback(line + "\n");
     }
 }
 
@@ -192,14 +193,13 @@ bool MCPConfig::server_exists(const std::string& config_path, const std::string&
 }
 
 // Common MCP command implementation
-int handle_mcp_args(const std::vector<std::string>& args) {
+int handle_mcp_args(const std::vector<std::string>& args,
+                    std::function<void(const std::string&)> callback) {
     std::string config_path = Config::get_default_config_path();
 
     // No args or "list" shows servers
     if (args.empty() || args[0] == "list") {
-        // Suppress logs during health check
-        Logger::instance().set_log_level(LogLevel::FATAL);
-        MCPConfig::list_servers(config_path, true);  // Check health
+        MCPConfig::list_servers(config_path, callback, true);  // Check health
         return 0;
     }
 
@@ -207,7 +207,7 @@ int handle_mcp_args(const std::vector<std::string>& args) {
 
     if (subcmd == "add") {
         if (args.size() < 3) {
-            std::cerr << "Usage: mcp add <name> <command> [args...] [-e KEY=VALUE ...]\n";
+            callback("Usage: mcp add <name> <command> [args...] [-e KEY=VALUE ...]\n");
             return 1;
         }
 
@@ -230,7 +230,7 @@ int handle_mcp_args(const std::vector<std::string>& args) {
                         std::string value = env_pair.substr(eq_pos + 1);
                         server.env[key] = value;
                     } else {
-                        std::cerr << "Warning: Invalid env format (use KEY=VALUE): " << env_pair << "\n";
+                        callback("Warning: Invalid env format (use KEY=VALUE): " + env_pair + "\n");
                     }
                 }
             } else {
@@ -239,7 +239,7 @@ int handle_mcp_args(const std::vector<std::string>& args) {
         }
 
         if (MCPConfig::add_server(config_path, server)) {
-            std::cout << "Added MCP server '" << server.name << "'\n";
+            callback("Added MCP server '" + server.name + "'\n");
             return 0;
         }
         return 1;
@@ -247,13 +247,13 @@ int handle_mcp_args(const std::vector<std::string>& args) {
 
     if (subcmd == "remove") {
         if (args.size() < 2) {
-            std::cerr << "Usage: mcp remove <name>\n";
+            callback("Usage: mcp remove <name>\n");
             return 1;
         }
 
         std::string name = args[1];
         if (MCPConfig::remove_server(config_path, name)) {
-            std::cout << "Removed MCP server '" << name << "'\n";
+            callback("Removed MCP server '" + name + "'\n");
             return 0;
         }
         return 1;
@@ -261,7 +261,7 @@ int handle_mcp_args(const std::vector<std::string>& args) {
 
     if (subcmd == "test") {
         if (args.size() < 2) {
-            std::cerr << "Usage: mcp test <name>\n";
+            callback("Usage: mcp test <name>\n");
             return 1;
         }
 
@@ -270,7 +270,7 @@ int handle_mcp_args(const std::vector<std::string>& args) {
 
         for (const auto& server : servers) {
             if (server.name == name) {
-                std::cout << "Testing MCP server '" << name << "'...\n";
+                callback("Testing MCP server '" + name + "'...\n");
                 try {
                     MCPServer::Config srv_config;
                     srv_config.name = server.name;
@@ -285,23 +285,23 @@ int handle_mcp_args(const std::vector<std::string>& args) {
                     client.initialize();
 
                     auto tools = client.list_tools();
-                    std::cout << "Connected! Server provides " << tools.size() << " tools:\n";
+                    callback("Connected! Server provides " + std::to_string(tools.size()) + " tools:\n");
                     for (const auto& tool : tools) {
-                        std::cout << "  - " << tool.name << ": " << tool.description << "\n";
+                        callback("  - " + tool.name + ": " + tool.description + "\n");
                     }
                     return 0;
                 } catch (const std::exception& e) {
-                    std::cerr << "Failed to connect: " << e.what() << "\n";
+                    callback("Failed to connect: " + std::string(e.what()) + "\n");
                     return 1;
                 }
             }
         }
 
-        std::cerr << "MCP server '" << name << "' not found\n";
+        callback("MCP server '" + name + "' not found\n");
         return 1;
     }
 
-    std::cerr << "Unknown mcp subcommand: " << subcmd << "\n";
-    std::cerr << "Available: list, add, remove, test\n";
+    callback("Unknown mcp subcommand: " + subcmd + "\n");
+    callback("Available: list, add, remove, test\n");
     return 1;
 }

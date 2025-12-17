@@ -1,8 +1,9 @@
+#include "shepherd.h"
 #include "rag.h"
 #include "config.h"
 #include <thread>
 #include <mutex>
-#include "logger.h"
+
 #include <chrono>
 #include <filesystem>
 #include <cstdlib>
@@ -27,11 +28,11 @@ int64_t ConversationTurn::get_current_timestamp() {
 // RAGDatabase implementation
 RAGDatabase::RAGDatabase(const std::string& db_path, size_t max_db_size)
     : db_path_(db_path), db_(nullptr), max_db_size_(max_db_size) {
-    LOG_DEBUG("RAGDatabase created with path: " + db_path + ", max size: " + std::to_string(max_db_size / (1024 * 1024)) + " MB");
+    dout(1) << "RAGDatabase created with path: " + db_path + ", max size: " + std::to_string(max_db_size / (1024 * 1024)) + " MB" << std::endl;
 }
 
 RAGDatabase::~RAGDatabase() {
-    LOG_DEBUG("RAGDatabase destructor");
+    dout(1) << "RAGDatabase destructor" << std::endl;
     shutdown();
 }
 
@@ -43,20 +44,20 @@ bool RAGDatabase::initialize() {
     if (!db_dir.empty() && !std::filesystem::exists(db_dir)) {
         try {
             std::filesystem::create_directories(db_dir);
-            LOG_INFO("Created RAG database directory: " + db_dir.string());
+            dout(1) << "Created RAG database directory: " + db_dir.string() << std::endl;
         } catch (const std::exception& e) {
-            LOG_ERROR("Failed to create RAG database directory: " + std::string(e.what()));
+            std::cerr << "Failed to create RAG database directory: " + std::string(e.what()) << std::endl;
             return false;
         }
     }
 
-    LOG_INFO("Initializing RAG database: " + db_path_);
+    dout(1) << "Initializing RAG database: " + db_path_ << std::endl;
 
     // Open SQLite database
     sqlite3* db = nullptr;
     int rc = sqlite3_open(db_path_.c_str(), &db);
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to open database: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to open database: " + std::string(sqlite3_errmsg(db)) << std::endl;
         sqlite3_close(db);
         return false;
     }
@@ -68,20 +69,20 @@ bool RAGDatabase::initialize() {
     std::string mmap_pragma = "PRAGMA mmap_size = " + std::to_string(max_db_size_);
     rc = sqlite3_exec(db, mmap_pragma.c_str(), nullptr, nullptr, nullptr);
     if (rc != SQLITE_OK) {
-        LOG_WARN("Failed to enable memory mapping: " + std::string(sqlite3_errmsg(db)));
+        dout(1) << std::string("WARNING: ") +"Failed to enable memory mapping: " + std::string(sqlite3_errmsg(db)) << std::endl;
         // Continue anyway - not critical
     } else {
-        LOG_INFO("Enabled memory-mapped I/O (mmap_size: " + std::to_string(max_db_size_ / (1024 * 1024)) + " MB)");
+        dout(1) << "Enabled memory-mapped I/O (mmap_size: " + std::to_string(max_db_size_ / (1024 * 1024)) + " MB)" << std::endl;
     }
 
     // Create tables
     if (!create_tables()) {
-        LOG_ERROR("Failed to create database tables");
+        std::cerr << "Failed to create database tables" << std::endl;
         shutdown();
         return false;
     }
 
-    LOG_INFO("RAG database initialized successfully");
+    dout(1) << "RAG database initialized successfully" << std::endl;
     return true;
 }
 
@@ -102,7 +103,7 @@ bool RAGDatabase::create_tables() {
 
     int rc = sqlite3_exec(db, create_table_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to create conversations table: " + std::string(err_msg));
+        std::cerr << "Failed to create conversations table: " + std::string(err_msg) << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
@@ -119,7 +120,7 @@ bool RAGDatabase::create_tables() {
 
     rc = sqlite3_exec(db, create_fts_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to create FTS table: " + std::string(err_msg));
+        std::cerr << "Failed to create FTS table: " + std::string(err_msg) << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
@@ -146,7 +147,7 @@ bool RAGDatabase::create_tables() {
 
     rc = sqlite3_exec(db, create_triggers_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to create triggers: " + std::string(err_msg));
+        std::cerr << "Failed to create triggers: " + std::string(err_msg) << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
@@ -163,17 +164,17 @@ bool RAGDatabase::create_tables() {
 
     rc = sqlite3_exec(db, create_facts_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to create facts table: " + std::string(err_msg));
+        std::cerr << "Failed to create facts table: " + std::string(err_msg) << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
 
-    LOG_DEBUG("RAG database tables created successfully");
+    dout(1) << "RAG database tables created successfully" << std::endl;
     return true;
 }
 
 void RAGDatabase::archive_turn(const ConversationTurn& turn) {
-    LOG_DEBUG("Archiving conversation turn to RAG database");
+    dout(1) << "Archiving conversation turn to RAG database" << std::endl;
 
     // Compute SHA256 hash of user_message + assistant_response to detect duplicates
     std::string combined = turn.user_message + turn.assistant_response;
@@ -187,7 +188,7 @@ void RAGDatabase::archive_turn(const ConversationTurn& turn) {
     }
     std::string content_hash = hash_stream.str();
 
-    LOG_DEBUG("Content hash: " + content_hash);
+    dout(1) << "Content hash: " + content_hash << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     // Use INSERT OR IGNORE to skip duplicate conversations (UNIQUE constraint on content_hash)
@@ -197,7 +198,7 @@ void RAGDatabase::archive_turn(const ConversationTurn& turn) {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare archive statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare archive statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return;
     }
 
@@ -208,13 +209,13 @@ void RAGDatabase::archive_turn(const ConversationTurn& turn) {
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        LOG_ERROR("Failed to archive turn: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to archive turn: " + std::string(sqlite3_errmsg(db)) << std::endl;
     } else {
         int64_t row_id = sqlite3_last_insert_rowid(db);
         if (row_id > 0) {
-            LOG_INFO("Archived conversation turn to RAG database (id=" + std::to_string(row_id) + ")");
+            dout(1) << "Archived conversation turn to RAG database (id=" + std::to_string(row_id) + ")" << std::endl;
         } else {
-            LOG_DEBUG("Skipped duplicate conversation (hash=" + content_hash.substr(0, 16) + "...)");
+            dout(1) << "Skipped duplicate conversation (hash=" + content_hash.substr(0, 16) + "...)" << std::endl;
         }
     }
 
@@ -225,7 +226,7 @@ void RAGDatabase::archive_turn(const ConversationTurn& turn) {
 }
 
 std::vector<SearchResult> RAGDatabase::search(const std::string& query, int max_results) {
-    LOG_DEBUG("Searching RAG database for: " + query);
+    dout(1) << "Searching RAG database for: " + query << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     std::vector<SearchResult> results;
@@ -273,7 +274,7 @@ std::vector<SearchResult> RAGDatabase::search(const std::string& query, int max_
         fts_query = "\"" + escaped_query + "\"";
     }
 
-    LOG_DEBUG("FTS5 query: " + fts_query);
+    dout(1) << "FTS5 query: " + fts_query << std::endl;
 
     // Use FTS5 search with BM25 ranking
     const char* sql = R"(
@@ -290,7 +291,7 @@ std::vector<SearchResult> RAGDatabase::search(const std::string& query, int max_
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare search statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare search statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return results;
     }
 
@@ -314,12 +315,12 @@ std::vector<SearchResult> RAGDatabase::search(const std::string& query, int max_
     }
 
     if (rc != SQLITE_DONE) {
-        LOG_ERROR("Search query failed: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Search query failed: " + std::string(sqlite3_errmsg(db)) << std::endl;
     }
 
     sqlite3_finalize(stmt);
 
-    LOG_INFO("Found " + std::to_string(results.size()) + " results for query: " + query);
+    dout(1) << "Found " + std::to_string(results.size()) + " results for query: " + query << std::endl;
     return results;
 }
 
@@ -335,7 +336,7 @@ size_t RAGDatabase::get_archived_turn_count() const {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare count statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare count statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return 0;
     }
 
@@ -349,13 +350,13 @@ size_t RAGDatabase::get_archived_turn_count() const {
 }
 
 void RAGDatabase::store_memory(const std::string& question, const std::string& answer) {
-    LOG_DEBUG("Storing memory: " + question);
+    dout(1) << "Storing memory: " + question << std::endl;
 
     // Create a ConversationTurn and archive it
     ConversationTurn turn(question, answer);
     archive_turn(turn);
 
-    LOG_INFO("Stored memory: question=" + question + ", answer=" + answer);
+    dout(1) << "Stored memory: question=" + question + ", answer=" + answer << std::endl;
 
     // Note: archive_turn() already calls check_and_prune_if_needed()
 }
@@ -365,7 +366,7 @@ bool RAGDatabase::clear_memory(const std::string& question) {
         return false;
     }
 
-    LOG_DEBUG("Clearing memory by question: " + question);
+    dout(1) << "Clearing memory by question: " + question << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
 
@@ -376,7 +377,7 @@ bool RAGDatabase::clear_memory(const std::string& question) {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare clear_memory statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare clear_memory statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return false;
     }
 
@@ -386,16 +387,16 @@ bool RAGDatabase::clear_memory(const std::string& question) {
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
-        LOG_ERROR("Failed to clear memory: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to clear memory: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return false;
     }
 
     int changes = sqlite3_changes(db);
     if (changes > 0) {
-        LOG_INFO("Cleared memory for question: " + question);
+        dout(1) << "Cleared memory for question: " + question << std::endl;
         return true;
     } else {
-        LOG_DEBUG("Memory not found for question: " + question);
+        dout(1) << "Memory not found for question: " + question << std::endl;
         return false;
     }
 }
@@ -418,8 +419,8 @@ void RAGDatabase::check_and_prune_if_needed() {
             return;
         }
 
-        LOG_INFO("Database size (" + std::to_string(current_size / (1024 * 1024)) + " MB) exceeds limit (" +
-                 std::to_string(max_db_size_ / (1024 * 1024)) + " MB), pruning oldest entries...");
+        dout(1) << "Database size (" + std::to_string(current_size / (1024 * 1024)) + " MB) exceeds limit (" +
+                 std::to_string(max_db_size_ / (1024 * 1024)) + " MB), pruning oldest entries..." << std::endl;
 
         sqlite3* db = static_cast<sqlite3*>(db_);
 
@@ -446,7 +447,7 @@ void RAGDatabase::check_and_prune_if_needed() {
             char* err_msg = nullptr;
             int rc = sqlite3_exec(db, delete_sql.c_str(), nullptr, nullptr, &err_msg);
             if (rc != SQLITE_OK) {
-                LOG_ERROR("Failed to delete old entries: " + std::string(err_msg));
+                std::cerr << "Failed to delete old entries: " + std::string(err_msg) << std::endl;
                 sqlite3_free(err_msg);
                 break;
             }
@@ -456,47 +457,47 @@ void RAGDatabase::check_and_prune_if_needed() {
             total_entries -= deleted;
 
             // Run VACUUM to reclaim space (this is expensive but necessary)
-            LOG_DEBUG("Running VACUUM to reclaim space...");
+            dout(1) << "Running VACUUM to reclaim space..." << std::endl;
             rc = sqlite3_exec(db, "VACUUM", nullptr, nullptr, &err_msg);
             if (rc != SQLITE_OK) {
-                LOG_WARN("VACUUM failed: " + std::string(err_msg));
+                dout(1) << std::string("WARNING: ") +"VACUUM failed: " + std::string(err_msg) << std::endl;
                 sqlite3_free(err_msg);
             }
 
             // Check new size
             current_size = std::filesystem::file_size(db_path_);
 
-            LOG_DEBUG("Deleted " + std::to_string(deleted) + " entries, new size: " +
-                     std::to_string(current_size / (1024 * 1024)) + " MB");
+            dout(1) << "Deleted " + std::to_string(deleted) + " entries, new size: " +
+                     std::to_string(current_size / (1024 * 1024)) + " MB" << std::endl;
 
             // Safety check: if we deleted a batch but size didn't decrease much, stop
             if (deleted == 0) {
-                LOG_WARN("No entries deleted in batch, stopping pruning");
+                dout(1) << std::string("WARNING: ") +"No entries deleted in batch, stopping pruning" << std::endl;
                 break;
             }
         }
 
-        LOG_INFO("Pruning complete: deleted " + std::to_string(deleted_total) + " old entries, " +
-                 "final size: " + std::to_string(current_size / (1024 * 1024)) + " MB");
+        dout(1) << "Pruning complete: deleted " + std::to_string(deleted_total) + " old entries, " +
+                 "final size: " + std::to_string(current_size / (1024 * 1024)) + " MB" << std::endl;
 
     } catch (const std::filesystem::filesystem_error& e) {
-        LOG_ERROR("Filesystem error during size check: " + std::string(e.what()));
+        std::cerr << "Filesystem error during size check: " + std::string(e.what()) << std::endl;
     }
 }
 
 void RAGDatabase::shutdown() {
-    LOG_DEBUG("RAGDatabase shutdown");
+    dout(1) << "RAGDatabase shutdown" << std::endl;
     if (db_) {
         sqlite3* db = static_cast<sqlite3*>(db_);
         sqlite3_close(db);
         db_ = nullptr;
-        LOG_INFO("RAG database connection closed");
+        dout(1) << "RAG database connection closed" << std::endl;
     }
 }
 
 // Fact storage implementation
 void RAGDatabase::set_fact(const std::string& key, const std::string& value) {
-    LOG_DEBUG("Setting fact: " + key);
+    dout(1) << "Setting fact: " + key << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     int64_t now = ConversationTurn::get_current_timestamp();
@@ -514,7 +515,7 @@ void RAGDatabase::set_fact(const std::string& key, const std::string& value) {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare set_fact statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare set_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return;
     }
 
@@ -526,9 +527,9 @@ void RAGDatabase::set_fact(const std::string& key, const std::string& value) {
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        LOG_ERROR("Failed to set fact: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to set fact: " + std::string(sqlite3_errmsg(db)) << std::endl;
     } else {
-        LOG_INFO("Set fact: " + key + " = " + value);
+        dout(1) << "Set fact: " + key + " = " + value << std::endl;
     }
 
     sqlite3_finalize(stmt);
@@ -539,7 +540,7 @@ std::string RAGDatabase::get_fact(const std::string& key) const {
         return "";
     }
 
-    LOG_DEBUG("Getting fact: " + key);
+    dout(1) << "Getting fact: " + key << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
 
@@ -549,7 +550,7 @@ std::string RAGDatabase::get_fact(const std::string& key) const {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare get_fact statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare get_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return "";
     }
 
@@ -558,7 +559,7 @@ std::string RAGDatabase::get_fact(const std::string& key) const {
     std::string value;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        LOG_DEBUG("Found fact: " + key + " = " + value);
+        dout(1) << "Found fact: " + key + " = " + value << std::endl;
         sqlite3_finalize(stmt);
         return value;
     }
@@ -595,14 +596,14 @@ std::string RAGDatabase::get_fact(const std::string& key) const {
 
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            LOG_DEBUG("Found fact with variation '" + variant + "': " + value);
+            dout(1) << "Found fact with variation '" + variant + "': " + value << std::endl;
             sqlite3_finalize(stmt);
             return value;
         }
         sqlite3_finalize(stmt);
     }
 
-    LOG_DEBUG("Fact not found: " + key);
+    dout(1) << "Fact not found: " + key << std::endl;
     return "";
 }
 
@@ -618,7 +619,7 @@ bool RAGDatabase::has_fact(const std::string& key) const {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare has_fact statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare has_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return false;
     }
 
@@ -634,7 +635,7 @@ bool RAGDatabase::clear_fact(const std::string& key) {
         return false;
     }
 
-    LOG_DEBUG("Clearing fact: " + key);
+    dout(1) << "Clearing fact: " + key << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     const char* sql = "DELETE FROM facts WHERE key = ?";
@@ -643,7 +644,7 @@ bool RAGDatabase::clear_fact(const std::string& key) {
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
-        LOG_ERROR("Failed to prepare clear_fact statement: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to prepare clear_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return false;
     }
 
@@ -653,16 +654,16 @@ bool RAGDatabase::clear_fact(const std::string& key) {
     sqlite3_finalize(stmt);
 
     if (rc != SQLITE_DONE) {
-        LOG_ERROR("Failed to clear fact: " + std::string(sqlite3_errmsg(db)));
+        std::cerr << "Failed to clear fact: " + std::string(sqlite3_errmsg(db)) << std::endl;
         return false;
     }
 
     int changes = sqlite3_changes(db);
     if (changes > 0) {
-        LOG_INFO("Cleared fact: " + key);
+        dout(1) << "Cleared fact: " + key << std::endl;
         return true;
     } else {
-        LOG_DEBUG("Fact not found: " + key);
+        dout(1) << "Fact not found: " + key << std::endl;
         return false;
     }
 }
@@ -672,7 +673,7 @@ std::unique_ptr<RAGDatabase> RAGManager::instance_ = nullptr;
 
 bool RAGManager::initialize(const std::string& db_path, size_t max_db_size) {
     if (instance_) {
-        LOG_WARN("RAGManager already initialized");
+        dout(1) << std::string("WARNING: ") +"RAGManager already initialized" << std::endl;
         return true;
     }
 
@@ -682,21 +683,21 @@ bool RAGManager::initialize(const std::string& db_path, size_t max_db_size) {
         try {
             rag_path = Config::get_default_memory_db_path();
         } catch (const ConfigError& e) {
-            LOG_ERROR("Failed to determine memory database path: " + std::string(e.what()));
+            std::cerr << "Failed to determine memory database path: " + std::string(e.what()) << std::endl;
             return false;
         }
     }
 
-    LOG_INFO("Initializing RAG system with database: " + rag_path + ", max size: " + std::to_string(max_db_size / (1024 * 1024)) + " MB");
+    dout(1) << "Initializing RAG system with database: " + rag_path + ", max size: " + std::to_string(max_db_size / (1024 * 1024)) + " MB" << std::endl;
     instance_ = std::make_unique<RAGDatabase>(rag_path, max_db_size);
 
     if (!instance_->initialize()) {
-        LOG_ERROR("Failed to initialize RAG database");
+        std::cerr << "Failed to initialize RAG database" << std::endl;
         instance_.reset();
         return false;
     }
 
-    LOG_INFO("RAG system initialized successfully");
+    dout(1) << "RAG system initialized successfully" << std::endl;
     return true;
 }
 
@@ -704,13 +705,13 @@ void RAGManager::shutdown() {
     if (instance_) {
         instance_->shutdown();
         instance_.reset();
-        LOG_INFO("RAG system shutdown complete");
+        dout(1) << "RAG system shutdown complete" << std::endl;
     }
 }
 
 void RAGManager::archive_turn(const ConversationTurn& turn) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot archive turn");
+        std::cerr << "RAGManager not initialized - cannot archive turn" << std::endl;
         return;
     }
     instance_->archive_turn(turn);
@@ -718,7 +719,7 @@ void RAGManager::archive_turn(const ConversationTurn& turn) {
 
 std::vector<SearchResult> RAGManager::search_memory(const std::string& query, int max_results) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot search");
+        std::cerr << "RAGManager not initialized - cannot search" << std::endl;
         return {};
     }
     return instance_->search(query, max_results);
@@ -726,7 +727,7 @@ std::vector<SearchResult> RAGManager::search_memory(const std::string& query, in
 
 size_t RAGManager::get_archived_turn_count() {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot get count");
+        std::cerr << "RAGManager not initialized - cannot get count" << std::endl;
         return 0;
     }
     return instance_->get_archived_turn_count();
@@ -739,7 +740,7 @@ bool RAGManager::is_initialized() {
 // Fact storage wrapper methods
 void RAGManager::set_fact(const std::string& key, const std::string& value) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot set fact");
+        std::cerr << "RAGManager not initialized - cannot set fact" << std::endl;
         return;
     }
     instance_->set_fact(key, value);
@@ -747,7 +748,7 @@ void RAGManager::set_fact(const std::string& key, const std::string& value) {
 
 std::string RAGManager::get_fact(const std::string& key) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot get fact");
+        std::cerr << "RAGManager not initialized - cannot get fact" << std::endl;
         return "";
     }
     return instance_->get_fact(key);
@@ -755,7 +756,7 @@ std::string RAGManager::get_fact(const std::string& key) {
 
 bool RAGManager::has_fact(const std::string& key) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot check fact");
+        std::cerr << "RAGManager not initialized - cannot check fact" << std::endl;
         return false;
     }
     return instance_->has_fact(key);
@@ -763,7 +764,7 @@ bool RAGManager::has_fact(const std::string& key) {
 
 bool RAGManager::clear_fact(const std::string& key) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot clear fact");
+        std::cerr << "RAGManager not initialized - cannot clear fact" << std::endl;
         return false;
     }
     return instance_->clear_fact(key);
@@ -784,29 +785,29 @@ std::string RAGManager::get_search_tool_parameters() {
 
 std::string RAGManager::execute_search_tool(const std::string& query, int max_results) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute search tool");
+        std::cerr << "RAGManager not initialized - cannot execute search tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (query.empty()) {
-        LOG_ERROR("Search tool called with empty query");
+        std::cerr << "Search tool called with empty query" << std::endl;
         return "Error: Query parameter is required";
     }
 
-    LOG_DEBUG("SEARCH_MEMORY tool called with query: '" + query + "', max_results: " + std::to_string(max_results));
+    dout(1) << "SEARCH_MEMORY tool called with query: '" + query + "', max_results: " + std::to_string(max_results) << std::endl;
 
     try {
         auto search_results = search_memory(query, max_results);
 
         if (search_results.empty()) {
-            LOG_DEBUG("SEARCH_MEMORY: No results found");
+            dout(1) << "SEARCH_MEMORY: No results found" << std::endl;
             return "No archived conversations found matching: " + query;
         }
 
         std::ostringstream oss;
         oss << "Found " << search_results.size() << " archived conversation(s):\n\n";
 
-        LOG_DEBUG("SEARCH_MEMORY: Found " + std::to_string(search_results.size()) + " results:");
+        dout(1) << "SEARCH_MEMORY: Found " + std::to_string(search_results.size()) + " results:" << std::endl;
         for (size_t i = 0; i < search_results.size(); i++) {
             const auto& sr = search_results[i];
             oss << "Result " << (i + 1) << " [Relevance: "
@@ -815,15 +816,15 @@ std::string RAGManager::execute_search_tool(const std::string& query, int max_re
 
             // Log each result in debug
             std::string preview = sr.content.length() > 100 ? sr.content.substr(0, 100) + "..." : sr.content;
-            LOG_DEBUG("  [" + std::to_string(i + 1) + "] Score: " + std::to_string(sr.relevance_score) +
-                      ", Content preview: " + preview);
+            dout(1) << "  [" + std::to_string(i + 1) + "] Score: " + std::to_string(sr.relevance_score) +
+                      ", Content preview: " + preview << std::endl;
         }
 
-        LOG_DEBUG("SEARCH_MEMORY: Returning " + std::to_string(search_results.size()) + " results to model");
+        dout(1) << "SEARCH_MEMORY: Returning " + std::to_string(search_results.size()) + " results to model" << std::endl;
         return oss.str();
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing search tool: " + std::string(e.what()));
+        std::cerr << "Error executing search tool: " + std::string(e.what()) << std::endl;
         return "Error: Search failed - " + std::string(e.what());
     }
 }
@@ -843,28 +844,28 @@ std::string RAGManager::get_set_fact_tool_parameters() {
 
 std::string RAGManager::execute_set_fact_tool(const std::string& key, const std::string& value) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute set_fact tool");
+        std::cerr << "RAGManager not initialized - cannot execute set_fact tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (key.empty()) {
-        LOG_ERROR("set_fact called with empty key");
+        std::cerr << "set_fact called with empty key" << std::endl;
         return "Error: Key parameter is required";
     }
 
     if (value.empty()) {
-        LOG_ERROR("set_fact called with empty value");
+        std::cerr << "set_fact called with empty value" << std::endl;
         return "Error: Value parameter is required";
     }
 
-    LOG_DEBUG("SET_FACT tool called with key: '" + key + "', value: '" + value + "'");
+    dout(1) << "SET_FACT tool called with key: '" + key + "', value: '" + value + "'" << std::endl;
 
     try {
         set_fact(key, value);
-        LOG_INFO("SET_FACT: Stored fact '" + key + "'");
+        dout(1) << "SET_FACT: Stored fact '" + key + "'" << std::endl;
         return "Successfully stored fact: " + key;
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing set_fact tool: " + std::string(e.what()));
+        std::cerr << "Error executing set_fact tool: " + std::string(e.what()) << std::endl;
         return "Error: Failed to store fact - " + std::string(e.what());
     }
 }
@@ -884,29 +885,29 @@ std::string RAGManager::get_get_fact_tool_parameters() {
 
 std::string RAGManager::execute_get_fact_tool(const std::string& key) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute get_fact tool");
+        std::cerr << "RAGManager not initialized - cannot execute get_fact tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (key.empty()) {
-        LOG_ERROR("get_fact called with empty key");
+        std::cerr << "get_fact called with empty key" << std::endl;
         return "Error: Key parameter is required";
     }
 
-    LOG_DEBUG("GET_FACT tool called with key: '" + key + "'");
+    dout(1) << "GET_FACT tool called with key: '" + key + "'" << std::endl;
 
     try {
         std::string value = get_fact(key);
 
         if (value.empty()) {
-            LOG_DEBUG("GET_FACT: Fact '" + key + "' not found");
+            dout(1) << "GET_FACT: Fact '" + key + "' not found" << std::endl;
             return "Fact not found: " + key;
         }
 
-        LOG_DEBUG("GET_FACT: Retrieved fact '" + key + "' = '" + value + "'");
+        dout(1) << "GET_FACT: Retrieved fact '" + key + "' = '" + value + "'" << std::endl;
         return value;
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing get_fact tool: " + std::string(e.what()));
+        std::cerr << "Error executing get_fact tool: " + std::string(e.what()) << std::endl;
         return "Error: Failed to retrieve fact - " + std::string(e.what());
     }
 }
@@ -926,29 +927,29 @@ std::string RAGManager::get_clear_fact_tool_parameters() {
 
 std::string RAGManager::execute_clear_fact_tool(const std::string& key) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute clear_fact tool");
+        std::cerr << "RAGManager not initialized - cannot execute clear_fact tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (key.empty()) {
-        LOG_ERROR("clear_fact called with empty key");
+        std::cerr << "clear_fact called with empty key" << std::endl;
         return "Error: Key parameter is required";
     }
 
-    LOG_DEBUG("CLEAR_FACT tool called with key: '" + key + "'");
+    dout(1) << "CLEAR_FACT tool called with key: '" + key + "'" << std::endl;
 
     try {
         bool deleted = clear_fact(key);
 
         if (deleted) {
-            LOG_INFO("CLEAR_FACT: Deleted fact '" + key + "'");
+            dout(1) << "CLEAR_FACT: Deleted fact '" + key + "'" << std::endl;
             return "Successfully deleted fact: " + key;
         } else {
-            LOG_DEBUG("CLEAR_FACT: Fact '" + key + "' not found");
+            dout(1) << "CLEAR_FACT: Fact '" + key + "' not found" << std::endl;
             return "Fact not found: " + key;
         }
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing clear_fact tool: " + std::string(e.what()));
+        std::cerr << "Error executing clear_fact tool: " + std::string(e.what()) << std::endl;
         return "Error: Failed to delete fact - " + std::string(e.what());
     }
 }
@@ -956,7 +957,7 @@ std::string RAGManager::execute_clear_fact_tool(const std::string& key) {
 // Memory management wrapper methods
 void RAGManager::store_memory(const std::string& question, const std::string& answer) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot store memory");
+        std::cerr << "RAGManager not initialized - cannot store memory" << std::endl;
         return;
     }
     instance_->store_memory(question, answer);
@@ -964,7 +965,7 @@ void RAGManager::store_memory(const std::string& question, const std::string& an
 
 bool RAGManager::clear_memory(const std::string& question) {
     if (!instance_) {
-        LOG_ERROR("RAGManager not initialized - cannot clear memory");
+        std::cerr << "RAGManager not initialized - cannot clear memory" << std::endl;
         return false;
     }
     return instance_->clear_memory(question);
@@ -985,28 +986,28 @@ std::string RAGManager::get_store_memory_tool_parameters() {
 
 std::string RAGManager::execute_store_memory_tool(const std::string& question, const std::string& answer) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute store_memory tool");
+        std::cerr << "RAGManager not initialized - cannot execute store_memory tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (question.empty()) {
-        LOG_ERROR("store_memory called with empty question");
+        std::cerr << "store_memory called with empty question" << std::endl;
         return "Error: Question parameter is required";
     }
 
     if (answer.empty()) {
-        LOG_ERROR("store_memory called with empty answer");
+        std::cerr << "store_memory called with empty answer" << std::endl;
         return "Error: Answer parameter is required";
     }
 
-    LOG_DEBUG("STORE_MEMORY tool called with question: '" + question + "', answer: '" + answer + "'");
+    dout(1) << "STORE_MEMORY tool called with question: '" + question + "', answer: '" + answer + "'" << std::endl;
 
     try {
         store_memory(question, answer);
-        LOG_INFO("STORE_MEMORY: Stored Q/A pair");
+        dout(1) << "STORE_MEMORY: Stored Q/A pair" << std::endl;
         return "Successfully stored memory: " + question;
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing store_memory tool: " + std::string(e.what()));
+        std::cerr << "Error executing store_memory tool: " + std::string(e.what()) << std::endl;
         return "Error: Failed to store memory - " + std::string(e.what());
     }
 }
@@ -1026,29 +1027,29 @@ std::string RAGManager::get_clear_memory_tool_parameters() {
 
 std::string RAGManager::execute_clear_memory_tool(const std::string& question) {
     if (!is_initialized()) {
-        LOG_ERROR("RAGManager not initialized - cannot execute clear_memory tool");
+        std::cerr << "RAGManager not initialized - cannot execute clear_memory tool" << std::endl;
         return "Error: RAG system not initialized";
     }
 
     if (question.empty()) {
-        LOG_ERROR("clear_memory called with empty question");
+        std::cerr << "clear_memory called with empty question" << std::endl;
         return "Error: Question parameter is required";
     }
 
-    LOG_DEBUG("CLEAR_MEMORY tool called with question: '" + question + "'");
+    dout(1) << "CLEAR_MEMORY tool called with question: '" + question + "'" << std::endl;
 
     try {
         bool deleted = clear_memory(question);
 
         if (deleted) {
-            LOG_INFO("CLEAR_MEMORY: Deleted memory for question '" + question + "'");
+            dout(1) << "CLEAR_MEMORY: Deleted memory for question '" + question + "'" << std::endl;
             return "Successfully deleted memory: " + question;
         } else {
-            LOG_DEBUG("CLEAR_MEMORY: Memory not found for question '" + question + "'");
+            dout(1) << "CLEAR_MEMORY: Memory not found for question '" + question + "'" << std::endl;
             return "Memory not found: " + question;
         }
     } catch (const std::exception& e) {
-        LOG_ERROR("Error executing clear_memory tool: " + std::string(e.what()));
+        std::cerr << "Error executing clear_memory tool: " + std::string(e.what()) << std::endl;
         return "Error: Failed to delete memory - " + std::string(e.what());
     }
 }

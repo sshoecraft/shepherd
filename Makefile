@@ -1,18 +1,26 @@
 
-# Set this to your python virtual env if you have one setup and you installed tensorrt-llm in it
-VENV=~/venv
+# Uncomment and set this to your python virtual env if you have one setup and you installed tensorrt-llm in it
+#VENV:=/path/to/venv
 
-LLAMACPP=OFF
-TENSORRT=OFF
+LLAMACPP?=OFF
+TENSORRT?=OFF
 
+ifneq ("$(wildcard ~/.shepherd_opts)","")
+include ~/.shepherd_opts
+endif
 all:
 	(cd build && make -j16)
 
 # Build activation command if TensorRT is ON and VENV is set
 ifeq ($(TENSORRT),ON)
-ifneq ($(VENV),)
-_ACT=. $(VENV)/bin/activate &&
-endif
+  ifeq ($(VENV),)
+    ifneq ("$(wildcard ~/venv)","")
+     VENV=~/venv
+    endif
+  endif
+  ifneq ($(VENV),)
+    _ACT=. $(VENV)/bin/activate &&
+  endif
 endif
 
 config:

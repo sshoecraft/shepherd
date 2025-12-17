@@ -1,5 +1,5 @@
 #include "chat_template.h"
-#include "logger.h"
+#include "shepherd.h"
 #include "nlohmann/json.hpp"
 #include <ctime>
 
@@ -69,12 +69,13 @@ std::string Qwen3ThinkingTemplate::get_generation_prompt() const {
     // to tell the model "thinking is done, just respond"
     // This matches llama-server behavior with --reasoning-format auto
     if (config && !config->thinking) {
-        LOG_DEBUG("Qwen3ThinkingTemplate: thinking disabled, returning empty think block");
+        dout(2) << "Qwen3ThinkingTemplate: thinking disabled, returning empty think block" << std::endl;
         return "<|im_start|>assistant\n<think>\n\n</think>\n\n";
     }
     // When thinking is enabled, let the model do its thinking
-    LOG_DEBUG("Qwen3ThinkingTemplate: thinking enabled (config=" + std::string(config ? "valid" : "null") +
-              ", thinking=" + std::string(config ? (config->thinking ? "true" : "false") : "n/a") + ")");
+    dout(2) << "Qwen3ThinkingTemplate: thinking enabled (config=" + std::string(config ? "valid" : "null") +
+                 ", thinking=" + std::string(config ? (config->thinking ? "true" : "false") : "n/a") + "" << std::endl;
+
     return "<|im_start|>assistant\n";
 }
 
@@ -86,11 +87,11 @@ ModelFamily Qwen3ThinkingTemplate::get_family() const {
 
 std::string Llama2Template::format_message(const Message& msg) const {
     // Llama 2 uses [INST] tags for user messages
-    if (msg.type == Message::USER) {
+    if (msg.role == Message::USER) {
         return "[INST] " + msg.content + " [/INST]";
-    } else if (msg.type == Message::ASSISTANT) {
+    } else if (msg.role == Message::ASSISTANT) {
         return msg.content + "</s>";
-    } else if (msg.type == Message::TOOL) {
+    } else if (msg.role == Message::TOOL_RESPONSE) {
         // Tool results as user context
         return "[INST] Tool result: " + msg.content + " [/INST]";
     }
@@ -136,7 +137,7 @@ std::string Llama3Template::format_message(const Message& msg) const {
     std::string role = msg.get_role();
 
     // Llama 3 uses "ipython" role for tool results
-    if (msg.type == Message::TOOL) {
+    if (msg.role == Message::TOOL_RESPONSE) {
         role = "ipython";
     }
 
@@ -189,7 +190,7 @@ std::string GLM4Template::format_message(const Message& msg) const {
     std::string role = msg.get_role();
 
     // GLM-4 uses "observation" role for tool results
-    if (msg.type == Message::TOOL) {
+    if (msg.role == Message::TOOL_RESPONSE) {
         role = "observation";
     }
 
@@ -246,7 +247,7 @@ MinjaTemplate::~MinjaTemplate() {
 std::string MinjaTemplate::format_message(const Message& msg) const {
     // For assistant messages, use raw content (no template)
     // Templates are for formatting prompts, not parsing model outputs
-    if (msg.type == Message::ASSISTANT) {
+    if (msg.role == Message::ASSISTANT) {
         return msg.content;
     }
 
@@ -292,7 +293,7 @@ std::string MinjaTemplate::format_message(const Message& msg) const {
     // Render through template
     std::string rendered = (*template_ptr)->render(context);
 
-    LOG_DEBUG("MinjaTemplate rendered message: " + std::to_string(rendered.length()) + " chars");
+    dout(2) << "MinjaTemplate rendered message: " + std::to_string(rendered.length()) + " chars" << std::endl;
     return rendered;
 }
 
@@ -356,7 +357,7 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
     // Render through template
     std::string rendered = (*template_ptr)->render(context);
 
-    LOG_DEBUG("MinjaTemplate rendered system message: " + std::to_string(rendered.length()) + " chars");
+    dout(2) << "MinjaTemplate rendered system message: " + std::to_string(rendered.length()) + " chars" << std::endl;
     return rendered;
 }
 
@@ -417,43 +418,39 @@ ModelFamily MinjaTemplate::get_family() const {
 
 // ==================== ChatTemplateFactory Implementation ====================
 
-std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& template_text,
-                                                            const ModelConfig& config,
-                                                            void* template_node_ptr,
-                                                            const std::string& eos_token,
-                                                            const std::string& bos_token) {
-    LOG_DEBUG("ChatTemplateFactory creating template for family: " + std::to_string(static_cast<int>(config.family)));
+std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& template_text, const ModelConfig& config, void* template_node_ptr, const std::string& eos_token, const std::string& bos_token) {
+    dout(2) << "ChatTemplateFactory creating template for family: " + std::to_string(static_cast<int>(config.family)) << std::endl;
 
     switch (config.family) {
         case ModelFamily::QWEN_2_X:
-            LOG_INFO("Creating ChatMLTemplate for Qwen 2.x");
+            dout(1) << "Creating ChatMLTemplate for Qwen 2.x" << std::endl;
             return std::make_unique<ChatMLTemplate>();
 
         case ModelFamily::QWEN_3_X:
             // Use thinking template for Qwen 3.x models that support thinking
             if (config.supports_thinking_mode) {
-                LOG_INFO("Creating Qwen3ThinkingTemplate for thinking model");
+                dout(1) << "Creating Qwen3ThinkingTemplate for thinking model" << std::endl;
                 return std::make_unique<Qwen3ThinkingTemplate>();
             }
-            LOG_INFO("Creating ChatMLTemplate for Qwen 3.x (non-thinking)");
+            dout(1) << "Creating ChatMLTemplate for Qwen 3.x (non-thinking)" << std::endl;
             return std::make_unique<ChatMLTemplate>();
 
         case ModelFamily::LLAMA_2_X:
             // If model has a jinja template, use MinjaTemplate with tokens
             // Otherwise use hardcoded Llama2Template
             if (!template_text.empty() && template_node_ptr) {
-                LOG_INFO("Creating MinjaTemplate for Llama 2.x with custom template");
+                dout(1) << "Creating MinjaTemplate for Llama 2.x with custom template" << std::endl;
                 return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
             }
-            LOG_INFO("Creating Llama2Template for Llama 2.x");
+            dout(1) << "Creating Llama2Template for Llama 2.x" << std::endl;
             return std::make_unique<Llama2Template>();
 
         case ModelFamily::LLAMA_3_X:
-            LOG_INFO("Creating Llama3Template");
+            dout(1) << "Creating Llama3Template" << std::endl;
             return std::make_unique<Llama3Template>();
 
         case ModelFamily::GLM_4:
-            LOG_INFO("Creating GLM4Template");
+            dout(1) << "Creating GLM4Template" << std::endl;
             return std::make_unique<GLM4Template>();
 
         case ModelFamily::MISTRAL:
@@ -464,7 +461,7 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& tem
         case ModelFamily::FUNCTIONARY:
         case ModelFamily::GENERIC:
         default:
-            LOG_INFO("Creating MinjaTemplate for unknown/generic family");
+            dout(1) << "Creating MinjaTemplate for unknown/generic family" << std::endl;
             return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
     }
 }

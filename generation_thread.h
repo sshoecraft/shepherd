@@ -5,21 +5,28 @@
 #include <mutex>
 #include <condition_variable>
 #include <string>
+#include <functional>
 #include "thread_queue.h"
-#include "backends/backend.h"
+#include "backend.h"
 #include "message.h"
 
 // Forward declarations
 class Session;
 
+// Event callback type for generation (same signature as Backend::EventCallback)
+using EventCallback = std::function<bool(CallbackEvent event,
+                                         const std::string& content,
+                                         const std::string& name,
+                                         const std::string& id)>;
+
 // Request to generate a response
 struct GenerationRequest {
-    Message::Type type;
+    Message::Role role = Message::USER;
     std::string content;
     std::string tool_name;
     std::string tool_id;
-    int prompt_tokens;
-    int max_tokens;
+    int max_tokens = 0;
+    EventCallback callback;  // Event callback for streaming (CONTENT, TOOL_CALL, ERROR, STOP)
 };
 
 // GenerationThread - Runs session.add_message() in a separate thread

@@ -92,35 +92,19 @@ public:
 
     // Main message interface - handles eviction and delegates to backend
     /// @brief Add a message to the session with automatic eviction if needed
-    /// @param type Message type (USER, ASSISTANT, TOOL)
-    /// @param content Message content
-    /// @param tool_name Tool name (for TOOL messages)
-    /// @param tool_id Tool call ID (for TOOL messages)
-    /// @param prompt_tokens Estimated tokens for message (0 = auto-calculate)
-    /// @param max_tokens Max tokens for assistant response (0 = auto-calculate)
-    /// @return Response from backend (success, content, tool_calls, tokens)
-    Response add_message(Message::Type type, const std::string& content, const std::string& tool_name = "", const std::string& tool_id = "", int prompt_tokens = 0, int max_tokens = 0);
 
-    // Forward declaration for streaming callback
-    using StreamCallback = std::function<bool(const std::string& delta,
-                                              const std::string& accumulated,
-                                              const Response& partial_response)>;
-
-    /// Streaming version of add_message
-    /// @param type Message type (USER, ASSISTANT, TOOL, etc.)
+    /// @brief Add a message and generate response
+    /// @param role Message role (USER, ASSISTANT, TOOL_RESPONSE)
     /// @param content Message content
-    /// @param callback Streaming callback for incremental output
-    /// @param tool_name Tool name (for TOOL messages)
-    /// @param tool_id Tool call ID (for TOOL messages)
-    /// @param prompt_tokens Pre-calculated prompt tokens (0 = backend calculates)
+    /// @param tool_name Tool name (for TOOL_RESPONSE messages)
+    /// @param tool_id Tool call ID (for TOOL_RESPONSE messages)
     /// @param max_tokens Max tokens for assistant response (0 = auto-calculate)
-    /// @return Response from backend (success, content, tool_calls, tokens)
-    Response add_message_stream(Message::Type type, const std::string& content,
-                               StreamCallback callback,
-                               const std::string& tool_name = "",
-                               const std::string& tool_id = "",
-                               int prompt_tokens = 0,
-                               int max_tokens = 0);
+    /// All output flows through backend callback (CONTENT, TOOL_CALL, ERROR, STOP)
+    void add_message(Message::Role role,
+                    const std::string& content,
+                    const std::string& tool_name = "",
+                    const std::string& tool_id = "",
+                    int max_tokens = 0);
 
     // Eviction methods - used by both API and GPU backends
     // Two-pass strategy: Pass 1 evicts complete turns, Pass 2 evicts mini-turns
@@ -138,6 +122,9 @@ public:
 
     /// @brief Dump session contents to stdout for debugging
     void dump() const;
+
+    /// @brief Clear session context (messages and token counters)
+    void clear();
 
     /// @brief Switch to a different provider/backend
     /// @param new_backend New backend to switch to

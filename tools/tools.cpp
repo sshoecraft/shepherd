@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "tools.h"
 #include "../session.h"
-#include "../logger.h"
+
 #include <algorithm>
 #include <sstream>
 
@@ -60,7 +61,7 @@ void Tools::build_all_tools() {
         by_name[tool->name()] = tool.get();
     }
 
-    LOG_DEBUG("Tools::build_all_tools() - " + std::to_string(all_tools.size()) + " tools total");
+    dout(1) << "Tools::build_all_tools() - " + std::to_string(all_tools.size()) + " tools total" << std::endl;
 }
 
 Tool* Tools::get(const std::string& name) {
@@ -170,12 +171,24 @@ bool Tools::is_enabled(const std::string& name) {
     return true;
 }
 
-int Tools::handle_tools_args(const std::vector<std::string>& args) {
+int Tools::handle_tools_args(const std::vector<std::string>& args,
+                              std::function<void(const std::string&)> callback) {
+    // Help
+    if (!args.empty() && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")) {
+        callback("Usage: /tools [subcommand]\n"
+            "Subcommands:\n"
+            "  list              - List all tools with status\n"
+            "  enable <name...>  - Enable one or more tools\n"
+            "  disable <name...> - Disable one or more tools\n"
+            "  (no args)         - List all tools\n");
+        return 0;
+    }
+
     // No args or "list" - list all tools
     if (args.empty() || args[0] == "list") {
         auto tool_descriptions = list_with_descriptions();
 
-        printf("\n=== Available Tools (%zu) ===\n\n", tool_descriptions.size());
+        callback("\n=== Available Tools (" + std::to_string(tool_descriptions.size()) + ") ===\n\n");
 
         size_t enabled_count = 0;
         size_t disabled_count = 0;
@@ -188,21 +201,22 @@ int Tools::handle_tools_args(const std::vector<std::string>& args) {
                 disabled_count++;
             }
 
-            const char* status = tool_enabled ? "[enabled]" : "[DISABLED]";
-            printf("  %s %s\n", status, pair.first.c_str());
-            printf("    %s\n\n", pair.second.c_str());
+            std::string status = tool_enabled ? "[enabled]" : "[DISABLED]";
+            callback("  " + status + " " + pair.first + "\n");
+            callback("    " + pair.second + "\n\n");
         }
 
-        printf("Total: %zu tools (%zu enabled, %zu disabled)\n",
-               tool_descriptions.size(), enabled_count, disabled_count);
+        callback("Total: " + std::to_string(tool_descriptions.size()) + " tools (" +
+            std::to_string(enabled_count) + " enabled, " +
+            std::to_string(disabled_count) + " disabled)\n");
         return 0;
     }
 
     // "enable <tool1> [tool2] ..." - enable one or more tools
     if (args[0] == "enable") {
         if (args.size() < 2) {
-            printf("Usage: tools enable <tool_name> [tool_name2] ...\n");
-            return 1;
+            callback("Usage: /tools enable <tool_name> [tool_name2] ...\n");
+            return 0;
         }
 
         std::vector<std::string> not_found;
@@ -219,21 +233,21 @@ int Tools::handle_tools_args(const std::vector<std::string>& args) {
         }
 
         if (!enabled_tools.empty()) {
-            printf("Enabled: ");
+            std::string msg = "Enabled: ";
             for (size_t i = 0; i < enabled_tools.size(); i++) {
-                if (i > 0) printf(", ");
-                printf("%s", enabled_tools[i].c_str());
+                if (i > 0) msg += ", ";
+                msg += enabled_tools[i];
             }
-            printf("\n");
+            callback(msg + "\n");
         }
 
         if (!not_found.empty()) {
-            printf("Not found: ");
+            std::string msg = "Not found: ";
             for (size_t i = 0; i < not_found.size(); i++) {
-                if (i > 0) printf(", ");
-                printf("%s", not_found[i].c_str());
+                if (i > 0) msg += ", ";
+                msg += not_found[i];
             }
-            printf("\n");
+            callback(msg + "\n");
             return 1;
         }
 
@@ -243,8 +257,8 @@ int Tools::handle_tools_args(const std::vector<std::string>& args) {
     // "disable <tool1> [tool2] ..." - disable one or more tools
     if (args[0] == "disable") {
         if (args.size() < 2) {
-            printf("Usage: tools disable <tool_name> [tool_name2] ...\n");
-            return 1;
+            callback("Usage: /tools disable <tool_name> [tool_name2] ...\n");
+            return 0;
         }
 
         std::vector<std::string> not_found;
@@ -261,21 +275,21 @@ int Tools::handle_tools_args(const std::vector<std::string>& args) {
         }
 
         if (!disabled_tools.empty()) {
-            printf("Disabled: ");
+            std::string msg = "Disabled: ";
             for (size_t i = 0; i < disabled_tools.size(); i++) {
-                if (i > 0) printf(", ");
-                printf("%s", disabled_tools[i].c_str());
+                if (i > 0) msg += ", ";
+                msg += disabled_tools[i];
             }
-            printf("\n");
+            callback(msg + "\n");
         }
 
         if (!not_found.empty()) {
-            printf("Not found: ");
+            std::string msg = "Not found: ";
             for (size_t i = 0; i < not_found.size(); i++) {
-                if (i > 0) printf(", ");
-                printf("%s", not_found[i].c_str());
+                if (i > 0) msg += ", ";
+                msg += not_found[i];
             }
-            printf("\n");
+            callback(msg + "\n");
             return 1;
         }
 
@@ -283,63 +297,75 @@ int Tools::handle_tools_args(const std::vector<std::string>& args) {
     }
 
     // Unknown subcommand
-    printf("Usage: tools [list | enable <tool_name>... | disable <tool_name>...]\n");
+    callback("Usage: /tools [list | enable <tool_name>... | disable <tool_name>...]\n");
     return 1;
+}
+
+// Helper to extract string from std::any (handles both std::string and const char*)
+static std::string extract_string(const std::any& value) {
+    try {
+        return std::any_cast<std::string>(value);
+    } catch (const std::bad_any_cast&) {
+        try {
+            return std::any_cast<const char*>(value);
+        } catch (const std::bad_any_cast&) {
+            return "";
+        }
+    }
 }
 
 ToolResult Tools::execute(const std::string& tool_name, const std::map<std::string, std::any>& parameters) {
     Tool* tool = get(tool_name);
 
     if (!tool) {
-        return ToolResult(false, "", "Tool not found: " + tool_name);
+        ToolResult r(false, "", "Tool not found: " + tool_name);
+        r.summary = "Tool not found: " + tool_name;
+        return r;
     }
 
     if (!is_enabled(tool_name)) {
-        return ToolResult(false, "", "Tool is disabled: " + tool_name);
+        ToolResult r(false, "", "Tool is disabled: " + tool_name);
+        r.summary = "Tool is disabled: " + tool_name;
+        return r;
     }
 
     try {
         // Execute tool
         auto result = tool->execute(parameters);
 
-        // Convert result map to string
-        // Tools can return {"content": "..."} or {"output": "..."} or {"error": "..."}
-        std::string output;
+        // Extract summary if present
+        std::string summary;
+        if (result.find("summary") != result.end()) {
+            summary = extract_string(result["summary"]);
+        }
 
+        // Check for error
         if (result.find("error") != result.end()) {
-            try {
-                output = std::any_cast<std::string>(result["error"]);
-                return ToolResult(false, "", output);
-            } catch (const std::bad_any_cast&) {
-                return ToolResult(false, "", "Tool returned error but couldn't cast to string");
+            std::string error = extract_string(result["error"]);
+            if (!error.empty()) {
+                ToolResult r(false, "", error);
+                r.summary = summary.empty() ? error : summary;
+                return r;
             }
         }
 
-        // Check for "content" key (used by most tools)
+        // Extract content
+        std::string content;
         if (result.find("content") != result.end()) {
-            try {
-                output = std::any_cast<std::string>(result["content"]);
-                return ToolResult(true, output);
-            } catch (const std::bad_any_cast&) {
-                return ToolResult(false, "", "Tool returned content but couldn't cast to string");
-            }
+            content = extract_string(result["content"]);
+        } else if (result.find("output") != result.end()) {
+            content = extract_string(result["output"]);
         }
 
-        // Check for "output" key (legacy/alternative)
-        if (result.find("output") != result.end()) {
-            try {
-                output = std::any_cast<std::string>(result["output"]);
-                return ToolResult(true, output);
-            } catch (const std::bad_any_cast&) {
-                return ToolResult(false, "", "Tool returned output but couldn't cast to string");
-            }
-        }
-
-        // No recognized output key - return empty success
-        return ToolResult(true, "");
+        ToolResult r(true, content);
+        r.summary = summary;
+        return r;
 
     } catch (const std::exception& e) {
-        return ToolResult(false, "", std::string("Tool execution failed: ") + e.what());
+        std::string error = std::string("Tool execution failed: ") + e.what();
+        ToolResult r(false, "", error);
+        r.summary = error;
+        return r;
     }
 }
 
@@ -381,7 +407,7 @@ void Tools::populate_session_tools(Session& session) {
         session.tools.push_back(st);
     }
 
-    LOG_DEBUG("Populated session with " + std::to_string(session.tools.size()) + " tools");
+    dout(1) << "Populated session with " + std::to_string(session.tools.size()) + " tools" << std::endl;
 }
 
 void Tools::clear_category(const std::string& category) {

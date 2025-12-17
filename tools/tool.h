@@ -47,12 +47,15 @@ public:
 // Tool execution result
 struct ToolResult {
     bool success;
-    std::string content;
+    std::string content;   // Full data sent to model
+    std::string summary;   // One-line summary for display
     std::string error;
 
     ToolResult() : success(false) {}
     ToolResult(bool s, const std::string& c, const std::string& e = "")
         : success(s), content(c), error(e) {}
+    ToolResult(bool s, const std::string& c, const std::string& sum, const std::string& e)
+        : success(s), content(c), summary(sum), error(e) {}
 };
 
 // Utility functions for std::any conversion

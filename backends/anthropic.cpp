@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "nlohmann/json.hpp"
 #include "sse_parser.h"
+#include "../tools/utf8_sanitizer.h"
 #include <sstream>
 #include <algorithm>
 #include <vector>
@@ -11,25 +12,23 @@
 using json = nlohmann::json;
 
 // AnthropicBackend implementation
-AnthropicBackend::AnthropicBackend(size_t context_size)
-    : ApiBackend(context_size) {
+AnthropicBackend::AnthropicBackend(size_t context_size, Session& session, EventCallback callback)
+    : ApiBackend(context_size, session, callback) {
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
 
-    // Don't assume streaming - will test during initialize()
-
     // Detect model configuration from Models database
     model_config = Models::detect_from_api_model("anthropic", model_name);
     max_output_tokens = model_config.max_output_tokens;
-    LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
+    dout(1) << "Detected model config: context=" + std::to_string(model_config.context_window) +
               ", max_output=" + std::to_string(model_config.max_output_tokens) +
-              ", param_name=" + model_config.max_tokens_param_name);
+              ", param_name=" + model_config.max_tokens_param_name << std::endl;
 
     // Set API endpoint from config if provided
     if (!config->api_base.empty()) {
         api_endpoint = config->api_base;
-        LOG_INFO("Using custom Anthropic endpoint: " + api_endpoint);
+        dout(1) << "Using custom Anthropic endpoint: " + api_endpoint << std::endl;
     }
 
     // http_client is inherited from ApiBackend and already initialized
@@ -37,45 +36,57 @@ AnthropicBackend::AnthropicBackend(size_t context_size)
     // Parse backend-specific config if available
     parse_backend_config();
 
-    LOG_DEBUG("AnthropicBackend created");
-}
-
-AnthropicBackend::~AnthropicBackend() {
-}
-
-void AnthropicBackend::initialize(Session& session) {
-    LOG_INFO("Initializing Anthropic backend...");
+    // --- Initialization ---
 
     // Validate API key
     if (api_key.empty()) {
-        LOG_ERROR("Anthropic API key is required");
+        std::cerr << "Anthropic API key is required" << std::endl;
         throw std::runtime_error("Anthropic API key not configured");
     }
 
     // Auto-detect model if not specified
     if (model_name.empty()) {
         model_name = "claude-sonnet-4-5";
-        LOG_INFO("No model specified, using default: " + model_name);
+        dout(1) << "No model specified, using default: " + model_name << std::endl;
         model_config = Models::detect_from_api_model("anthropic", model_name);
-    max_output_tokens = model_config.max_output_tokens;
+        max_output_tokens = model_config.max_output_tokens;
     }
 
     // Set API version
     if (api_version.empty()) {
         api_version = "2023-06-01";
-        LOG_INFO("Using Anthropic API version: " + api_version);
+        dout(1) << "Using Anthropic API version: " + api_version << std::endl;
     }
 
     // Set context size from model config if not already set
-    if (context_size == 0 && model_config.context_window > 0) {
-        context_size = model_config.context_window;
-        LOG_INFO("Using model's context size: " + std::to_string(context_size));
+    if (this->context_size == 0 && model_config.context_window > 0) {
+        this->context_size = model_config.context_window;
+        dout(1) << "Using model's context size: " + std::to_string(this->context_size) << std::endl;
     }
 
-    // Call base class initialize() which handles calibration
-    ApiBackend::initialize(session);
+    // If context_size is still 0, try to query it from the API
+    if (this->context_size == 0) {
+        size_t api_context_size = query_model_context_size(model_name);
+        if (api_context_size > 0) {
+            this->context_size = api_context_size;
+            dout(1) << "Using API's context size: " + std::to_string(this->context_size) << std::endl;
+        }
+    }
 
-    LOG_INFO("Anthropic backend initialized successfully");
+    // Calibrate token counts (if enabled in config)
+    if (config->calibration) {
+        dout(1) << "Calibrating token counts..." << std::endl;
+        calibrate_token_counts(session);
+    } else {
+        dout(1) << "Calibration disabled, using default estimates" << std::endl;
+        session.system_message_tokens = estimate_message_tokens(session.system_message);
+        session.last_prompt_tokens = session.system_message_tokens;
+    }
+
+    dout(1) << "Anthropic backend initialized successfully" << std::endl;
+}
+
+AnthropicBackend::~AnthropicBackend() {
 }
 
 
@@ -114,7 +125,8 @@ Response AnthropicBackend::parse_http_response(const HttpResponse& http_response
 
     // Parse successful response
     try {
-        json json_resp = json::parse(http_response.body);
+        std::string sanitized_body = utf8_sanitizer::sanitize_utf8(http_response.body);
+        json json_resp = json::parse(sanitized_body);
 
         // Extract usage data
         if (json_resp.contains("usage") && json_resp["usage"].is_object()) {
@@ -175,7 +187,7 @@ Response AnthropicBackend::parse_http_response(const HttpResponse& http_response
                                 }
                             }
                         } catch (const std::exception& e) {
-                            LOG_WARN("Failed to parse tool call parameters: " + std::string(e.what()));
+                            dout(1) << std::string("WARNING: ") +"Failed to parse tool call parameters: " + std::string(e.what()) << std::endl;
                         }
                     }
 
@@ -225,10 +237,10 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
     for (const auto& msg : session.messages) {
         json jmsg;
 
-        if (msg.type == Message::USER) {
+        if (msg.role == Message::USER) {
             jmsg["role"] = "user";
             jmsg["content"] = msg.content;
-        } else if (msg.type == Message::ASSISTANT) {
+        } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
             // Check if content is JSON array (from tool_use blocks)
             try {
@@ -244,7 +256,7 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
                 // Not JSON, treat as regular text
                 jmsg["content"] = msg.content;
             }
-        } else if (msg.type == Message::TOOL) {
+        } else if (msg.role == Message::TOOL_RESPONSE) {
             // Tool results are user messages with tool_result content blocks
             jmsg["role"] = "user";
             jmsg["content"] = json::array({
@@ -310,7 +322,7 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
 }
 
 nlohmann::json AnthropicBackend::build_request(const Session& session,
-                                                Message::Type type,
+                                                Message::Role role,
                                                 const std::string& content,
                                                 const std::string& tool_name,
                                                 const std::string& tool_id,
@@ -339,10 +351,10 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
     for (const auto& msg : session.messages) {
         json jmsg;
 
-        if (msg.type == Message::USER) {
+        if (msg.role == Message::USER) {
             jmsg["role"] = "user";
             jmsg["content"] = msg.content;
-        } else if (msg.type == Message::ASSISTANT) {
+        } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
             // Check if content is JSON array (from tool_use blocks)
             try {
@@ -358,7 +370,7 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
                 // Not JSON, treat as regular text
                 jmsg["content"] = msg.content;
             }
-        } else if (msg.type == Message::TOOL) {
+        } else if (msg.role == Message::TOOL_RESPONSE) {
             jmsg["role"] = "user";
             jmsg["content"] = json::array({
                 {
@@ -376,10 +388,10 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
 
     // Add the new message
     json new_msg;
-    if (type == Message::USER) {
+    if (role == Message::USER) {
         new_msg["role"] = "user";
         new_msg["content"] = content;
-    } else if (type == Message::TOOL) {
+    } else if (role == Message::TOOL_RESPONSE) {
         new_msg["role"] = "user";
         new_msg["content"] = json::array({
             {
@@ -504,7 +516,7 @@ std::map<std::string, std::string> AnthropicBackend::get_api_headers() {
     // Add model-specific special headers if any
     for (const auto& [key, value] : model_config.special_headers) {
         headers[key] = value;
-        LOG_DEBUG("Adding special header: " + key + " = " + value);
+        dout(1) << "Adding special header: " + key + " = " + value << std::endl;
     }
 
     return headers;
@@ -513,32 +525,52 @@ std::map<std::string, std::string> AnthropicBackend::get_api_headers() {
 std::string AnthropicBackend::get_api_endpoint() {
     return api_endpoint;
 }
-Response AnthropicBackend::add_message_stream(Session& session,
-                                             Message::Type type,
-                                             const std::string& content,
-                                             StreamCallback callback,
-                                             const std::string& tool_name,
-                                             const std::string& tool_id,
-                                             int prompt_tokens,
-                                             int max_tokens) {
-    LOG_DEBUG("AnthropicBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
-             ", max_tokens=" + std::to_string(max_tokens));
+
+void AnthropicBackend::set_model(const std::string& model) {
+    model_name = model;
+    model_config = Models::detect_from_api_model("anthropic", model_name);
+    max_output_tokens = model_config.max_output_tokens;
+    dout(1) << "Model switched to: " + model_name +
+               ", max_output_tokens=" + std::to_string(max_output_tokens) << std::endl;
+}
+
+void AnthropicBackend::add_message(Session& session,
+                                       Message::Role role,
+                                       const std::string& content,
+                                       const std::string& tool_name,
+                                       const std::string& tool_id,
+                                       
+                                       int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "AnthropicBackend::add_message (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
 
     const int MAX_RETRIES = 3;
     int retry = 0;
 
     while (retry < MAX_RETRIES) {
         // Build request with entire session + new message + max_tokens
-        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+        nlohmann::json request = build_request(session, role, content, tool_name, tool_id, max_tokens);
 
         // Add streaming flag
         request["stream"] = true;
 
-        LOG_DEBUG("Sending streaming request to Anthropic API with max_tokens=" + std::to_string(max_tokens));
+        dout(1) << "Sending streaming request to Anthropic API with max_tokens=" + std::to_string(max_tokens) << std::endl;
 
         // Get headers and endpoint
         auto headers = get_api_headers();
         std::string endpoint = get_api_endpoint();
+
+        // Fire USER event callback before sending to provider
+        // This displays the user prompt when accepted
+        if (role == Message::USER && !content.empty()) {
+            callback(CallbackEvent::USER_PROMPT, content, "", "");
+        }
 
         // Streaming state
         Response accumulated_resp;
@@ -593,7 +625,7 @@ Response AnthropicBackend::add_message_stream(Session& session,
                                         block.value("name", ""),
                                         ""
                                     };
-                                    LOG_DEBUG("Tool use block starting: " + current_tool_block->name);
+                                    dout(1) << "Tool use block starting: " + current_tool_block->name << std::endl;
                                 }
                             }
                         }
@@ -607,12 +639,10 @@ Response AnthropicBackend::add_message_stream(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Invoke user callback with delta
-                                    if (callback) {
-                                        if (!callback(delta_text, accumulated_content, accumulated_resp)) {
-                                            // User requested stop
-                                            return false;
-                                        }
+                                    // Route through unified output filter
+                                    if (!output(delta_text)) {
+                                        // User requested cancellation
+                                        return false;
                                     }
                                 }
                                 else if (delta.contains("partial_json")) {
@@ -663,9 +693,9 @@ Response AnthropicBackend::add_message_stream(Session& session,
 
                                     accumulated_resp.tool_calls.push_back(tool_call);
 
-                                    LOG_DEBUG("Tool use block complete: " + current_tool_block->name);
+                                    dout(1) << "Tool use block complete: " + current_tool_block->name << std::endl;
                                 } catch (const std::exception& e) {
-                                    LOG_WARN("Failed to parse tool use JSON: " + std::string(e.what()));
+                                    dout(1) << std::string("WARNING: ") +"Failed to parse tool use JSON: " + std::string(e.what()) << std::endl;
                                 }
                                 current_tool_block.reset();
                             } else if (!accumulated_content.empty()) {
@@ -711,7 +741,7 @@ Response AnthropicBackend::add_message_stream(Session& session,
                         }
 
                     } catch (const std::exception& e) {
-                        LOG_WARN("Failed to parse Anthropic SSE data: " + std::string(e.what()));
+                        dout(1) << std::string("WARNING: ") +"Failed to parse Anthropic SSE data: " + std::string(e.what()) << std::endl;
                     }
 
                     return true; // Continue processing
@@ -743,23 +773,27 @@ Response AnthropicBackend::add_message_stream(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 // Evict messages
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 retry++;
-                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
-                        std::to_string(MAX_RETRIES) + ")");
+                dout(1) << "Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + "" << std::endl;
+
                 continue; // Retry
             }
 
-            return accumulated_resp; // Return error
+            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
+
+        // Flush any remaining output from the filter
+        flush_output();
 
         // Success - update session with messages
         if (stream_complete && accumulated_resp.success) {
@@ -786,12 +820,12 @@ Response AnthropicBackend::add_message_stream(Session& session,
             }
 
             // Add messages to session
-            Message user_msg(type, content, new_message_tokens);
+            Message user_msg(role, content, new_message_tokens);
             user_msg.tool_name = tool_name;
             user_msg.tool_call_id = tool_id;
             session.messages.push_back(user_msg);
 
-            if (type == Message::USER) {
+            if (role == Message::USER) {
                 session.last_user_message_index = session.messages.size() - 1;
                 session.last_user_message_tokens = new_message_tokens;
             }
@@ -816,10 +850,26 @@ Response AnthropicBackend::add_message_stream(Session& session,
                 session.last_prompt_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
             }
 
-            session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            // Update total tokens
+            if (accumulated_resp.prompt_tokens > 0) {
+                // Server provided token count - use it
+                session.total_tokens = accumulated_resp.prompt_tokens + assistant_tokens;
+            } else {
+                // Server didn't provide tokens - calculate from session messages
+                int total = 0;
+                for (const auto& msg : session.messages) {
+                    total += msg.tokens;
+                }
+                session.total_tokens = total;
+            }
         }
 
-        return accumulated_resp;
+        // Send tool calls via callback before STOP
+        for (const auto& tc : accumulated_resp.tool_calls) {
+            callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+        }
+
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
     }
 
     Response err_resp;
@@ -827,11 +877,44 @@ Response AnthropicBackend::add_message_stream(Session& session,
     err_resp.code = Response::ERROR;
     err_resp.finish_reason = "error";
     err_resp.error = "Max retries exceeded trying to fit context";
-    return err_resp;
+    callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
 }
 
 size_t AnthropicBackend::query_model_context_size(const std::string& model_name) {
     // Anthropic doesn't have a /v1/models endpoint to query
     // Return 0 to let models database handle known models
     return 0;
+}
+
+std::vector<std::string> AnthropicBackend::fetch_models() {
+    std::vector<std::string> result;
+
+    if (!http_client || api_key.empty()) {
+        return result;
+    }
+
+    // Build request to /v1/models (base URL, not chat endpoint)
+    std::map<std::string, std::string> headers;
+    headers["x-api-key"] = api_key;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["Content-Type"] = "application/json";
+
+    HttpResponse response = http_client->get("https://api.anthropic.com/v1/models", headers);
+
+    if (response.is_success()) {
+        try {
+            auto j = json::parse(response.body);
+            if (j.contains("data") && j["data"].is_array()) {
+                for (const auto& model : j["data"]) {
+                    if (model.contains("id") && model["id"].is_string()) {
+                        result.push_back(model["id"].get<std::string>());
+                    }
+                }
+            }
+        } catch (const json::exception& e) {
+            dout(1) << "Failed to parse Anthropic /models response: " + std::string(e.what()) << std::endl;
+        }
+    }
+
+    return result;
 }

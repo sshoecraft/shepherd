@@ -1,6 +1,6 @@
+#include "shepherd.h"
 
 #include "models.h"
-#include "logger.h"
 #include "tools/tool.h"
 #include "nlohmann/json.hpp"
 #include "llama.cpp/vendor/minja/minja.hpp"
@@ -17,6 +17,7 @@ std::map<std::string, ModelConfig> Models::provider_defaults;
 bool Models::initialized = false;
 std::string Models::custom_models_path;
 
+
 ModelConfig Models::detect_from_chat_template(const std::string& template_text, const std::string& model_path) {
     // Primary detection: Analyze chat template content (most reliable)
     ModelConfig config = detect_from_template_content(template_text, model_path);
@@ -27,7 +28,7 @@ ModelConfig Models::detect_from_chat_template(const std::string& template_text, 
     }
 
     // Return GENERIC - caller should try config.json before path analysis
-    LOG_DEBUG("Chat template detection returned generic, caller should try config.json");
+    dout(1) << "Chat template detection returned generic, caller should try config.json" << std::endl;
     return ModelConfig::create_generic();
 }
 
@@ -39,14 +40,14 @@ ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
     std::string config_file = model_dir + "/config.json";
     std::ifstream file(config_file);
     if (!file.is_open()) {
-        LOG_DEBUG("No config.json found at: " + config_file);
+        dout(1) << "No config.json found at: " + config_file << std::endl;
         return ModelConfig::create_generic();
     }
 
     std::string config_json((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     file.close();
 
-    LOG_DEBUG("Detecting model family from config.json...");
+    dout(1) << "Detecting model family from config.json..." << std::endl;
 
     // Helper lambda to extract string value after a key
     auto extract_string = [&config_json](const std::string& key) -> std::string {
@@ -64,35 +65,35 @@ ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
     // Check architecture field (TensorRT-LLM engine format, also works for HF)
     std::string architecture = extract_string("architecture");
     if (!architecture.empty()) {
-        LOG_DEBUG("Found architecture: " + architecture);
+        dout(1) << "Found architecture: " + architecture << std::endl;
 
         // Map architecture class names to model families
         if (architecture.find("Llama") != std::string::npos) {
             // Check for Llama 3.x specific tokens in the config
             if (config_json.find("<|begin_of_text|>") != std::string::npos ||
                 config_json.find("<|eom_id|>") != std::string::npos) {
-                LOG_INFO("Detected Llama 3.x from config.json architecture");
+                dout(1) << "Detected Llama 3.x from config.json architecture" << std::endl;
                 return ModelConfig::create_llama_3x();
             } else {
-                LOG_INFO("Detected Llama 2.x from config.json architecture");
+                dout(1) << "Detected Llama 2.x from config.json architecture" << std::endl;
                 return ModelConfig::create_llama_2x();
             }
         }
         else if (architecture.find("Qwen2") != std::string::npos && architecture.find("Qwen3") == std::string::npos) {
-            LOG_INFO("Detected Qwen 2.x from config.json architecture");
+            dout(1) << "Detected Qwen 2.x from config.json architecture" << std::endl;
             return ModelConfig::create_qwen_2x();
         }
         else if (architecture.find("Qwen") != std::string::npos) {
             // Qwen3 or generic Qwen
-            LOG_INFO("Detected Qwen 3.x from config.json architecture");
+            dout(1) << "Detected Qwen 3.x from config.json architecture" << std::endl;
             return ModelConfig::create_qwen_3x();
         }
         else if (architecture.find("GLM") != std::string::npos || architecture.find("ChatGLM") != std::string::npos) {
-            LOG_INFO("Detected GLM-4 from config.json architecture");
+            dout(1) << "Detected GLM-4 from config.json architecture" << std::endl;
             return ModelConfig::create_glm_4();
         }
         else if (architecture.find("Mistral") != std::string::npos) {
-            LOG_INFO("Detected Mistral from config.json architecture");
+            dout(1) << "Detected Mistral from config.json architecture" << std::endl;
             // Mistral uses similar format to Llama 2
             return ModelConfig::create_llama_2x();
         }
@@ -101,7 +102,7 @@ ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
     // Check model_type field (standard HuggingFace format)
     std::string model_type = extract_string("model_type");
     if (!model_type.empty()) {
-        LOG_DEBUG("Found model_type: " + model_type);
+        dout(1) << "Found model_type: " + model_type << std::endl;
 
         // Convert to lowercase for comparison
         std::transform(model_type.begin(), model_type.end(), model_type.begin(), ::tolower);
@@ -109,27 +110,27 @@ ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
         if (model_type == "llama") {
             if (config_json.find("<|begin_of_text|>") != std::string::npos ||
                 config_json.find("<|eom_id|>") != std::string::npos) {
-                LOG_INFO("Detected Llama 3.x from config.json model_type");
+                dout(1) << "Detected Llama 3.x from config.json model_type" << std::endl;
                 return ModelConfig::create_llama_3x();
             } else {
-                LOG_INFO("Detected Llama 2.x from config.json model_type");
+                dout(1) << "Detected Llama 2.x from config.json model_type" << std::endl;
                 return ModelConfig::create_llama_2x();
             }
         }
         else if (model_type == "qwen2") {
-            LOG_INFO("Detected Qwen 2.x from config.json model_type");
+            dout(1) << "Detected Qwen 2.x from config.json model_type" << std::endl;
             return ModelConfig::create_qwen_2x();
         }
         else if (model_type == "qwen" || model_type == "qwen3") {
-            LOG_INFO("Detected Qwen 3.x from config.json model_type");
+            dout(1) << "Detected Qwen 3.x from config.json model_type" << std::endl;
             return ModelConfig::create_qwen_3x();
         }
         else if (model_type == "chatglm" || model_type == "glm") {
-            LOG_INFO("Detected GLM-4 from config.json model_type");
+            dout(1) << "Detected GLM-4 from config.json model_type" << std::endl;
             return ModelConfig::create_glm_4();
         }
         else if (model_type == "mistral") {
-            LOG_INFO("Detected Mistral from config.json model_type");
+            dout(1) << "Detected Mistral from config.json model_type" << std::endl;
             return ModelConfig::create_llama_2x();
         }
     }
@@ -137,17 +138,17 @@ ModelConfig Models::detect_from_config_file(const std::string& model_dir) {
     // Check qwen_type field (TensorRT-LLM Qwen format)
     std::string qwen_type = extract_string("qwen_type");
     if (!qwen_type.empty()) {
-        LOG_DEBUG("Found qwen_type: " + qwen_type);
+        dout(1) << "Found qwen_type: " + qwen_type << std::endl;
         if (qwen_type == "qwen3") {
-            LOG_INFO("Detected Qwen 3.x from config.json qwen_type");
+            dout(1) << "Detected Qwen 3.x from config.json qwen_type" << std::endl;
             return ModelConfig::create_qwen_3x();
         } else if (qwen_type == "qwen2") {
-            LOG_INFO("Detected Qwen 2.x from config.json qwen_type");
+            dout(1) << "Detected Qwen 2.x from config.json qwen_type" << std::endl;
             return ModelConfig::create_qwen_2x();
         }
     }
 
-    LOG_DEBUG("Could not detect model family from config.json");
+    dout(1) << "Could not detect model family from config.json" << std::endl;
     return ModelConfig::create_generic();
 }
 
@@ -159,16 +160,16 @@ ModelConfig Models::detect_from_model_name(const std::string& model_name) {
 
 ModelConfig Models::detect_from_template_content(const std::string& template_text, const std::string& model_path) {
     if (template_text.empty()) {
-        LOG_DEBUG("Empty chat template, cannot detect from content");
+        dout(1) << "Empty chat template, cannot detect from content" << std::endl;
         return ModelConfig::create_generic();
     }
 
-    LOG_DEBUG("Detecting model family from chat template...");
+    dout(1) << "Detecting model family from chat template..." << std::endl;
 
     // Llama 3.x: Has "Environment: ipython" and <|eom_id|>
     if (template_text.find("Environment: ipython") != std::string::npos &&
         template_text.find("<|eom_id|>") != std::string::npos) {
-        LOG_INFO("Detected Llama 3.x model family from chat template");
+        dout(1) << "Detected Llama 3.x model family from chat template" << std::endl;
 
         // Try to extract version from model path
         std::string version = extract_version_from_path(model_path, "3.");
@@ -181,7 +182,7 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
 
     // GLM-4.x: Has <|observation|> role
     if (template_text.find("<|observation|>") != std::string::npos) {
-        LOG_INFO("Detected GLM-4.x model family from chat template");
+        dout(1) << "Detected GLM-4.x model family from chat template" << std::endl;
 
         std::string version = extract_version_from_path(model_path, "4.");
         if (version.empty()) {
@@ -202,7 +203,7 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
         if (model_lower.find("qwen3") != std::string::npos ||
             model_lower.find("qwen-3") != std::string::npos ||
             model_lower.find("mindlink") != std::string::npos) {
-            LOG_INFO("Detected Qwen 3.x model family (or MindLink derivative) from chat template");
+            dout(1) << "Detected Qwen 3.x model family (or MindLink derivative) from chat template" << std::endl;
 
             std::string version = extract_version_from_path(model_path, "3.");
             if (version.empty()) {
@@ -215,12 +216,12 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
                                (template_text.find("</think>") != std::string::npos) ||
                                (model_lower.find("thinking") != std::string::npos);
             if (is_thinking) {
-                LOG_INFO("Detected Thinking model variant");
+                dout(1) << "Detected Thinking model variant" << std::endl;
             }
 
             return ModelConfig::create_qwen_3x(version, is_thinking);
         } else {
-            LOG_INFO("Detected Qwen 2.x model family from chat template");
+            dout(1) << "Detected Qwen 2.x model family from chat template" << std::endl;
 
             std::string version = extract_version_from_path(model_path, "2.");
             if (version.empty()) {
@@ -237,11 +238,11 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
 
 ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     if (model_path.empty()) {
-        LOG_DEBUG("Empty model path, cannot detect");
+        dout(1) << "Empty model path, cannot detect" << std::endl;
         return ModelConfig::create_generic();
     }
 
-    LOG_DEBUG("Detecting model family from path: " + model_path);
+    dout(1) << "Detecting model family from path: " + model_path << std::endl;
 
     // Convert to lowercase for case-insensitive matching
     std::string model_lower = model_path;
@@ -250,7 +251,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     // Llama 3.x detection
     if (model_lower.find("llama-3") != std::string::npos ||
         model_lower.find("llama3") != std::string::npos) {
-        LOG_INFO("Detected Llama 3.x from model path");
+        dout(1) << "Detected Llama 3.x from model path" << std::endl;
         std::string version = extract_version_from_path(model_lower, "3.");
         if (version.empty()) {
             version = "3.1";
@@ -261,7 +262,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     // GLM-4.x detection
     if (model_lower.find("glm-4") != std::string::npos ||
         model_lower.find("glm4") != std::string::npos) {
-        LOG_INFO("Detected GLM-4 from model path");
+        dout(1) << "Detected GLM-4 from model path" << std::endl;
         std::string version = extract_version_from_path(model_lower, "4.");
         if (version.empty()) {
             version = "4";
@@ -273,7 +274,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     if (model_lower.find("qwen3") != std::string::npos ||
         model_lower.find("qwen-3") != std::string::npos ||
         model_lower.find("mindlink") != std::string::npos) {
-        LOG_INFO("Detected Qwen 3.x (or MindLink) from model path");
+        dout(1) << "Detected Qwen 3.x (or MindLink) from model path" << std::endl;
         std::string version = extract_version_from_path(model_lower, "3.");
         if (version.empty()) {
             version = "3";
@@ -282,7 +283,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
         // Path-based detection can't check template content, so be conservative
         bool is_thinking = (model_lower.find("thinking") != std::string::npos);
         if (is_thinking) {
-            LOG_INFO("Detected Thinking model variant from path");
+            dout(1) << "Detected Thinking model variant from path" << std::endl;
         }
         return ModelConfig::create_qwen_3x(version, is_thinking);
     }
@@ -290,7 +291,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     // Qwen 2.x detection
     if (model_lower.find("qwen2") != std::string::npos ||
         model_lower.find("qwen-2") != std::string::npos) {
-        LOG_INFO("Detected Qwen 2.x from model path");
+        dout(1) << "Detected Qwen 2.x from model path" << std::endl;
         std::string version = extract_version_from_path(model_lower, "2.");
         if (version.empty()) {
             version = "2.5";
@@ -299,7 +300,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
     }
 
     // No match - return generic
-    LOG_WARN("Could not detect specific model family from path, using generic configuration");
+    dout(1) << std::string("WARNING: ") +"Could not detect specific model family from path, using generic configuration" << std::endl;
     return ModelConfig::create_generic();
 }
 
@@ -334,7 +335,7 @@ void Models::init(const std::string& custom_path) {
         return;
     }
 
-    LOG_DEBUG("Initializing models database...");
+    dout(1) << "Initializing models database..." << std::endl;
 
     custom_models_path = custom_path;
     initialized = true;
@@ -345,10 +346,10 @@ void Models::init(const std::string& custom_path) {
     if (!custom_path.empty()) {
         loaded = load_models_database(custom_path);
         if (loaded) {
-            LOG_INFO("Loaded models database from: " + custom_path);
+            dout(1) << "Loaded models database from: " + custom_path << std::endl;
             return;
         }
-        LOG_WARN("Failed to load custom models file: " + custom_path);
+        dout(1) << std::string("WARNING: ") +"Failed to load custom models file: " + custom_path << std::endl;
     }
 
     // Check XDG config location first
@@ -367,7 +368,7 @@ void Models::init(const std::string& custom_path) {
         if (std::filesystem::exists(user_path)) {
             loaded = load_models_database(user_path);
             if (loaded) {
-                LOG_INFO("Loaded models database from: " + user_path);
+                dout(1) << "Loaded models database from: " + user_path << std::endl;
                 return;
             }
         }
@@ -375,18 +376,18 @@ void Models::init(const std::string& custom_path) {
 
     json_content = get_embedded_models_json();
     if (parse_models_json(json_content)) {
-        LOG_INFO("Loaded embedded models database");
+        dout(1) << "Loaded embedded models database" << std::endl;
         return;
     }
 
-    LOG_WARN("Failed to load models database, using provider defaults only");
+    dout(1) << std::string("WARNING: ") +"Failed to load models database, using provider defaults only" << std::endl;
 }
 
 bool Models::load_models_database(const std::string& path) {
     try {
         std::ifstream file(path);
         if (!file.is_open()) {
-            LOG_DEBUG("Could not open models file: " + path);
+            dout(1) << "Could not open models file: " + path << std::endl;
             return false;
         }
 
@@ -394,7 +395,7 @@ bool Models::load_models_database(const std::string& path) {
                                  std::istreambuf_iterator<char>());
         return parse_models_json(json_content);
     } catch (const std::exception& e) {
-        LOG_ERROR("Error loading models database from " + path + ": " + e.what());
+        std::cerr << "Error loading models database from " + path + ": " + e.what() << std::endl;
         return false;
     }
 }
@@ -910,15 +911,15 @@ bool Models::parse_models_json(const std::string& json_content) {
             }
         }
 
-        LOG_DEBUG("Parsed models database: " + std::to_string(model_database.size()) + 
-                  " models, " + std::to_string(pattern_database.size()) + " patterns");
+        dout(1) << "Parsed models database: " + std::to_string(model_database.size()) +
+                  " models, " + std::to_string(pattern_database.size()) + " patterns" << std::endl;
         return true;
 
     } catch (const nlohmann::json::exception& e) {
-        LOG_ERROR("Failed to parse models JSON: " + std::string(e.what()));
+        std::cerr << "Failed to parse models JSON: " + std::string(e.what()) << std::endl;
         return false;
     } catch (const std::exception& e) {
-        LOG_ERROR("Error parsing models JSON: " + std::string(e.what()));
+        std::cerr << "Error parsing models JSON: " + std::string(e.what()) << std::endl;
         return false;
     }
 }
@@ -967,13 +968,13 @@ ModelConfig Models::detect_from_api_model(const std::string& provider, const std
 
     auto exact_match = model_database.find(model_name);
     if (exact_match != model_database.end()) {
-        LOG_DEBUG("Found exact model match: " + model_name);
+        dout(1) << "Found exact model match: " + model_name << std::endl;
         return exact_match->second;
     }
 
     for (const auto& [pattern, pattern_config] : pattern_database) {
         if (matches_pattern(model_name, pattern)) {
-            LOG_DEBUG("Matched model pattern: " + pattern + " for " + model_name);
+            dout(1) << "Matched model pattern: " + pattern + " for " + model_name << std::endl;
             ModelConfig config = pattern_config;
             config.model_name = model_name;
             if (config.provider.empty()) {
@@ -983,7 +984,7 @@ ModelConfig Models::detect_from_api_model(const std::string& provider, const std
         }
     }
 
-    LOG_DEBUG("Unknown model: " + model_name + ", using provider defaults for " + provider);
+    dout(1) << "Unknown model: " + model_name + ", using provider defaults for " + provider << std::endl;
     ModelConfig config = get_provider_default(provider);
     config.model_name = model_name;
     return config;
@@ -1038,14 +1039,14 @@ bool Models::load_generation_config(const std::string& model_dir_path,
     std::filesystem::path gen_config_path = std::filesystem::path(model_dir_path) / "generation_config.json";
 
     if (!std::filesystem::exists(gen_config_path)) {
-        LOG_DEBUG("No generation_config.json found at: " + gen_config_path.string());
+        dout(1) << "No generation_config.json found at: " + gen_config_path.string() << std::endl;
         return false;
     }
 
     try {
         std::ifstream file(gen_config_path);
         if (!file.is_open()) {
-            LOG_WARN("Could not open generation_config.json: " + gen_config_path.string());
+            dout(1) << std::string("WARNING: ") +"Could not open generation_config.json: " + gen_config_path.string() << std::endl;
             return false;
         }
 
@@ -1056,30 +1057,30 @@ bool Models::load_generation_config(const std::string& model_dir_path,
 
         if (config.contains("temperature")) {
             temperature = config["temperature"].get<float>();
-            LOG_DEBUG("Loaded temperature from generation_config.json: " + std::to_string(temperature));
+            dout(1) << "Loaded temperature from generation_config.json: " + std::to_string(temperature) << std::endl;
             found_any = true;
         }
 
         if (config.contains("top_p")) {
             top_p = config["top_p"].get<float>();
-            LOG_DEBUG("Loaded top_p from generation_config.json: " + std::to_string(top_p));
+            dout(1) << "Loaded top_p from generation_config.json: " + std::to_string(top_p) << std::endl;
             found_any = true;
         }
 
         if (config.contains("top_k")) {
             top_k = config["top_k"].get<int>();
-            LOG_DEBUG("Loaded top_k from generation_config.json: " + std::to_string(top_k));
+            dout(1) << "Loaded top_k from generation_config.json: " + std::to_string(top_k) << std::endl;
             found_any = true;
         }
 
         if (found_any) {
-            LOG_INFO("Loaded sampling parameters from: " + gen_config_path.string());
+            dout(1) << "Loaded sampling parameters from: " + gen_config_path.string() << std::endl;
         }
 
         return found_any;
 
     } catch (const std::exception& e) {
-        LOG_WARN("Failed to parse generation_config.json: " + std::string(e.what()));
+        dout(1) << std::string("WARNING: ") +"Failed to parse generation_config.json: " + std::string(e.what()) << std::endl;
         return false;
     }
 }

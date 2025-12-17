@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "mcp_tool.h"
-#include "../logger.h"
 #include <sstream>
+
 
 MCPToolAdapter::MCPToolAdapter(std::shared_ptr<MCPClient> client, const MCPTool& mcp_tool)
     : client_(client), mcp_tool_(mcp_tool) {
@@ -75,7 +76,7 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
         // Convert Shepherd args to MCP JSON
         nlohmann::json mcp_args = args_to_json(args);
 
-        LOG_DEBUG("Executing MCP tool: " + mcp_tool_.name);
+        dout(1) << "Executing MCP tool: " + mcp_tool_.name << std::endl;
 
         // Call MCP tool
         nlohmann::json mcp_result = client_->call_tool(mcp_tool_.name, mcp_args);
@@ -104,9 +105,9 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
                                    " characters (" + std::to_string(line_count) + " lines)\n";
                     text_content += "Consider using pagination, filters, or reading specific sections.";
 
-                    LOG_WARN("Truncated MCP tool result from " + mcp_tool_.name +
+                    dout(1) << "WARNING: Truncated MCP tool result from " + mcp_tool_.name +
                             " (" + std::to_string(original_length) + " chars -> " +
-                            std::to_string(MAX_MCP_RESULT_CHARS) + " chars)");
+                            std::to_string(MAX_MCP_RESULT_CHARS) + " chars)" << std::endl;
                 }
 
                 result["success"] = true;
@@ -124,7 +125,7 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
         }
 
     } catch (const std::exception& e) {
-        LOG_ERROR("MCP tool execution failed: " + std::string(e.what()));
+        std::cerr << "MCP tool execution failed: " + std::string(e.what()) << std::endl;
         result["success"] = false;
         result["error"] = std::string("MCP error: ") + e.what();
     }
@@ -180,7 +181,7 @@ nlohmann::json MCPToolAdapter::args_to_json(const std::map<std::string, std::any
         } else if (value.type() == typeid(const char*)) {
             result[key] = std::string(std::any_cast<const char*>(value));
         } else {
-            LOG_DEBUG("Unknown parameter type for: " + key);
+            dout(1) << "Unknown parameter type for: " + key << std::endl;
         }
     }
 

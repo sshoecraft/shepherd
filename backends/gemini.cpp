@@ -2,14 +2,15 @@
 #include "shepherd.h"
 #include "nlohmann/json.hpp"
 #include "sse_parser.h"
+#include "../tools/utf8_sanitizer.h"
 #include <sstream>
 #include <algorithm>
 
 using json = nlohmann::json;
 
 // GeminiBackend implementation
-GeminiBackend::GeminiBackend(size_t context_size)
-    : ApiBackend(context_size) {
+GeminiBackend::GeminiBackend(size_t context_size, Session& session, EventCallback callback)
+    : ApiBackend(context_size, session, callback) {
     // Initialize with config values
     model_name = config->model;
     api_key = config->key;
@@ -17,14 +18,14 @@ GeminiBackend::GeminiBackend(size_t context_size)
     // Detect model configuration from Models database
     model_config = Models::detect_from_api_model("gemini", model_name);
     max_output_tokens = model_config.max_output_tokens;
-    LOG_DEBUG("Detected model config: context=" + std::to_string(model_config.context_window) +
+    dout(1) << "Detected model config: context=" + std::to_string(model_config.context_window) +
               ", max_output=" + std::to_string(model_config.max_output_tokens) +
-              ", param_name=" + model_config.max_tokens_param_name);
+              ", param_name=" + model_config.max_tokens_param_name << std::endl;
 
     // Set API endpoint from config if provided
     if (!config->api_base.empty()) {
         api_endpoint = config->api_base;
-        LOG_INFO("Using custom Gemini endpoint: " + api_endpoint);
+        dout(1) << "Using custom Gemini endpoint: " + api_endpoint << std::endl;
     }
 
     // http_client is inherited from ApiBackend and already initialized
@@ -32,39 +33,51 @@ GeminiBackend::GeminiBackend(size_t context_size)
     // Parse backend-specific config if available
     parse_backend_config();
 
-    LOG_DEBUG("GeminiBackend created");
-}
-
-GeminiBackend::~GeminiBackend() {
-}
-
-void GeminiBackend::initialize(Session& session) {
-    LOG_INFO("Initializing Gemini backend...");
+    // --- Initialization ---
 
     // Validate API key
     if (api_key.empty()) {
-        LOG_ERROR("Gemini API key is required");
+        std::cerr << "Gemini API key is required" << std::endl;
         throw std::runtime_error("Gemini API key not configured");
     }
 
     // Auto-detect model if not specified
     if (model_name.empty()) {
         model_name = "gemini-2.0-flash-exp";
-        LOG_INFO("No model specified, using default: " + model_name);
+        dout(1) << "No model specified, using default: " + model_name << std::endl;
         model_config = Models::detect_from_api_model("gemini", model_name);
-    max_output_tokens = model_config.max_output_tokens;
+        max_output_tokens = model_config.max_output_tokens;
     }
 
     // Set context size from model config if not already set
-    if (context_size == 0 && model_config.context_window > 0) {
-        context_size = model_config.context_window;
-        LOG_INFO("Using model's context size: " + std::to_string(context_size));
+    if (this->context_size == 0 && model_config.context_window > 0) {
+        this->context_size = model_config.context_window;
+        dout(1) << "Using model's context size: " + std::to_string(this->context_size) << std::endl;
     }
 
-    // Call base class initialize() which handles calibration
-    ApiBackend::initialize(session);
+    // If context_size is still 0, try to query it from the API
+    if (this->context_size == 0) {
+        size_t api_context_size = query_model_context_size(model_name);
+        if (api_context_size > 0) {
+            this->context_size = api_context_size;
+            dout(1) << "Using API's context size: " + std::to_string(this->context_size) << std::endl;
+        }
+    }
 
-    LOG_INFO("Gemini backend initialized successfully");
+    // Calibrate token counts (if enabled in config)
+    if (config->calibration) {
+        dout(1) << "Calibrating token counts..." << std::endl;
+        calibrate_token_counts(session);
+    } else {
+        dout(1) << "Calibration disabled, using default estimates" << std::endl;
+        session.system_message_tokens = estimate_message_tokens(session.system_message);
+        session.last_prompt_tokens = session.system_message_tokens;
+    }
+
+    dout(1) << "Gemini backend initialized successfully" << std::endl;
+}
+
+GeminiBackend::~GeminiBackend() {
 }
 
 size_t GeminiBackend::query_model_context_size(const std::string& model_name) {
@@ -75,7 +88,7 @@ size_t GeminiBackend::query_model_context_size(const std::string& model_name) {
 
 std::string GeminiBackend::make_get_request(const std::string& url) {
     if (!http_client) {
-        LOG_ERROR("HTTP client not initialized");
+        std::cerr << "HTTP client not initialized" << std::endl;
         return "";
     }
 
@@ -95,15 +108,54 @@ std::string GeminiBackend::make_get_request(const std::string& url) {
             } catch (...) {
                 error_msg = response.error_message.empty() ? error_msg : response.error_message;
             }
-            LOG_ERROR("Authentication failed: " + error_msg);
+            std::cerr << "Authentication failed: " + error_msg << std::endl;
             throw BackendError("Authentication failed: " + error_msg);
         }
 
-        LOG_DEBUG("GET request to " + url + " failed: " + response.error_message);
+        dout(1) << "GET request to " + url + " failed: " + response.error_message << std::endl;
         return "";
     }
 
     return response.body;
+}
+
+std::vector<std::string> GeminiBackend::fetch_models() {
+    std::vector<std::string> result;
+
+    if (!http_client || api_key.empty()) {
+        return result;
+    }
+
+    // Gemini uses query parameter for API key, endpoint is /v1beta/models
+    std::string url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + api_key;
+
+    std::map<std::string, std::string> headers;
+    headers["Content-Type"] = "application/json";
+
+    HttpResponse response = http_client->get(url, headers);
+
+    if (response.is_success()) {
+        try {
+            auto j = json::parse(response.body);
+            if (j.contains("models") && j["models"].is_array()) {
+                for (const auto& model : j["models"]) {
+                    if (model.contains("name") && model["name"].is_string()) {
+                        // Name is like "models/gemini-pro", extract just "gemini-pro"
+                        std::string name = model["name"].get<std::string>();
+                        size_t pos = name.find("models/");
+                        if (pos != std::string::npos) {
+                            name = name.substr(pos + 7);
+                        }
+                        result.push_back(name);
+                    }
+                }
+            }
+        } catch (const json::exception& e) {
+            dout(1) << "Failed to parse Gemini /models response: " + std::string(e.what()) << std::endl;
+        }
+    }
+
+    return result;
 }
 
 Response GeminiBackend::parse_http_response(const HttpResponse& http_response) {
@@ -134,7 +186,8 @@ Response GeminiBackend::parse_http_response(const HttpResponse& http_response) {
 
     // Parse successful response
     try {
-        json json_resp = json::parse(http_response.body);
+        std::string sanitized_body = utf8_sanitizer::sanitize_utf8(http_response.body);
+        json json_resp = json::parse(sanitized_body);
 
         // Extract token usage
         if (json_resp.contains("usageMetadata")) {
@@ -198,7 +251,7 @@ Response GeminiBackend::parse_http_response(const HttpResponse& http_response) {
                                     }
                                 }
                             } catch (const std::exception& e) {
-                                LOG_WARN("Failed to parse tool call parameters: " + std::string(e.what()));
+                                dout(1) << std::string("WARNING: ") +"Failed to parse tool call parameters: " + std::string(e.what()) << std::endl;
                             }
                         }
 
@@ -256,23 +309,23 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
     for (const auto& msg : session.messages) {
         json content;
 
-        if (msg.type == Message::USER) {
+        if (msg.role == Message::USER) {
             content["role"] = "user";
             content["parts"] = json::array({{{"text", msg.content}}});
-        } else if (msg.type == Message::ASSISTANT) {
+        } else if (msg.role == Message::ASSISTANT) {
             content["role"] = "model";
             // Check if this message has functionCall parts (stored as JSON)
             if (!msg.tool_calls_json.empty()) {
                 try {
                     content["parts"] = json::parse(msg.tool_calls_json);
                 } catch (const std::exception& e) {
-                    LOG_WARN("Failed to parse stored parts: " + std::string(e.what()));
+                    dout(1) << std::string("WARNING: ") +"Failed to parse stored parts: " + std::string(e.what()) << std::endl;
                     content["parts"] = json::array({{{"text", msg.content}}});
                 }
             } else {
                 content["parts"] = json::array({{{"text", msg.content}}});
             }
-        } else if (msg.type == Message::TOOL) {
+        } else if (msg.role == Message::TOOL_RESPONSE) {
             // Tool results in Gemini format
             content["role"] = "user";
             content["parts"] = json::array({
@@ -335,7 +388,7 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
 }
 
 nlohmann::json GeminiBackend::build_request(const Session& session,
-                                              Message::Type type,
+                                              Message::Role role,
                                               const std::string& content,
                                               const std::string& tool_name,
                                               const std::string& tool_id,
@@ -368,23 +421,23 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
     for (const auto& msg : session.messages) {
         json jcontent;
 
-        if (msg.type == Message::USER) {
+        if (msg.role == Message::USER) {
             jcontent["role"] = "user";
             jcontent["parts"] = json::array({{{"text", msg.content}}});
-        } else if (msg.type == Message::ASSISTANT) {
+        } else if (msg.role == Message::ASSISTANT) {
             jcontent["role"] = "model";
             // Check if this message has functionCall parts (stored as JSON)
             if (!msg.tool_calls_json.empty()) {
                 try {
                     jcontent["parts"] = json::parse(msg.tool_calls_json);
                 } catch (const std::exception& e) {
-                    LOG_WARN("Failed to parse stored parts: " + std::string(e.what()));
+                    dout(1) << std::string("WARNING: ") +"Failed to parse stored parts: " + std::string(e.what()) << std::endl;
                     jcontent["parts"] = json::array({{{"text", msg.content}}});
                 }
             } else {
                 jcontent["parts"] = json::array({{{"text", msg.content}}});
             }
-        } else if (msg.type == Message::TOOL) {
+        } else if (msg.role == Message::TOOL_RESPONSE) {
             jcontent["role"] = "user";
             jcontent["parts"] = json::array({
                 {
@@ -405,10 +458,10 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
 
     // Add the new message
     json new_content;
-    if (type == Message::USER) {
+    if (role == Message::USER) {
         new_content["role"] = "user";
         new_content["parts"] = json::array({{{"text", content}}});
-    } else if (type == Message::TOOL) {
+    } else if (role == Message::TOOL_RESPONSE) {
         new_content["role"] = "user";
         new_content["parts"] = json::array({
             {
@@ -523,25 +576,30 @@ std::string GeminiBackend::get_streaming_endpoint() {
     return api_endpoint + model_name + ":streamGenerateContent?alt=sse";
 }
 
-Response GeminiBackend::add_message_stream(Session& session,
-                                          Message::Type type,
-                                          const std::string& content,
-                                          StreamCallback callback,
-                                          const std::string& tool_name,
-                                          const std::string& tool_id,
-                                          int prompt_tokens,
-                                          int max_tokens) {
-    LOG_DEBUG("GeminiBackend::add_message_stream: prompt_tokens=" + std::to_string(prompt_tokens) +
-             ", max_tokens=" + std::to_string(max_tokens));
+void GeminiBackend::add_message(Session& session,
+                                    Message::Role role,
+                                    const std::string& content,
+                                    const std::string& tool_name,
+                                    const std::string& tool_id,
+                                    
+                                    int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "GeminiBackend::add_message (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
 
     const int MAX_RETRIES = 3;
     int retry = 0;
 
     while (retry < MAX_RETRIES) {
         // Build request with entire session + new message
-        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+        nlohmann::json request = build_request(session, role, content, tool_name, tool_id, max_tokens);
 
-        LOG_DEBUG("Sending streaming request to Gemini API");
+        dout(1) << "Sending streaming request to Gemini API" << std::endl;
 
         // Get headers and endpoint
         auto headers = get_api_headers();
@@ -549,6 +607,12 @@ Response GeminiBackend::add_message_stream(Session& session,
 
         // Enforce rate limits
         enforce_rate_limits();
+
+        // Fire USER event callback before sending to provider
+        // This displays the user prompt when accepted
+        if (role == Message::USER && !content.empty()) {
+            callback(CallbackEvent::USER_PROMPT, content, "", "");
+        }
 
         // Streaming state
         Response accumulated_resp;
@@ -591,12 +655,10 @@ Response GeminiBackend::add_message_stream(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Invoke user callback with delta
-                                    if (callback) {
-                                        if (!callback(delta_text, accumulated_content, accumulated_resp)) {
-                                            stream_complete = true;
-                                            return false;
-                                        }
+                                    // Route through unified output filter
+                                    if (!output(delta_text)) {
+                                        stream_complete = true;
+                                        return false;
                                     }
                                 }
 
@@ -625,7 +687,7 @@ Response GeminiBackend::add_message_stream(Session& session,
                         }
 
                     } catch (const std::exception& e) {
-                        LOG_WARN("Failed to parse Gemini SSE data: " + std::string(e.what()));
+                        dout(1) << std::string("WARNING: ") +"Failed to parse Gemini SSE data: " + std::string(e.what()) << std::endl;
                     }
 
                     return true; // Continue processing
@@ -654,36 +716,40 @@ Response GeminiBackend::add_message_stream(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
-                    return accumulated_resp;
+                    callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 retry++;
-                LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
-                        std::to_string(MAX_RETRIES) + ")");
+                dout(1) << "Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                        std::to_string(MAX_RETRIES) + "" << std::endl;
+
                 continue;
             }
 
-            return accumulated_resp;
+            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
+
+        // Flush any remaining output from the filter
+        flush_output();
 
         // Success - update session with messages
         if (stream_complete && accumulated_resp.success) {
-            // Estimate token counts if not provided by API
-            int new_message_tokens = prompt_tokens > 0 ? prompt_tokens : estimate_message_tokens(content);
+            // Estimate token counts
+            int new_message_tokens = estimate_message_tokens(content);
 
             // Add user message to session
-            Message user_msg(type, content, new_message_tokens);
+            Message user_msg(role, content, new_message_tokens);
             user_msg.tool_name = tool_name;
             user_msg.tool_call_id = tool_id;
             session.messages.push_back(user_msg);
             session.total_tokens += new_message_tokens;
 
-            if (type == Message::USER) {
+            if (role == Message::USER) {
                 session.last_user_message_index = session.messages.size() - 1;
                 session.last_user_message_tokens = new_message_tokens;
             }
@@ -710,17 +776,19 @@ Response GeminiBackend::add_message_stream(Session& session,
             }
         }
 
-        LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
+        dout(1) << "add_message complete: prompt_tokens=" + std::to_string(accumulated_resp.prompt_tokens) +
                   ", completion_tokens=" + std::to_string(accumulated_resp.completion_tokens) +
-                  ", finish_reason=" + accumulated_resp.finish_reason);
+                  ", finish_reason=" + accumulated_resp.finish_reason << std::endl;
 
-        return accumulated_resp;
+        // Send tool calls via callback before STOP
+        for (const auto& tc : accumulated_resp.tool_calls) {
+            callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+        }
+
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
     }
 
     // Max retries reached
-    Response error_resp;
-    error_resp.success = false;
-    error_resp.code = Response::ERROR;
-    error_resp.error = "Max retries reached";
-    return error_resp;
+    callback(CallbackEvent::ERROR, "Max retries reached", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 }

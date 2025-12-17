@@ -13,18 +13,16 @@ public:
     ModelConfig model_config;
     // model_name is inherited from Backend base class
 
-    explicit AnthropicBackend(size_t context_size);
+    AnthropicBackend(size_t context_size, Session& session, EventCallback callback);
     ~AnthropicBackend() override;
 
-    // Streaming support
-    Response add_message_stream(Session& session,
-                              Message::Type type,
-                              const std::string& content,
-                              StreamCallback callback,
-                              const std::string& tool_name = "",
-                              const std::string& tool_id = "",
-                              int prompt_tokens = 0,
-                              int max_tokens = 0) override;
+    // Override add_message to provide true streaming
+    void add_message(Session& session,
+                    Message::Role role,
+                    const std::string& content,
+                    const std::string& tool_name = "",
+                    const std::string& tool_id = "",
+                    int max_tokens = 0) override;
 
     // Implement pure virtual methods from ApiBackend
     Response parse_http_response(const HttpResponse& http_response) override;
@@ -32,7 +30,7 @@ public:
     nlohmann::json build_request_from_session(const Session& session, int max_tokens) override;
 
     nlohmann::json build_request(const Session& session,
-                                  Message::Type type,
+                                  Message::Role role,
                                   const std::string& content,
                                   const std::string& tool_name,
                                   const std::string& tool_id,
@@ -43,11 +41,15 @@ public:
     std::map<std::string, std::string> get_api_headers() override;
     std::string get_api_endpoint() override;
 
-    // Override initialize to add Anthropic-specific setup
-    void initialize(Session& session) override;
+    // Override set_model to update model_config when model changes
+    void set_model(const std::string& model) override;
 
     // Override query_model_context_size to use Models database
     size_t query_model_context_size(const std::string& model_name) override;
+
+protected:
+    // Query available models from Anthropic API
+    std::vector<std::string> fetch_models() override;
 
 private:
     /// @brief Make HTTP GET request to Anthropic docs/API

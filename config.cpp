@@ -1,7 +1,8 @@
+#include "shepherd.h"
 #include "config.h"
 #include "provider.h"
-#include "logger.h"
 #include "nlohmann/json.hpp"
+
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
@@ -62,6 +63,10 @@ void Config::set_defaults() {
 
 	// Auto-switch provider on connection failure (disabled by default)
 	auto_provider = false;
+
+	// TUI mode disabled by default (classic scrolling terminal)
+	tui = false;
+	tui_history = 10000;  // TUI scrollback buffer size
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -113,7 +118,8 @@ size_t Config::parse_size_string(const std::string& size_str) {
     } else if (suffix == "T" || suffix == "TB") {
         multiplier = 1024ULL * 1024 * 1024 * 1024;
     } else {
-        throw ConfigError("Invalid size suffix: " + suffix + " (use K, M, G, T, KB, MB, GB, or TB)");
+        throw ConfigError("Invalid size suffix: " + suffix + " (use K, M, G, T, KB, MB, GB, or TB");
+
     }
 
     return static_cast<size_t>(value * multiplier);
@@ -178,10 +184,10 @@ std::string Config::get_default_model_path() const {
 void Config::load() {
     std::string config_path = get_config_path();
 
-    LOG_DEBUG("Loading config from: " + config_path);
+    dout(1) << "Loading config from: " + config_path << std::endl;
 
     if (!std::filesystem::exists(config_path)) {
-        LOG_INFO("Config file not found, using defaults: " + config_path);
+        dout(1) << "Config file not found, using defaults: " + config_path << std::endl;
         return;
     }
 
@@ -192,7 +198,7 @@ void Config::load() {
         }
 
         file >> json;
-        LOG_DEBUG("Config file loaded, checking for mcp_servers key...");
+        dout(1) << "Config file loaded, checking for mcp_servers key..." << std::endl;
 
         // Load values with fallbacks to defaults
         if (json.contains("backend")) {
@@ -227,9 +233,9 @@ void Config::load() {
         if (json.contains("mcp_servers")) {
             // Store MCP servers as JSON string for MCPManager to parse
             mcp_config = json["mcp_servers"].dump();
-            LOG_DEBUG("Loaded MCP config: " + mcp_config);
+            dout(1) << "Loaded MCP config: " + mcp_config << std::endl;
         } else {
-            LOG_DEBUG("No mcp_servers found in config file");
+            dout(1) << "No mcp_servers found in config file" << std::endl;
         }
 
         // Load web search configuration (optional)
@@ -273,6 +279,11 @@ void Config::load() {
             auto_provider = json["auto_provider"].get<bool>();
         }
 
+        // Load TUI mode setting
+        if (json.contains("tui")) {
+            tui = json["tui"].get<bool>();
+        }
+
         // Load RAG memory database path (optional)
         if (json.contains("memory_database")) {
             memory_database = json["memory_database"];
@@ -301,7 +312,7 @@ void Config::load() {
             }
         }
 
-        LOG_INFO("Loaded configuration from: " + config_path);
+        dout(1) << "Loaded configuration from: " + config_path << std::endl;
 
     } catch (const json::exception& e) {
         throw ConfigError("Invalid JSON in config file: " + std::string(e.what()));
@@ -324,6 +335,7 @@ void Config::save() const {
             {"streaming", streaming},
             {"thinking", thinking},
             {"auto_provider", auto_provider},
+            {"tui", tui},
             {"truncate_limit", truncate_limit},
             {"max_db_size", max_db_size_str}
         };
@@ -354,7 +366,7 @@ void Config::save() const {
         }
 
         file << save_json.dump(4) << std::endl;
-        LOG_INFO("Saved configuration to: " + config_path);
+        dout(1) << "Saved configuration to: " + config_path << std::endl;
 
     } catch (const nlohmann::json::exception& e) {
         throw ConfigError("Error creating JSON: " + std::string(e.what()));
@@ -411,27 +423,42 @@ void Config::validate() const {
         throw ConfigError("max_db_size must be at least 1MB");
     }
 
-    LOG_DEBUG("Configuration validation passed");
+    dout(1) << "Configuration validation passed" << std::endl;
 }
 
 // Common config command implementation
-int handle_config_args(const std::vector<std::string>& args) {
+int handle_config_args(const std::vector<std::string>& args,
+                       std::function<void(const std::string&)> callback) {
     Config cfg;
     cfg.load();
 
+    // Help
+    if (!args.empty() && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")) {
+        callback("Usage: /config [subcommand]\n"
+            "Subcommands:\n"
+            "  show              - Show all config values\n"
+            "  set <key> <value> - Set config value\n"
+            "  (no args)         - Show all config values\n"
+            "Keys: warmup, calibration, streaming, thinking, tui,\n"
+            "      truncate_limit, max_db_size, web_search_provider,\n"
+            "      web_search_api_key, web_search_instance_url, memory_database\n");
+        return 0;
+    }
+
     // No args or "show" displays configuration
     if (args.empty() || args[0] == "show") {
-        std::cout << "=== Shepherd Configuration ===\n";
-        std::cout << "warmup = " << (cfg.warmup ? "true" : "false") << "\n";
-        std::cout << "calibration = " << (cfg.calibration ? "true" : "false") << "\n";
-        std::cout << "streaming = " << (cfg.streaming ? "true" : "false") << "\n";
-        std::cout << "thinking = " << (cfg.thinking ? "true" : "false") << "\n";
-        std::cout << "truncate_limit = " << cfg.truncate_limit << "\n";
-        std::cout << "max_db_size = " << cfg.max_db_size_str << "\n";
-        std::cout << "web_search_provider = " << (cfg.web_search_provider.empty() ? "" : cfg.web_search_provider) << "\n";
-        std::cout << "web_search_api_key = " << (cfg.web_search_api_key.empty() ? "" : "(set)") << "\n";
-        std::cout << "web_search_instance_url = " << (cfg.web_search_instance_url.empty() ? "" : cfg.web_search_instance_url) << "\n";
-        std::cout << "memory_database = " << (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) << "\n";
+        callback("=== Shepherd Configuration ===\n");
+        callback("warmup = " + std::string(cfg.warmup ? "true" : "false") + "\n");
+        callback("calibration = " + std::string(cfg.calibration ? "true" : "false") + "\n");
+        callback("streaming = " + std::string(cfg.streaming ? "true" : "false") + "\n");
+        callback("thinking = " + std::string(cfg.thinking ? "true" : "false") + "\n");
+        callback("tui = " + std::string(cfg.tui ? "true" : "false") + "\n");
+        callback("truncate_limit = " + std::to_string(cfg.truncate_limit) + "\n");
+        callback("max_db_size = " + cfg.max_db_size_str + "\n");
+        callback("web_search_provider = " + cfg.web_search_provider + "\n");
+        callback("web_search_api_key = " + std::string(cfg.web_search_api_key.empty() ? "" : "(set)") + "\n");
+        callback("web_search_instance_url = " + cfg.web_search_instance_url + "\n");
+        callback("memory_database = " + (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) + "\n");
         return 0;
     }
 
@@ -447,6 +474,8 @@ int handle_config_args(const std::vector<std::string>& args) {
             cfg.streaming = (value == "true" || value == "1" || value == "on");
         } else if (key == "thinking") {
             cfg.thinking = (value == "true" || value == "1" || value == "on");
+        } else if (key == "tui") {
+            cfg.tui = (value == "true" || value == "1" || value == "on");
         } else if (key == "truncate_limit") {
             cfg.truncate_limit = std::stoi(value);
         } else if (key == "max_db_size") {
@@ -460,16 +489,16 @@ int handle_config_args(const std::vector<std::string>& args) {
         } else if (key == "memory_database") {
             cfg.memory_database = value;
         } else {
-            std::cerr << "Unknown config key: " << key << "\n";
+            callback("Unknown config key: " + key + "\n");
             return 1;
         }
 
         cfg.save();
-        std::cout << "Config updated: " << key << " = " << value << "\n";
+        callback("Config updated: " + key + " = " + value + "\n");
         return 0;
     }
 
-    std::cerr << "Unknown config subcommand: " << args[0] << "\n";
-    std::cerr << "Available: show, set\n";
+    callback("Unknown config subcommand: " + args[0] + "\n");
+    callback("Available: show, set\n");
     return 1;
 }

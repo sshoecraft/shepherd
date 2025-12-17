@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <functional>
 
 // Forward declaration
 class Session;
@@ -53,7 +54,9 @@ public:
 
     // Command-line and slash command handler
     // Returns 0 on success, non-zero on error
-    int handle_tools_args(const std::vector<std::string>& args);
+    // callback: function to emit output
+    int handle_tools_args(const std::vector<std::string>& args,
+                          std::function<void(const std::string&)> callback);
 
     // Execute a tool by name with given parameters
     // Returns ToolResult with success/failure, content, and error

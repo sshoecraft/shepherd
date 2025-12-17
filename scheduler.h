@@ -6,6 +6,7 @@
 #include <atomic>
 #include <set>
 #include <csignal>
+#include <functional>
 #include "nlohmann/json.hpp"
 
 class Scheduler {
@@ -96,7 +97,9 @@ private:
 
 // Common scheduler command implementation (takes parsed args)
 // Returns 0 on success, 1 on error
-int handle_sched_args(const std::vector<std::string>& args);
+// callback: function to emit output
+int handle_sched_args(const std::vector<std::string>& args,
+                      std::function<void(const std::string&)> callback);
 
 // Handle scheduler slash commands (/sched) - interactive version
 // Returns true if command was handled, false otherwise

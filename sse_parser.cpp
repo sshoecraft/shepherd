@@ -1,9 +1,10 @@
+#include "shepherd.h"
 #include "sse_parser.h"
-#include "logger.h"
 #include <sstream>
 
+
 SSEParser::SSEParser() {
-    LOG_DEBUG("SSEParser created");
+    dout(1) << "SSEParser created" << std::endl;
 }
 
 bool SSEParser::process_chunk(const std::string& chunk, EventCallback callback) {
@@ -56,7 +57,7 @@ bool SSEParser::process_line(const std::string& line, EventCallback callback) {
 
     // Comment lines start with :
     if (!line.empty() && line[0] == ':') {
-        LOG_DEBUG("SSE comment: " + line);
+        dout(1) << "SSE comment: " + line << std::endl;
         return true;
     }
 
@@ -88,9 +89,9 @@ bool SSEParser::process_line(const std::string& line, EventCallback callback) {
         event_id_ = value;
     } else if (field == "retry") {
         // Ignore retry field (used for reconnection)
-        LOG_DEBUG("SSE retry field ignored: " + value);
+        dout(1) << "SSE retry field ignored: " + value << std::endl;
     } else {
-        LOG_DEBUG("Unknown SSE field: " + field);
+        dout(1) << "Unknown SSE field: " + field << std::endl;
     }
 
     return true;
@@ -108,9 +109,9 @@ bool SSEParser::dispatch_event(EventCallback callback) {
 
     // Only dispatch if we have data
     if (!event_data_.empty() || !event_type_.empty()) {
-        LOG_DEBUG("SSE event - type: '" + event_type_ +
+        dout(1) << "SSE event - type: '" + event_type_ +
                   "', data length: " + std::to_string(event_data_.length()) +
-                  ", id: '" + event_id_ + "'");
+                  ", id: '" + event_id_ + "'" << std::endl;
 
         bool continue_parsing = callback(event_type_, event_data_, event_id_);
 
@@ -137,5 +138,5 @@ void SSEParser::reset() {
     event_data_.clear();
     event_id_.clear();
     data_lines_.clear();
-    LOG_DEBUG("SSEParser reset");
+    dout(1) << "SSEParser reset" << std::endl;
 }

@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "command_tools.h"
 #include "tools.h"
-#include "../logger.h"
+
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -8,6 +9,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <cerrno>
 
 std::vector<ParameterDef> ExecuteCommandTool::get_parameters_schema() const {
     return {
@@ -39,41 +44,135 @@ std::map<std::string, std::any> ExecuteCommandTool::execute(const std::map<std::
             full_command = "cd \"" + working_dir + "\" && " + command;
         }
 
-        LOG_DEBUG("ExecuteCommand: Running: " + full_command);
+        dout(1) << "ExecuteCommand: Running: " + full_command << std::endl;
 
-        // Execute command and capture output
-        std::array<char, 128> buffer;
-        std::string stdout_output;
-        std::string stderr_output;
+        // Create pipes for stdout and stderr
+        int stdout_pipe[2];
+        int stderr_pipe[2];
 
-        // Use popen to capture stdout
-        std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(full_command.c_str(), "r"), pclose);
-
-        if (!pipe) {
-            result["error"] = std::string("failed to execute command");
+        if (pipe(stdout_pipe) == -1 || pipe(stderr_pipe) == -1) {
+            result["error"] = std::string("failed to create pipes");
             result["success"] = false;
             return result;
         }
 
-        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-            stdout_output += buffer.data();
+        pid_t pid = fork();
+
+        if (pid == -1) {
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            close(stderr_pipe[0]); close(stderr_pipe[1]);
+            result["error"] = std::string("failed to fork process");
+            result["success"] = false;
+            return result;
         }
 
-        int exit_code = pclose(pipe.release());
+        if (pid == 0) {
+            // Child process
+            close(stdout_pipe[0]);  // Close read end
+            close(stderr_pipe[0]);  // Close read end
+
+            dup2(stdout_pipe[1], STDOUT_FILENO);
+            dup2(stderr_pipe[1], STDERR_FILENO);
+
+            close(stdout_pipe[1]);
+            close(stderr_pipe[1]);
+
+            execl("/bin/sh", "sh", "-c", full_command.c_str(), nullptr);
+            _exit(127);  // exec failed
+        }
+
+        // Parent process
+        close(stdout_pipe[1]);  // Close write end
+        close(stderr_pipe[1]);  // Close write end
+
+        // Set non-blocking and read both pipes
+        fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
+        fcntl(stderr_pipe[0], F_SETFL, O_NONBLOCK);
+
+        std::string stdout_output;
+        std::string stderr_output;
+        char buffer[4096];
+
+        // Read from both pipes until child exits
+        int status;
+        bool stdout_open = true, stderr_open = true;
+
+        while (stdout_open || stderr_open) {
+            if (stdout_open) {
+                ssize_t n = read(stdout_pipe[0], buffer, sizeof(buffer));
+                if (n > 0) {
+                    stdout_output.append(buffer, n);
+                } else if (n == 0 || (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    stdout_open = false;
+                }
+            }
+            if (stderr_open) {
+                ssize_t n = read(stderr_pipe[0], buffer, sizeof(buffer));
+                if (n > 0) {
+                    stderr_output.append(buffer, n);
+                } else if (n == 0 || (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    stderr_open = false;
+                }
+            }
+            if (stdout_open || stderr_open) {
+                usleep(1000);  // Small sleep to avoid busy-waiting
+            }
+        }
+
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+
+        waitpid(pid, &status, 0);
+        int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 
         result["stdout"] = stdout_output;
-        result["stderr"] = stderr_output;  // Note: stderr capture would need more complex implementation
+        result["stderr"] = stderr_output;
         result["exit_code"] = exit_code;
         result["success"] = (exit_code == 0);
 
         // Format the output as a readable string
         if (exit_code == 0) {
-            result["content"] = "Command output:\n\n" + stdout_output;
+            if (stdout_output.empty()) {
+                result["content"] = std::string("Command completed successfully (no output)");
+                result["summary"] = std::string("Command completed successfully");
+            } else {
+                result["content"] = stdout_output;
+                int line_count = std::count(stdout_output.begin(), stdout_output.end(), '\n');
+                if (line_count == 0 && !stdout_output.empty()) line_count = 1;
+                result["summary"] = std::string("Output: ") + std::to_string(line_count) + " line" + (line_count != 1 ? "s" : "");
+            }
         } else {
-            result["content"] = "Command failed (exit code " + std::to_string(exit_code) + "):\n\n" + stdout_output;
+            // For errors, prefer stderr for summary, fallback to stdout
+            std::string error_summary = stderr_output.empty() ? stdout_output : stderr_output;
+            size_t newline = error_summary.find('\n');
+            if (newline != std::string::npos) {
+                error_summary = error_summary.substr(0, newline);
+            }
+            if (error_summary.empty()) {
+                error_summary = "Command failed (exit " + std::to_string(exit_code) + ")";
+            }
+            if (error_summary.length() > 80) {
+                error_summary = error_summary.substr(0, 77) + "...";
+            }
+
+            // Combine stdout and stderr for full content
+            std::string combined_output;
+            if (!stdout_output.empty()) combined_output += stdout_output;
+            if (!stderr_output.empty()) {
+                if (!combined_output.empty()) combined_output += "\n";
+                combined_output += stderr_output;
+            }
+
+            if (combined_output.empty()) {
+                result["content"] = std::string("Command failed (exit code ") + std::to_string(exit_code) + ")";
+            } else {
+                result["content"] = combined_output;
+            }
+            result["summary"] = error_summary;
+            result["error"] = error_summary;
         }
 
-        LOG_DEBUG("ExecuteCommand: Completed with exit code " + std::to_string(exit_code));
+        dout(1) << "ExecuteCommand: Completed with exit code " + std::to_string(exit_code) << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error executing command: ") + e.what();
@@ -104,16 +203,20 @@ std::map<std::string, std::any> GetEnvironmentVariableTool::execute(const std::m
 
     try {
         const char* env_value = std::getenv(name.c_str());
+        std::string value;
 
         if (env_value != nullptr) {
-            result["value"] = std::string(env_value);
+            value = std::string(env_value);
         } else {
-            result["value"] = default_value;
+            value = default_value;
         }
 
+        result["value"] = value;
+        result["content"] = name + "=" + value;
+        result["summary"] = name + "=" + (value.length() > 50 ? value.substr(0, 47) + "..." : value);
         result["success"] = true;
 
-        LOG_DEBUG("GetEnvironmentVariable: " + name + " = " + tool_utils::get_string(result, "value"));
+        dout(1) << "GetEnvironmentVariable: " + name + " = " + value << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error getting environment variable: ") + e.what();
@@ -136,7 +239,7 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
         std::string command = "ps aux";
 
         std::array<char, 128> buffer;
-        std::string output;
+        std::string ps_output;
 
         std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(command.c_str(), "r"), pclose);
 
@@ -147,7 +250,7 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
         }
 
         while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-            output += buffer.data();
+            ps_output += buffer.data();
         }
 
         int exit_code = pclose(pipe.release());
@@ -160,7 +263,7 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
 
         // Parse ps output
         std::vector<std::map<std::string, std::any>> processes;
-        std::istringstream stream(output);
+        std::istringstream stream(ps_output);
         std::string line;
 
         // Skip header line
@@ -198,9 +301,10 @@ std::map<std::string, std::any> ListProcessesTool::execute(const std::map<std::s
         }
 
         result["processes"] = processes;
+        result["summary"] = std::string("Listed ") + std::to_string(processes.size()) + " process" + (processes.size() != 1 ? "es" : "");
         result["success"] = true;
 
-        LOG_DEBUG("ListProcesses: Found " + std::to_string(processes.size()) + " processes");
+        dout(1) << "ListProcesses: Found " + std::to_string(processes.size()) + " processes" << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error listing processes: ") + e.what();
@@ -215,5 +319,5 @@ void register_command_tools(Tools& tools) {
     tools.register_tool(std::make_unique<GetEnvironmentVariableTool>());
     tools.register_tool(std::make_unique<ListProcessesTool>());
 
-    LOG_DEBUG("Registered command tools: execute_command, get_env, list_processes");
+    dout(1) << "Registered command tools: execute_command, get_env, list_processes" << std::endl;
 }

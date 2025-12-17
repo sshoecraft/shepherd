@@ -1,11 +1,11 @@
 #include "provider.h"
 #include "config.h"
-#include "logger.h"
-#include "terminal_io.h"
-#include "backends/backend.h"
+#include "backend.h"
 #include "backends/factory.h"
 #include "session.h"
 #include "shepherd.h"
+#include "tools/tools.h"
+#include "tools/api_tools.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -57,7 +57,7 @@ std::vector<Provider> Provider::load_providers() {
                 }
                 result.push_back(std::move(p));
             } catch (const std::exception& e) {
-                LOG_ERROR("Failed to load provider " + entry.path().string() + ": " + e.what());
+                std::cerr << "Failed to load provider " + entry.path().string() + ": " + e.what() << std::endl;
             }
         }
     }
@@ -107,6 +107,7 @@ Provider Provider::from_json(const json& j) {
     p.gpu_id = j.value("gpu_id", 0);
     p.n_batch = j.value("n_batch", 512);
     p.n_threads = j.value("n_threads", 0);
+    p.cache_type = j.value("cache_type", "f16");
 
     // Sampling parameters
     p.temperature = j.value("temperature", 0.7f);
@@ -194,6 +195,7 @@ json Provider::to_json() const {
         if (type == "llamacpp") {
             j["n_batch"] = n_batch;
             if (n_threads > 0) j["n_threads"] = n_threads;
+            j["cache_type"] = cache_type;
         }
     }
 
@@ -256,6 +258,7 @@ Provider Provider::from_config() {
     if (config->json.contains("gpu_id")) p.gpu_id = config->json["gpu_id"];
     if (config->json.contains("n_batch")) p.n_batch = config->json["n_batch"];
     if (config->json.contains("n_threads")) p.n_threads = config->json["n_threads"];
+    if (config->json.contains("cache_type")) p.cache_type = config->json["cache_type"];
     if (config->json.contains("num_ctx")) p.num_ctx = config->json["num_ctx"];
     if (config->json.contains("num_predict")) p.num_predict = config->json["num_predict"];
 
@@ -284,19 +287,14 @@ void Provider::remove(const std::string& name) {
     }
 }
 
-std::unique_ptr<Backend> Provider::connect(Session& session) {
+std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallback callback) {
     extern std::unique_ptr<Config> config;
 
-    LOG_INFO("Connecting to provider: " + name + " (type: " + type + ")");
+    dout(1) << "Connecting to provider: " + name + " (type: " + type + ")" << std::endl;
 
-    // Print loading message (not for mpirun children, and route through TUI if active)
+    // Print loading message (not for mpirun children)
     if (!getenv("OMPI_COMM_WORLD_SIZE")) {
-        std::string msg = "Loading provider: " + name + "\n";
-        if (tio.tui_mode) {
-            tio.write(msg.c_str(), msg.length(), Color::GRAY);
-        } else {
-            std::cerr << "Loading provider: " << name << std::endl;
-        }
+        dout(1) << "Loading provider: " + name << std::endl;
     }
 
     // Set config globals from this provider
@@ -330,6 +328,7 @@ std::unique_ptr<Backend> Provider::connect(Session& session) {
         config->json["top_k"] = top_k;
         config->json["repeat_penalty"] = repeat_penalty;
         config->json["n_batch"] = n_batch;
+        config->json["cache_type"] = cache_type;
         if (n_threads > 0) config->json["n_threads"] = n_threads;
     } else if (type == "tensorrt") {
         config->model_path = model_path;
@@ -354,23 +353,20 @@ std::unique_ptr<Backend> Provider::connect(Session& session) {
         config->api_base = base_url.empty() ? "http://localhost:8000" : base_url;
     }
 
-    // Create and initialize backend
-    size_t ctx = (context_size > 0) ? context_size : config->context_size;
-    auto backend = BackendFactory::create_backend(type, ctx);
-
-    if (backend) {
-        backend->initialize(session);
-    }
-
-    return backend;
+    // Create backend (constructor handles all initialization)
+    // Command line --context-size takes precedence over provider config
+    size_t ctx = (config->context_size > 0) ? config->context_size : context_size;
+    return BackendFactory::create_backend(type, ctx, session, callback);
 }
 
 // Common provider command implementation
 int handle_provider_args(const std::vector<std::string>& args,
+                         std::function<void(const std::string&)> callback,
                          std::unique_ptr<Backend>* backend,
                          Session* session,
                          std::vector<Provider>* providers_ptr,
-                         std::string* current_provider) {
+                         std::string* current_provider,
+                         Tools* tools) {
 	// Load providers if not passed in
 	std::vector<Provider> local_providers;
 	std::vector<Provider>& providers = providers_ptr ? *providers_ptr : local_providers;
@@ -389,15 +385,15 @@ int handle_provider_args(const std::vector<std::string>& args,
 	// No args shows current provider (interactive mode only)
 	if (args.empty()) {
 		if (!current_provider || current_provider->empty()) {
-			std::cout << "No provider configured\n";
+			callback("No provider configured\n");
 		} else {
 			auto* prov = find_provider(*current_provider);
 			if (prov) {
-				std::cout << "Current provider: " << prov->name << "\n";
-				std::cout << "  Type: " << prov->type << "\n";
-				std::cout << "  Model: " << prov->model << "\n";
+				callback("Current provider: " + prov->name + "\n");
+				callback("  Type: " + prov->type + "\n");
+				callback("  Model: " + prov->model + "\n");
 				if (prov->is_api() && !prov->base_url.empty()) {
-					std::cout << "  Base URL: " << prov->base_url << "\n";
+					callback("  Base URL: " + prov->base_url + "\n");
 				}
 			}
 		}
@@ -406,16 +402,31 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 	std::string subcmd = args[0];
 
+	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+		callback("Usage: /provider [subcommand]\n"
+		    "Subcommands:\n"
+		    "  list           - List all providers\n"
+		    "  use <name>     - Switch to provider\n"
+		    "  show <name>    - Show provider details\n"
+		    "  add <name>     - Add new provider\n"
+		    "  set <name>     - Modify provider settings\n"
+		    "  edit <name>    - Edit provider JSON in $EDITOR\n"
+		    "  remove <name>  - Remove provider\n"
+		    "  next           - Try next provider\n"
+		    "  (no args)      - Show current provider\n");
+		return 0;
+	}
+
 	if (subcmd == "list") {
 		if (providers.empty()) {
-			std::cout << "No providers configured\n";
+			callback("No providers configured\n");
 		} else {
-			std::cout << "Available providers:\n";
+			callback("Available providers:\n");
 			for (const auto& p : providers) {
 				if (current_provider && p.name == *current_provider) {
-					std::cout << "  * " << p.name << " (current)\n";
+					callback("  * " + p.name + " (current)\n");
 				} else {
-					std::cout << "    " << p.name << "\n";
+					callback("    " + p.name + "\n");
 				}
 			}
 		}
@@ -424,8 +435,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 	if (subcmd == "add") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider add <name> --type <type> [options...]\n";
-			std::cerr << "Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n";
+			callback("Usage: provider add <name> --type <type> [options...]\n");
+			callback("Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n");
 			return 1;
 		}
 
@@ -434,7 +445,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		// Check if provider already exists
 		if (find_provider(name)) {
-			std::cerr << "Provider '" << name << "' already exists. Use 'provider set' to modify.\n";
+			callback("Provider '" + name + "' already exists. Use 'provider set' to modify.\n");
 			return 1;
 		}
 
@@ -461,177 +472,180 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		new_prov.save();
 		providers.push_back(new_prov);
-		std::cout << "Provider '" << name << "' added successfully\n";
+		callback("Provider '" + name + "' added successfully\n");
 		return 0;
 	}
 
 	if (subcmd == "show") {
 		std::string name = (args.size() >= 2) ? args[1] : (current_provider ? *current_provider : "");
 		if (name.empty()) {
-			std::cout << "No provider specified\n";
+			callback("No provider specified\n");
 			return 1;
 		}
 
 		auto* prov = find_provider(name);
 		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found\n";
+			callback("Provider '" + name + "' not found\n");
 			return 1;
 		}
 
-		std::cout << "=== Provider: " << prov->name << " ===\n";
+		callback("=== Provider: " + prov->name + " ===\n");
 
 		// Core fields
-		std::cout << "type = " << prov->type << "\n";
+		callback("type = " + prov->type + "\n");
 		if (prov->type != "cli") {
-			std::cout << "model = " << prov->model << "\n";
+			callback("model = " + prov->model + "\n");
 		}
-		std::cout << "priority = " << prov->priority << "\n";
+		callback("priority = " + std::to_string(prov->priority) + "\n");
 		if (prov->context_size > 0) {
-			std::cout << "context_size = " << prov->context_size << "\n";
+			callback("context_size = " + std::to_string(prov->context_size) + "\n");
 		}
 
 		// CLI backend fields
 		if (prov->type == "cli") {
-			std::cout << "base_url = " << (prov->base_url.empty() ? "http://localhost:8000" : prov->base_url) << "\n";
+			callback("base_url = " + (prov->base_url.empty() ? "http://localhost:8000" : prov->base_url) + "\n");
 		}
 
 		// API backend fields
 		if (prov->is_api()) {
-			std::cout << "api_key = " << (prov->api_key.empty() ? "not set" : "****") << "\n";
+			callback("api_key = " + std::string(prov->api_key.empty() ? "not set" : "****") + "\n");
 			if (!prov->base_url.empty()) {
-				std::cout << "base_url = " << prov->base_url << "\n";
+				callback("base_url = " + prov->base_url + "\n");
 			}
 			if (!prov->client_id.empty()) {
-				std::cout << "client_id = " << prov->client_id << "\n";
+				callback("client_id = " + prov->client_id + "\n");
 			}
 			if (!prov->client_secret.empty()) {
-				std::cout << "client_secret = ****\n";
+				callback("client_secret = ****\n");
 			}
 			if (!prov->token_url.empty()) {
-				std::cout << "token_url = " << prov->token_url << "\n";
+				callback("token_url = " + prov->token_url + "\n");
 			}
 			if (!prov->token_scope.empty()) {
-				std::cout << "token_scope = " << prov->token_scope << "\n";
+				callback("token_scope = " + prov->token_scope + "\n");
 			}
 			if (!prov->deployment_name.empty()) {
-				std::cout << "deployment_name = " << prov->deployment_name << "\n";
+				callback("deployment_name = " + prov->deployment_name + "\n");
 			}
 			if (!prov->api_version.empty()) {
-				std::cout << "api_version = " << prov->api_version << "\n";
+				callback("api_version = " + prov->api_version + "\n");
 			}
 			if (!prov->ssl_verify) {
-				std::cout << "ssl_verify = false\n";
+				callback("ssl_verify = false\n");
 			}
 			if (!prov->ca_bundle_path.empty()) {
-				std::cout << "ca_bundle_path = " << prov->ca_bundle_path << "\n";
+				callback("ca_bundle_path = " + prov->ca_bundle_path + "\n");
 			}
 		}
 
 		// Local backend fields
 		if (prov->type == "llamacpp" || prov->type == "tensorrt") {
-			std::cout << "model_path = " << prov->model_path << "\n";
-			std::cout << "tp = " << prov->tp << "\n";
-			std::cout << "pp = " << prov->pp << "\n";
-			std::cout << "gpu_layers = " << prov->gpu_layers << "\n";
+			callback("model_path = " + prov->model_path + "\n");
+			callback("tp = " + std::to_string(prov->tp) + "\n");
+			callback("pp = " + std::to_string(prov->pp) + "\n");
+			callback("gpu_layers = " + std::to_string(prov->gpu_layers) + "\n");
 			if (prov->type == "tensorrt") {
-				std::cout << "gpu_id = " << prov->gpu_id << "\n";
+				callback("gpu_id = " + std::to_string(prov->gpu_id) + "\n");
 			}
 			if (prov->type == "llamacpp") {
-				std::cout << "n_batch = " << prov->n_batch << "\n";
+				callback("n_batch = " + std::to_string(prov->n_batch) + "\n");
 				if (prov->n_threads > 0) {
-					std::cout << "n_threads = " << prov->n_threads << "\n";
+					callback("n_threads = " + std::to_string(prov->n_threads) + "\n");
 				}
+				callback("cache_type = " + prov->cache_type + "\n");
 			}
 		}
 
 		// Ollama specific
 		if (prov->type == "ollama") {
 			if (prov->num_ctx > 0) {
-				std::cout << "num_ctx = " << prov->num_ctx << "\n";
+				callback("num_ctx = " + std::to_string(prov->num_ctx) + "\n");
 			}
 			if (prov->num_predict != -1) {
-				std::cout << "num_predict = " << prov->num_predict << "\n";
+				callback("num_predict = " + std::to_string(prov->num_predict) + "\n");
 			}
 		}
 
 		// Sampling parameters (not used by CLI backend)
 		if (prov->type != "cli") {
-			std::cout << "temperature = " << prov->temperature << "\n";
-			std::cout << "top_p = " << prov->top_p << "\n";
-			std::cout << "top_k = " << prov->top_k << "\n";
-			std::cout << "repeat_penalty = " << prov->repeat_penalty << "\n";
+			callback("temperature = " + std::to_string(prov->temperature) + "\n");
+			callback("top_p = " + std::to_string(prov->top_p) + "\n");
+			callback("top_k = " + std::to_string(prov->top_k) + "\n");
+			callback("repeat_penalty = " + std::to_string(prov->repeat_penalty) + "\n");
 			if (prov->frequency_penalty != 0.0f) {
-				std::cout << "frequency_penalty = " << prov->frequency_penalty << "\n";
+				callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
 			}
 			if (prov->presence_penalty != 0.0f) {
-				std::cout << "presence_penalty = " << prov->presence_penalty << "\n";
+				callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
 			}
 			if (prov->max_tokens > 0) {
-				std::cout << "max_tokens = " << prov->max_tokens << "\n";
+				callback("max_tokens = " + std::to_string(prov->max_tokens) + "\n");
 			}
 			if (!prov->stop_sequences.empty()) {
-				std::cout << "stop_sequences = [";
+				std::string stops = "stop_sequences = [";
 				for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
-					if (i > 0) std::cout << ", ";
-					std::cout << "\"" << prov->stop_sequences[i] << "\"";
+					if (i > 0) stops += ", ";
+					stops += "\"" + prov->stop_sequences[i] + "\"";
 				}
-				std::cout << "]\n";
+				stops += "]\n";
+				callback(stops);
 			}
 		}
 
 		// Rate limits
 		if (prov->rate_limits.requests_per_second > 0) {
-			std::cout << "requests_per_second = " << prov->rate_limits.requests_per_second << "\n";
+			callback("requests_per_second = " + std::to_string(prov->rate_limits.requests_per_second) + "\n");
 		}
 		if (prov->rate_limits.requests_per_minute > 0) {
-			std::cout << "requests_per_minute = " << prov->rate_limits.requests_per_minute << "\n";
+			callback("requests_per_minute = " + std::to_string(prov->rate_limits.requests_per_minute) + "\n");
 		}
 		if (prov->rate_limits.tokens_per_minute > 0) {
-			std::cout << "tokens_per_minute = " << prov->rate_limits.tokens_per_minute << "\n";
+			callback("tokens_per_minute = " + std::to_string(prov->rate_limits.tokens_per_minute) + "\n");
 		}
 		if (prov->rate_limits.tokens_per_day > 0) {
-			std::cout << "tokens_per_day = " << prov->rate_limits.tokens_per_day << "\n";
+			callback("tokens_per_day = " + std::to_string(prov->rate_limits.tokens_per_day) + "\n");
 		}
 		if (prov->rate_limits.tokens_per_month > 0) {
-			std::cout << "tokens_per_month = " << prov->rate_limits.tokens_per_month << "\n";
+			callback("tokens_per_month = " + std::to_string(prov->rate_limits.tokens_per_month) + "\n");
 		}
 		if (prov->rate_limits.max_cost_per_month > 0) {
-			std::cout << "max_cost_per_month = " << prov->rate_limits.max_cost_per_month << "\n";
+			callback("max_cost_per_month = " + std::to_string(prov->rate_limits.max_cost_per_month) + "\n");
 		}
 
 		// Pricing
 		if (prov->pricing.dynamic) {
-			std::cout << "pricing_dynamic = true\n";
+			callback("pricing_dynamic = true\n");
 		}
 		if (prov->pricing.prompt_cost > 0) {
-			std::cout << "prompt_cost_per_million = " << prov->pricing.prompt_cost << "\n";
+			callback("prompt_cost_per_million = " + std::to_string(prov->pricing.prompt_cost) + "\n");
 		}
 		if (prov->pricing.completion_cost > 0) {
-			std::cout << "completion_cost_per_million = " << prov->pricing.completion_cost << "\n";
+			callback("completion_cost_per_million = " + std::to_string(prov->pricing.completion_cost) + "\n");
 		}
 
-		std::cout << "\nUse 'provider set " << prov->name << " <field> <value>' to modify\n";
+		callback("\nUse 'provider set " + prov->name + " <field> <value>' to modify\n");
 		return 0;
 	}
 
 	if (subcmd == "edit") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider edit <name>\n";
+			callback("Usage: provider edit <name>\n");
 			return 1;
 		}
 
 		std::string name = args[1];
 		auto* prov = find_provider(name);
 		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found\n";
+			callback("Provider '" + name + "' not found\n");
 			return 1;
 		}
 
-		std::cout << "Editing provider: " << prov->name << "\n";
-		std::cout << "Press Enter to keep current value, or type new value:\n\n";
+		callback("Editing provider: " + prov->name + "\n");
+		callback("Press Enter to keep current value, or type new value:\n\n");
 
-		auto prompt = [](const std::string& field, const std::string& current) -> std::string {
-			std::cout << field << " [" << current << "]: ";
+		// Note: edit command requires interactive stdin - only works in CLI mode
+		auto prompt = [&callback](const std::string& field, const std::string& current) -> std::string {
+			callback(field + " [" + current + "]: ");
 			std::string input;
 			std::getline(std::cin, input);
 			return input.empty() ? current : input;
@@ -662,11 +676,11 @@ int handle_provider_args(const std::vector<std::string>& args,
 		// Type-specific fields
 		if (prov->type == "cli") {
 			// CLI backend only needs base_url (host:port)
-			std::cout << "\n--- CLI Backend Settings ---\n";
+			callback("\n--- CLI Backend Settings ---\n");
 			std::string default_url = prov->base_url.empty() ? "http://localhost:8000" : prov->base_url;
 			prov->base_url = prompt("base_url", default_url);
 		} else if (prov->is_api()) {
-			std::cout << "\n--- API Backend Settings ---\n";
+			callback("\n--- API Backend Settings ---\n");
 			prov->model = prompt("model", prov->model);
 			std::string masked_key = prov->api_key.empty() ? "" : "****";
 			std::string new_key = prompt("api_key", masked_key);
@@ -678,12 +692,12 @@ int handle_provider_args(const std::vector<std::string>& args,
 			}
 
 			// Sampling parameters for API backends
-			std::cout << "\n--- Sampling Parameters ---\n";
+			callback("\n--- Sampling Parameters ---\n");
 			prov->temperature = prompt_float("temperature", prov->temperature);
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
 		} else if (prov->type == "llamacpp" || prov->type == "tensorrt") {
-			std::cout << "\n--- Local Backend Settings ---\n";
+			callback("\n--- Local Backend Settings ---\n");
 			prov->model = prompt("model", prov->model);
 			prov->model_path = prompt("model_path", prov->model_path);
 			prov->gpu_layers = prompt_int("gpu_layers", prov->gpu_layers);
@@ -693,25 +707,26 @@ int handle_provider_args(const std::vector<std::string>& args,
 			if (prov->type == "llamacpp") {
 				prov->n_batch = prompt_int("n_batch", prov->n_batch);
 				prov->n_threads = prompt_int("n_threads", prov->n_threads);
+				prov->cache_type = prompt("cache_type", prov->cache_type);
 			} else if (prov->type == "tensorrt") {
 				prov->gpu_id = prompt_int("gpu_id", prov->gpu_id);
 			}
 
 			// Sampling parameters
-			std::cout << "\n--- Sampling Parameters ---\n";
+			callback("\n--- Sampling Parameters ---\n");
 			prov->temperature = prompt_float("temperature", prov->temperature);
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
 			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
 		} else if (prov->type == "ollama") {
-			std::cout << "\n--- Ollama Settings ---\n";
+			callback("\n--- Ollama Settings ---\n");
 			prov->model = prompt("model", prov->model);
 			prov->base_url = prompt("base_url", prov->base_url.empty() ? "http://localhost:11434" : prov->base_url);
 			prov->num_ctx = prompt_int("num_ctx", prov->num_ctx);
 			prov->num_predict = prompt_int("num_predict", prov->num_predict);
 
 			// Sampling parameters
-			std::cout << "\n--- Sampling Parameters ---\n";
+			callback("\n--- Sampling Parameters ---\n");
 			prov->temperature = prompt_float("temperature", prov->temperature);
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
@@ -719,38 +734,38 @@ int handle_provider_args(const std::vector<std::string>& args,
 		}
 
 		// Confirm save
-		std::cout << "\nSave changes? (y/n): ";
+		callback("\nSave changes? (y/n): ");
 		std::string confirm;
 		std::getline(std::cin, confirm);
 		if (confirm == "y" || confirm == "Y" || confirm == "yes" || confirm == "Yes") {
 			prov->save();
-			std::cout << "Provider '" << name << "' updated successfully\n";
+			callback("Provider '" + name + "' updated successfully\n");
 		} else {
-			std::cout << "Edit cancelled\n";
+			callback("Edit cancelled\n");
 		}
 		return 0;
 	}
 
 	if (subcmd == "set") {
 		if (args.size() < 4) {
-			std::cerr << "Usage: provider set <name> <field> <value>\n";
-			std::cerr << "\nCommon fields:\n";
-			std::cerr << "  type, model, priority, context_size\n";
-			std::cerr << "\nAPI backends (openai, anthropic, gemini, ollama):\n";
-			std::cerr << "  api_key, base_url, client_id, client_secret, token_url, token_scope\n";
-			std::cerr << "  deployment_name, api_version, ssl_verify, ca_bundle_path\n";
-			std::cerr << "\nLocal backends (llamacpp, tensorrt):\n";
-			std::cerr << "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, n_threads\n";
-			std::cerr << "\nOllama:\n";
-			std::cerr << "  num_ctx, num_predict\n";
-			std::cerr << "\nSampling:\n";
-			std::cerr << "  temperature, top_p, top_k, repeat_penalty, frequency_penalty,\n";
-			std::cerr << "  presence_penalty, max_tokens\n";
-			std::cerr << "\nRate limits:\n";
-			std::cerr << "  requests_per_second, requests_per_minute, tokens_per_minute,\n";
-			std::cerr << "  tokens_per_day, tokens_per_month, max_cost_per_month\n";
-			std::cerr << "\nPricing:\n";
-			std::cerr << "  pricing_dynamic, prompt_cost_per_million, completion_cost_per_million\n";
+			callback("Usage: provider set <name> <field> <value>\n"
+			         "\nCommon fields:\n"
+			         "  type, model, priority, context_size\n"
+			         "\nAPI backends (openai, anthropic, gemini, ollama):\n"
+			         "  api_key, base_url, client_id, client_secret, token_url, token_scope\n"
+			         "  deployment_name, api_version, ssl_verify, ca_bundle_path\n"
+			         "\nLocal backends (llamacpp, tensorrt):\n"
+			         "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, n_threads, cache_type\n"
+			         "\nOllama:\n"
+			         "  num_ctx, num_predict\n"
+			         "\nSampling:\n"
+			         "  temperature, top_p, top_k, repeat_penalty, frequency_penalty,\n"
+			         "  presence_penalty, max_tokens\n"
+			         "\nRate limits:\n"
+			         "  requests_per_second, requests_per_minute, tokens_per_minute,\n"
+			         "  tokens_per_day, tokens_per_month, max_cost_per_month\n"
+			         "\nPricing:\n"
+			         "  pricing_dynamic, prompt_cost_per_million, completion_cost_per_million\n");
 			return 1;
 		}
 
@@ -760,7 +775,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		auto* prov = find_provider(name);
 		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found\n";
+			callback("Provider '" + name + "' not found\n");
 			return 1;
 		}
 
@@ -814,6 +829,12 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->n_batch = std::stoi(value);
 			} else if (field == "n_threads") {
 				prov->n_threads = std::stoi(value);
+			} else if (field == "cache_type") {
+				if (value != "f16" && value != "f32" && value != "q8_0" && value != "q4_0") {
+					callback("Error: cache_type must be one of: f16, f32, q8_0, q4_0\n");
+					return 1;
+				}
+				prov->cache_type = value;
 			}
 			// Ollama fields
 			else if (field == "num_ctx") {
@@ -861,25 +882,25 @@ int handle_provider_args(const std::vector<std::string>& args,
 			}
 			else {
 				updated = false;
-				std::cerr << "Unknown field: " << field << "\n";
-				std::cerr << "Use 'provider set' without arguments to see available fields\n";
+				callback("Unknown field: " + field + "\n");
+				callback("Use 'provider set' without arguments to see available fields\n");
 				return 1;
 			}
 		} catch (const std::exception& e) {
-			std::cerr << "Error setting field '" << field << "': " << e.what() << "\n";
+			callback("Error setting field '" + field + "': " + e.what() + "\n");
 			return 1;
 		}
 
 		if (updated) {
 			prov->save();
-			std::cout << "Provider '" << name << "' updated: " << field << " = " << value << "\n";
+			callback("Provider '" + name + "' updated: " + field + " = " + value + "\n");
 		}
 		return 0;
 	}
 
 	if (subcmd == "remove") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider remove <name>\n";
+			callback("Usage: provider remove <name>\n");
 			return 1;
 		}
 
@@ -891,36 +912,49 @@ int handle_provider_args(const std::vector<std::string>& args,
 			[&name](const Provider& p) { return p.name == name; });
 		providers.erase(it, providers.end());
 
-		std::cout << "Provider '" << name << "' removed\n";
+		callback("Provider '" + name + "' removed\n");
 		return 0;
 	}
 
 	if (subcmd == "use") {
 		if (args.size() < 2) {
-			std::cerr << "Usage: provider use <name>\n";
+			callback("Usage: provider use <name>\n");
 			return 1;
 		}
 
 		std::string name = args[1];
 		auto* prov = find_provider(name);
 		if (!prov) {
-			std::cerr << "Provider '" << name << "' not found\n";
+			callback("Provider '" + name + "' not found\n");
 			return 1;
 		}
 
 		// Interactive mode - switch backend
 		if (backend && session) {
-			// Shutdown current backend first to free GPU memory
-			(*backend)->shutdown();
+			// Get event callback from current backend
+			auto event_cb = (*backend)->callback;
 
-			// Connect to the specified provider
-			auto new_backend = prov->connect(*session);
-			if (!new_backend) {
-				std::cerr << "Failed to connect to provider '" << name << "'\n";
+			// Try to connect to new provider BEFORE shutting down old one
+			std::unique_ptr<Backend> new_backend;
+			try {
+				new_backend = prov->connect(*session, event_cb);
+			} catch (const std::exception& e) {
+				// Emit error via callback and keep current backend
+				if (event_cb) {
+					event_cb(CallbackEvent::SYSTEM, std::string("Error switching provider: ") + e.what() + "\n", "", "");
+				}
 				return 1;
 			}
 
-			// Update backend ownership and session pointer
+			if (!new_backend) {
+				if (event_cb) {
+					event_cb(CallbackEvent::SYSTEM, "Failed to connect to provider '" + name + "'\n", "", "");
+				}
+				return 1;
+			}
+
+			// Success - now shutdown old and swap
+			(*backend)->shutdown();
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
 
@@ -928,9 +962,20 @@ int handle_provider_args(const std::vector<std::string>& args,
 				*current_provider = name;
 			}
 
-			std::cout << "Switched to provider '" << name << "' (" << prov->type << " / " << prov->model << ")\n";
+			// Rebuild provider tools (excluding new active provider)
+			if (tools) {
+				register_provider_tools(*tools, name);
+				tools->populate_session_tools(*session);
+				// Update backend's valid tool names
+				(*backend)->valid_tool_names.clear();
+				for (const auto& tool : session->tools) {
+					(*backend)->valid_tool_names.insert(tool.name);
+				}
+			}
+
+			callback("Switched to provider '" + name + "' (" + prov->type + " / " + prov->model + ")\n");
 		} else {
-			std::cout << "Provider '" << name << "' selected\n";
+			callback("Provider '" + name + "' selected\n");
 		}
 		return 0;
 	}
@@ -946,23 +991,35 @@ int handle_provider_args(const std::vector<std::string>& args,
 		}
 
 		if (!next_prov) {
-			std::cout << "No other providers available\n";
+			callback("No other providers available\n");
 			return 1;
 		}
 
 		// Interactive mode - switch backend
 		if (backend && session) {
-			// Shutdown current backend first to free GPU memory
-			(*backend)->shutdown();
+			// Get event callback from current backend
+			auto event_cb = (*backend)->callback;
 
-			// Connect to the next provider
-			auto new_backend = next_prov->connect(*session);
-			if (!new_backend) {
-				std::cerr << "Failed to connect to provider '" << next_prov->name << "'\n";
+			// Try to connect to new provider BEFORE shutting down old one
+			std::unique_ptr<Backend> new_backend;
+			try {
+				new_backend = next_prov->connect(*session, event_cb);
+			} catch (const std::exception& e) {
+				if (event_cb) {
+					event_cb(CallbackEvent::SYSTEM, std::string("Error switching provider: ") + e.what() + "\n", "", "");
+				}
 				return 1;
 			}
 
-			// Update backend ownership and session pointer
+			if (!new_backend) {
+				if (event_cb) {
+					event_cb(CallbackEvent::SYSTEM, "Failed to connect to provider '" + next_prov->name + "'\n", "", "");
+				}
+				return 1;
+			}
+
+			// Success - now shutdown old and swap
+			(*backend)->shutdown();
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
 
@@ -970,20 +1027,32 @@ int handle_provider_args(const std::vector<std::string>& args,
 				*current_provider = next_prov->name;
 			}
 
-			std::cout << "Switched to provider '" << next_prov->name << "' (" << next_prov->type << " / " << next_prov->model << ")\n";
+			// Rebuild provider tools (excluding new active provider)
+			if (tools) {
+				register_provider_tools(*tools, next_prov->name);
+				tools->populate_session_tools(*session);
+				// Update backend's valid tool names
+				(*backend)->valid_tool_names.clear();
+				for (const auto& tool : session->tools) {
+					(*backend)->valid_tool_names.insert(tool.name);
+				}
+			}
+
+			callback("Switched to provider '" + next_prov->name + "' (" + next_prov->type + " / " + next_prov->model + ")\n");
 		} else {
-			std::cout << "Next provider: " << next_prov->name << "\n";
+			callback("Next provider: " + next_prov->name + "\n");
 		}
 		return 0;
 	}
 
-	std::cerr << "Unknown provider subcommand: " << subcmd << "\n";
-	std::cerr << "Available: list, add, show, set, remove, use, next\n";
+	callback("Unknown provider subcommand: " + subcmd + "\n");
+	callback("Available: list, add, show, set, remove, use, next\n");
 	return 1;
 }
 
 // Common model command implementation
 int handle_model_args(const std::vector<std::string>& args,
+                      std::function<void(const std::string&)> callback,
                       std::unique_ptr<Backend>* backend,
                       std::vector<Provider>* providers_ptr,
                       std::string* current_provider_name) {
@@ -1005,11 +1074,11 @@ int handle_model_args(const std::vector<std::string>& args,
 	// No args shows current model
 	if (args.empty()) {
 		if (!current_provider_name || current_provider_name->empty()) {
-			std::cout << "No provider configured\n";
+			callback("No provider configured\n");
 		} else {
 			auto* prov = find_provider(*current_provider_name);
 			if (prov) {
-				std::cout << "Current model: " << prov->model << "\n";
+				callback("Current model: " + prov->model + "\n");
 			}
 		}
 		return 0;
@@ -1017,21 +1086,45 @@ int handle_model_args(const std::vector<std::string>& args,
 
 	std::string subcmd = args[0];
 
-	if (subcmd == "list") {
-		std::cout << "Available models depend on your provider.\n";
-		std::cout << "Refer to your provider's documentation for model list.\n";
-		std::cout << "Common models:\n";
-		std::cout << "  OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo\n";
-		std::cout << "  Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku\n";
-		std::cout << "  Google: gemini-pro, gemini-ultra\n";
-		std::cout << "  OpenRouter: anthropic/claude-3.5-sonnet, google/gemini-pro\n";
+	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+		callback("Usage: /model [subcommand]\n"
+		         "Subcommands:\n"
+		         "  list           - Show common model names\n"
+		         "  set <name>     - Set model for current provider\n"
+		         "  (no args)      - Show current model\n");
 		return 0;
 	}
 
+	if (subcmd == "list") {
+		// Try to get models from current backend
+		if (backend && *backend) {
+			auto models = (*backend)->get_models();
+			if (!models.empty()) {
+				callback("Available models:\n");
+				for (const auto& model : models) {
+					callback("  " + model + "\n");
+				}
+				return 0;
+			}
+		}
+		// Fallback for backends that don't support model listing
+		callback("Model listing not available for this provider.\n");
+		callback("Refer to your provider's documentation for available models.\n");
+		return 0;
+	}
+
+	// Handle both "/model set <name>" and "/model <name>" as shortcuts
+	std::string model;
 	if (subcmd == "set" && args.size() >= 2) {
-		std::string model = args[1];
+		model = args[1];
+	} else if (subcmd != "list" && subcmd != "help" && subcmd != "--help" && subcmd != "-h") {
+		// Treat as model name directly
+		model = subcmd;
+	}
+
+	if (!model.empty()) {
 		if (!current_provider_name || current_provider_name->empty()) {
-			std::cout << "No provider configured\n";
+			callback("No provider configured\n");
 			return 1;
 		}
 
@@ -1040,18 +1133,17 @@ int handle_model_args(const std::vector<std::string>& args,
 			prov->model = model;
 			prov->save();
 
-			// Update backend's model if available
+			// Update backend's model if available (also updates model_config)
 			if (backend && *backend) {
-				(*backend)->model_name = model;
+				(*backend)->set_model(model);
 			}
 
-			std::cout << "Model updated to: " << model << "\n";
-			std::cout << "Note: Change takes effect on next message\n";
+			callback("Model set to: " + model + "\n");
 		}
 		return 0;
 	}
 
-	std::cerr << "Unknown model subcommand: " << subcmd << "\n";
-	std::cerr << "Available: list, set\n";
+	callback("Unknown model subcommand: " + subcmd + "\n");
+	callback("Available: list, set, or just provide model name\n");
 	return 1;
 }

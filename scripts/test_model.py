@@ -313,8 +313,11 @@ class ShepherdProcess:
         """Start shepherd process"""
         cmd = [
             SHEPHERD_BINARY,
+            "--nosched",
+            "--nostream",
             "--notools",
-            "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score."
+            "--warmup",
+            "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score.",
         ]
 
         # Use provider if specified
@@ -329,18 +332,53 @@ class ShepherdProcess:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=None,  # Pass stderr through to terminal
                 bufsize=0,
                 preexec_fn=os.setsid
             )
 
+            # Wait for warmup "Ready" message
+            if not self._wait_for_ready():
+                print(f"  ERROR: Shepherd did not become ready")
+                self.stop()
+                return False
+
             if self.verbose:
-                print(f"  Process started, ready for questions")
+                print(f"  Process started and ready")
             return True
 
         except Exception as e:
             print(f"  ERROR: Failed to start shepherd: {e}")
             return False
+
+    def _wait_for_ready(self, timeout_seconds: int = 120) -> bool:
+        """Wait for shepherd to output 'Ready' after warmup"""
+        buffer = ""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout_seconds:
+            ch, timed_out = self._read_char_with_timeout(1000)
+            if timed_out:
+                continue
+            buffer += ch
+            if self.verbose:
+                print(ch, end='', flush=True)
+            # Check if we've seen "Ready" (case insensitive)
+            if "ready" in buffer.lower():
+                # Drain any remaining output (newlines, etc)
+                while True:
+                    ch, timed_out = self._read_char_with_timeout(500)
+                    if timed_out:
+                        break
+                    if self.verbose:
+                        print(ch, end='', flush=True)
+                if self.verbose:
+                    print()  # newline after ready message
+                return True
+
+        if self.verbose:
+            print(f"\n  Timeout waiting for ready. Buffer: {repr(buffer)}")
+        return False
 
     def send_question(self, question_text: str) -> Tuple[str, float]:
         """Send a question and get response with timing"""

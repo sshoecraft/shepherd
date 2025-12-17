@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "json_tools.h"
 #include "tools.h"
-#include "../logger.h"
+
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -255,7 +256,18 @@ std::map<std::string, std::any> ParseJSONTool::execute(const std::map<std::strin
         result["type"] = std::string("object"); // simplified
         result["success"] = true;
 
-        std::cout << "ParseJSON: Successfully parsed JSON string" << std::endl;
+        // Build summary based on type
+        std::string summary;
+        if (parsed.type == JsonValue::ARRAY) {
+            summary = "Parsed JSON array (" + std::to_string(parsed.array_value.size()) + " items)";
+        } else if (parsed.type == JsonValue::OBJECT) {
+            summary = "Parsed JSON object (" + std::to_string(parsed.object_value.size()) + " keys)";
+        } else {
+            summary = "Parsed JSON value";
+        }
+        result["summary"] = summary;
+
+        dout(1) << "ParseJSON: Successfully parsed JSON string" << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error parsing JSON: ") + e.what();
@@ -305,9 +317,11 @@ std::map<std::string, std::any> SerializeJSONTool::execute(const std::map<std::s
         json_result += "}";
 
         result["json"] = json_result;
+        result["content"] = json_result;
+        result["summary"] = std::string("Serialized to ") + std::to_string(json_result.size()) + " bytes";
         result["success"] = true;
 
-        std::cout << "SerializeJSON: Successfully serialized data to JSON" << std::endl;
+        dout(1) << "SerializeJSON: Successfully serialized data to JSON" << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error serializing JSON: ") + e.what();
@@ -349,9 +363,11 @@ std::map<std::string, std::any> QueryJSONTool::execute(const std::map<std::strin
         // Simple path querying (basic implementation)
         // For now, just return that the query was processed
         result["result"] = std::string("Query processed for path: ") + path;
+        result["content"] = std::string("Query processed for path: ") + path;
+        result["summary"] = std::string("Found value at path");
         result["success"] = true;
 
-        std::cout << "QueryJSON: Processed query for path: " << path << std::endl;
+        dout(1) << "QueryJSON: Processed query for path: " << path << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error querying JSON: ") + e.what();
@@ -366,5 +382,5 @@ void register_json_tools(Tools& tools) {
     tools.register_tool(std::make_unique<SerializeJSONTool>());
     tools.register_tool(std::make_unique<QueryJSONTool>());
 
-    LOG_DEBUG("Registered JSON tools: parse_json, serialize_json, query_json");
+    dout(1) << "Registered JSON tools: parse_json, serialize_json, query_json" << std::endl;
 }

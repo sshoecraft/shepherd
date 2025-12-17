@@ -8,8 +8,8 @@ The API Server provides an OpenAI-compatible HTTP API for inference using local 
 
 ### Files
 
-- `server/api_server.h` - Class declaration and entry point
-- `server/api_server.cpp` - Full HTTP server implementation
+- `server/api_server.h` - Class declaration
+- `server/api_server.cpp` - HTTP server implementation
 
 ### Class Structure
 
@@ -19,7 +19,7 @@ public:
     APIServer(const std::string& host, int port);
     ~APIServer();
 
-    int run(std::unique_ptr<Backend>& backend, Session& session) override;
+    int run(Session& session) override;
 };
 ```
 
@@ -81,10 +81,29 @@ List available models.
 
 Health check endpoint.
 
-## Streaming
+## Streaming (v2.13.0)
 
-When `stream: true`, responses use Server-Sent Events (SSE):
+When `stream: true`, the server uses EventCallback:
 
+```cpp
+auto stream_callback = [&](Message::Type type,
+                           const std::string& content,
+                           const std::string& tool_name,
+                           const std::string& tool_call_id) -> bool {
+    // Format as OpenAI chunk
+    nlohmann::json chunk = {
+        {"choices", {{
+            {"delta", {{"content", content}}}
+        }}}
+    };
+    send_sse("data: " + chunk.dump() + "\n\n");
+    return true;
+};
+
+Response resp = backend->generate_from_session(session, max_tokens, stream_callback);
+```
+
+SSE Response format:
 ```
 data: {"choices":[{"delta":{"content":"Hello"}}]}
 
@@ -119,5 +138,6 @@ Single mutex serializes all backend requests. One request processed at a time.
 
 ## Version History
 
+- **2.13.0** - Unified EventCallback pattern (no add_message_stream)
 - **2.6.0** - Added APIServer class wrapper
 - **2.5.0** - Original implementation via run_api_server()

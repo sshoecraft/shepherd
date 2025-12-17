@@ -5,7 +5,6 @@
 #include "tools/tool_parser.h"
 #include "nlohmann/json.hpp"
 #include "models.h"
-#include "debug.h"
 #include <sstream>
 #include <fstream>
 #include <regex>
@@ -18,23 +17,414 @@
 #include "llama.cpp/common/chat.h"
 #endif
 
-#include "terminal_io.h"
-#include "output_queue.h"
 
 // LlamaCppBackend implementation
-LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens)
-    : Backend(max_context_tokens),
+LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback)
+    : Backend(max_context_tokens, session, callback),
       model_config(ModelConfig::create_generic()) {
     // Set public variables per RULES.md
     backend_name = "llamacpp";
     context_size = max_context_tokens;
     is_local = true;  // Local GPU backend
-    // model_name will be set in initialize_old()
 
-    LOG_DEBUG("LlamaCppBackend created with context_size: " + std::to_string(context_size));
+    dout(1) << "LlamaCppBackend created with context_size: " + std::to_string(context_size) << std::endl;
 
     // Parse config
     parse_backend_config();
+
+    // --- Full initialization (formerly in initialize()) ---
+#ifdef ENABLE_LLAMACPP
+    if (initialized) {
+        dout(1) << std::string("WARNING: ") +"LlamaCppBackend already initialized" << std::endl;
+        return;
+    }
+
+    // Construct full model path from config
+    std::string model_filename = config->model;
+    std::string model_dir = config->model_path;
+
+    if (model_filename.empty()) {
+        throw BackendError("Model name is required for LlamaCpp backend");
+    }
+
+    std::string full_model_path;
+
+    // Check if model_filename is already a full path (absolute path)
+    if (model_filename[0] == '/' || model_filename[0] == '~') {
+        // Model is already a full path - use it directly
+        full_model_path = model_filename;
+    } else {
+        // Combine model_path directory with model filename
+        if (model_dir.empty()) {
+            throw BackendError("Model path directory is required when model is not an absolute path");
+        }
+        full_model_path = (std::filesystem::path(model_dir) / model_filename).string();
+    }
+
+    // Expand ~ if present
+    if (!full_model_path.empty() && full_model_path[0] == '~') {
+        full_model_path = Config::get_home_directory() + full_model_path.substr(1);
+    }
+
+    dout(1) << "Using model path: " + full_model_path << std::endl;
+
+    this->model_path = full_model_path;
+    model_name = full_model_path;  // Set public variable
+
+    // Suppress llama.cpp logging unless in debug mode (but always show errors)
+    if (!g_debug_level) {
+        llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
+            // Only show ERROR messages (suppress INFO and WARN unless debug enabled)
+            if (level == GGML_LOG_LEVEL_ERROR) {
+                fprintf(stderr, "%s", text);
+            }
+        }, nullptr);
+    }
+
+    // Detect GPU support (can be disabled with GGML_METAL=0 or GGML_NO_METAL=1)
+    bool has_gpu = llama_supports_gpu_offload();
+    const char* disable_metal = getenv("GGML_METAL");
+    const char* no_metal = getenv("GGML_NO_METAL");
+    if ((disable_metal && strcmp(disable_metal, "0") == 0) ||
+        (no_metal && strcmp(no_metal, "1") == 0)) {
+        has_gpu = false;
+        dout(1) << "Metal GPU disabled by environment variable" << std::endl;
+    }
+
+    // Load actual llama.cpp model
+    llama_model_params model_params = llama_model_default_params();
+
+    if (has_gpu) {
+        // Priority: environment variable > config setting > auto
+        const char* gpu_layers_env = getenv("GGML_N_GPU_LAYERS");
+        if (gpu_layers_env) {
+            model_params.n_gpu_layers = atoi(gpu_layers_env);
+            dout(1) << "Using GPU layer count from GGML_N_GPU_LAYERS env: " + std::to_string(model_params.n_gpu_layers) << std::endl;
+        } else if (gpu_layers >= 0) {
+            model_params.n_gpu_layers = gpu_layers;
+            dout(1) << "Using GPU layer count from config: " + std::to_string(model_params.n_gpu_layers) << std::endl;
+        } else {
+            // -1 = auto: set to extremely high number - llama.cpp will automatically cap at actual layer count
+            model_params.n_gpu_layers = INT32_MAX;
+            dout(1) << "Auto GPU layers (loading all layers to GPU)" << std::endl;
+        }
+
+        // Multi-GPU support: Use pipeline_parallel or tensor_parallel config to control GPU usage
+        // Note: pipeline_parallel is preferred over tensor_parallel for semantic clarity
+        // Both use LLAMA_SPLIT_MODE_LAYER which distributes layers across GPUs
+        int num_gpus_for_splitting = 0;
+
+        // Determine which config to use (prefer pipeline_parallel if both specified)
+        if (pipeline_parallel > 1) {
+            num_gpus_for_splitting = pipeline_parallel;
+        } else if (tensor_parallel == 0 || tensor_parallel > 1) {
+            num_gpus_for_splitting = tensor_parallel;
+        }
+
+        if (num_gpus_for_splitting != 0) {
+            // Multi-GPU support: choose split mode based on TP vs PP
+            // LAYER mode = pipeline parallelism (splits layers, no P2P needed)
+            // ROW mode = tensor parallelism (splits tensors, requires P2P)
+            if (tensor_parallel > 1) {
+                model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
+            } else {
+                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+            }
+            model_params.main_gpu = 0;
+
+            // Configure tensor_split array to distribute model across GPUs
+            int num_gpus = num_gpus_for_splitting > 0 ? num_gpus_for_splitting : 16;  // Max 16 GPUs if auto
+            tensor_split.resize(128, 0.0f);  // Initialize all to 0 (unused)
+            for (int i = 0; i < num_gpus && i < 128; i++) {
+                tensor_split[i] = 1.0f;  // Equal proportion for each GPU
+            }
+            model_params.tensor_split = tensor_split.data();
+
+            // Configure devices array
+            size_t dev_count = ggml_backend_dev_count();
+            gpu_devices.clear();
+            for (size_t i = 0; i < dev_count && (int)gpu_devices.size() < num_gpus; i++) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                if (dev) {
+                    const char* dev_name = ggml_backend_dev_name(dev);
+                    // Only include CUDA devices
+                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                        gpu_devices.push_back(static_cast<void*>(dev));
+                        dout(1) << "Added device " + std::to_string(i) + ": " + std::string(dev_name) << std::endl;
+                    }
+                }
+            }
+            gpu_devices.push_back(nullptr);  // NULL terminator
+            model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices.data());
+
+            dout(1) << "Configured " + std::to_string(gpu_devices.size() - 1) + " devices for multi-GPU" << std::endl;
+
+            if (pipeline_parallel > 1) {
+                dout(1) << "Pipeline parallelism: PP=" + std::to_string(pipeline_parallel) + " GPUs with ROW split mode (tensor + layer splitting)" << std::endl;
+            } else if (num_gpus_for_splitting == 0) {
+                dout(1) << "Multi-GPU: AUTO (using all available GPUs with ROW split mode)" << std::endl;
+            } else {
+                dout(1) << "Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with ROW split mode (consider using --pp for clarity)" << std::endl;
+            }
+        } else {
+            // No explicit TP/PP specified - auto-detect GPUs
+            size_t dev_count = ggml_backend_dev_count();
+            int cuda_gpu_count = 0;
+            for (size_t i = 0; i < dev_count; i++) {
+                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                if (dev) {
+                    const char* dev_name = ggml_backend_dev_name(dev);
+                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                        cuda_gpu_count++;
+                    }
+                }
+            }
+
+            if (cuda_gpu_count > 1) {
+                // Multiple GPUs detected - auto-split layers across them
+                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+                model_params.main_gpu = 0;
+
+                // Configure tensor_split array for equal distribution
+                tensor_split.resize(128, 0.0f);
+                for (int i = 0; i < cuda_gpu_count && i < 128; i++) {
+                    tensor_split[i] = 1.0f;
+                }
+                model_params.tensor_split = tensor_split.data();
+
+                // Configure devices array
+                gpu_devices.clear();
+                for (size_t i = 0; i < dev_count && (int)gpu_devices.size() < cuda_gpu_count; i++) {
+                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                    if (dev) {
+                        const char* dev_name = ggml_backend_dev_name(dev);
+                        if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                            gpu_devices.push_back(static_cast<void*>(dev));
+                        }
+                    }
+                }
+                gpu_devices.push_back(nullptr);
+                model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices.data());
+
+                dout(1) << "Auto-detected " + std::to_string(cuda_gpu_count) + " GPUs, using layer split mode" << std::endl;
+            } else {
+                // Single GPU only, no splitting
+                model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
+                model_params.main_gpu = 0;
+                model_params.tensor_split = nullptr;
+                dout(1) << "Single GPU mode (no splitting)" << std::endl;
+            }
+        }
+
+        dout(1) << "GPU detected, offloading layers to GPU (n_gpu_layers=" + std::to_string(model_params.n_gpu_layers) + ")" << std::endl;
+    } else {
+        model_params.n_gpu_layers = 0;
+        dout(1) << "GPU not available, using CPU only" << std::endl;
+    }
+
+    model = llama_model_load_from_file(model_path.c_str(), model_params);
+    if (!model) {
+        throw BackendError("Failed to load model: " + model_path);
+    }
+
+    // Log actual layer offload count
+    if (has_gpu) {
+        int32_t n_layers = llama_model_n_layer(static_cast<llama_model*>(model));
+        dout(1) << "Model has " + std::to_string(n_layers) + " layers, all offloaded to GPU" << std::endl;
+    }
+
+    dout(1) << "LlamaCpp model loaded successfully" << std::endl;
+
+    // If user didn't specify context size (0), get it from the model
+    if (context_size == 0) {
+        int32_t model_context_size = llama_model_n_ctx_train(static_cast<llama_model*>(model));
+        if (model_context_size <= 0) {
+            std::cerr << "No context size specified and model has none defined" << std::endl;
+            throw BackendError("Cannot determine context size: model provides no context size and none was specified");
+        }
+        context_size = static_cast<size_t>(model_context_size);
+        dout(1) << "Using model's full context size: " + std::to_string(context_size) << std::endl;
+    }
+    // else: use user's specified context_size as-is
+
+    dout(1) << "Using context size: " + std::to_string(context_size) + " tokens" << std::endl;
+
+    // Determine optimal batch size (only if not set via --ubatch)
+    if (n_batch == 512) {  // Default value means not overridden
+        if (has_gpu) {
+            if (context_size >= 32768) {
+                n_batch = 4096;
+            } else if (context_size >= 8192) {
+                n_batch = 2048;
+            } else {
+                n_batch = std::min(static_cast<int>(context_size), 2048);
+            }
+        } else {
+            n_batch = std::min(static_cast<int>(context_size) / 4, 1024);
+        }
+        dout(1) << "Using n_batch = " + std::to_string(n_batch) + " (auto, GPU: " + (has_gpu ? "yes" : "no") + ")" << std::endl;
+    } else {
+        dout(1) << "Using n_batch = " + std::to_string(n_batch) + " (from --ubatch)" << std::endl;
+    }
+
+    // Create llama context with KV space callback
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = static_cast<uint32_t>(context_size);
+    ctx_params.n_batch = static_cast<uint32_t>(n_batch);
+    ctx_params.offload_kqv = has_gpu;
+
+    // Set KV cache type (both K and V use same type)
+    // Valid values: f16, f32, q8_0, q4_0
+    if (cache_type == "f32") {
+        ctx_params.type_k = GGML_TYPE_F32;
+        ctx_params.type_v = GGML_TYPE_F32;
+        dout(1) << "KV cache type: f32" << std::endl;
+    } else if (cache_type == "q8_0") {
+        ctx_params.type_k = GGML_TYPE_Q8_0;
+        ctx_params.type_v = GGML_TYPE_Q8_0;
+        dout(1) << "KV cache type: q8_0" << std::endl;
+    } else if (cache_type == "q4_0") {
+        ctx_params.type_k = GGML_TYPE_Q4_0;
+        ctx_params.type_v = GGML_TYPE_Q4_0;
+        dout(1) << "KV cache type: q4_0" << std::endl;
+    } else {
+        // Default to f16 (best for Ampere GPUs like RTX 3090)
+        ctx_params.type_k = GGML_TYPE_F16;
+        ctx_params.type_v = GGML_TYPE_F16;
+        dout(1) << "KV cache type: f16 (default)" << std::endl;
+    }
+
+    // Set KV cache space callback for interrupt-driven eviction
+    ctx_params.kv_need_space_callback = [](uint32_t tokens_needed, void* user_data) -> uint32_t {
+        auto* backend = static_cast<LlamaCppBackend*>(user_data);
+        uint32_t new_head = backend->evict_to_free_space(tokens_needed);
+        if (new_head == UINT32_MAX) {
+            dout(1) << "Eviction succeeded, retrying operation with freed space" << std::endl;
+        }
+        return new_head;
+    };
+    ctx_params.kv_need_space_callback_data = this;
+
+    model_ctx = llama_init_from_model(static_cast<llama_model*>(model), ctx_params);
+    if (!model_ctx) {
+        llama_model_free(static_cast<llama_model*>(model));
+        model = nullptr;
+        throw BackendError("Failed to create llama context");
+    }
+
+    // Initialize chat templates
+    auto templates = common_chat_templates_init(
+        static_cast<llama_model*>(model),
+        "",  // Use model's default chat template
+        "",  // Default BOS token
+        ""   // Default EOS token
+    );
+    chat_templates = templates.release();
+
+    if (!chat_templates) {
+        dout(1) << std::string("WARNING: ") +"Failed to initialize chat templates - tool support may be limited" << std::endl;
+    } else {
+        dout(1) << "Chat templates initialized successfully" << std::endl;
+    }
+
+    // Get chat template from model (no custom template support for now)
+    const char* template_ptr = llama_model_chat_template(static_cast<llama_model*>(model), nullptr);
+    const char* tool_use_template_ptr = llama_model_chat_template(static_cast<llama_model*>(model), "tool_use");
+
+    if (template_ptr) {
+        chat_template_text = std::string(template_ptr);
+        dout(1) << "Retrieved default chat template from model (" + std::to_string(chat_template_text.length()) + " characters)" << std::endl;
+
+        // Dump template to file for inspection
+        std::ofstream template_file("/tmp/shepherd_chat_template.jinja");
+        template_file << chat_template_text;
+        template_file.close();
+        dout(1) << "Chat template saved to /tmp/shepherd_chat_template.jinja for inspection" << std::endl;
+    }
+
+    if (tool_use_template_ptr) {
+        std::string tool_use_template = std::string(tool_use_template_ptr);
+        dout(1) << "Retrieved tool_use chat template from model (" + std::to_string(tool_use_template.length()) + " characters)" << std::endl;
+
+        // Use tool_use template if it has python_tag support
+        if (tool_use_template.find("<|python_tag|>") != std::string::npos) {
+            chat_template_text = tool_use_template;
+            dout(1) << "Using tool_use template variant for tool calling support" << std::endl;
+        }
+    }
+
+    if (!template_ptr && !tool_use_template_ptr) {
+        throw BackendError("No chat template found in model");
+    }
+
+    // Parse the chat template with minja
+    try {
+        minja::Options options{};
+        auto parsed_template = minja::Parser::parse(chat_template_text, options);
+        template_node = new std::shared_ptr<minja::TemplateNode>(parsed_template);
+        dout(1) << "Successfully parsed chat template with minja" << std::endl;
+    } catch (const std::exception& e) {
+        throw BackendError("Failed to parse chat template with minja: " + std::string(e.what()));
+    }
+
+    // Detect model family - priority: chat template -> config.json -> path
+    model_config = Models::detect_from_chat_template(chat_template_text, model_path);
+    if (model_config.family == ModelFamily::GENERIC) {
+        // Try config.json in model directory
+        std::filesystem::path model_dir_path = std::filesystem::path(model_path).parent_path();
+        model_config = Models::detect_from_config_file(model_dir_path.string());
+    }
+    if (model_config.family == ModelFamily::GENERIC) {
+        // Last resort: path-based detection
+        model_config = Models::detect_from_model_path(model_path);
+    }
+    max_output_tokens = model_config.max_output_tokens;
+    dout(1) << "Model configuration: family=" + std::to_string(static_cast<int>(model_config.family)) +
+             ", version=" + model_config.version +
+             ", tool_result_role=" + model_config.tool_result_role +
+             ", uses_eom_token=" + (model_config.uses_eom_token ? "true" : "false") +
+             ", uses_python_tag=" + (model_config.uses_python_tag ? "true" : "false") << std::endl;
+
+    // Create chat template instance
+    chat_template = ChatTemplates::ChatTemplateFactory::create(chat_template_text, model_config, template_node);
+    dout(1) << "Created chat template for family: " + std::to_string(static_cast<int>(model_config.family)) << std::endl;
+
+    // Try to load sampling parameters from generation_config.json
+    // Priority: config file values > generation_config.json > hardcoded defaults
+    std::filesystem::path model_file_path(model_path);
+    std::filesystem::path model_dir_path2 = model_file_path.parent_path();
+
+    float gen_temperature = temperature;  // Start with current value
+    float gen_top_p = top_p;
+    int gen_top_k = top_k;
+
+    if (Models::load_generation_config(model_dir_path2.string(), gen_temperature, gen_top_p, gen_top_k)) {
+        // Only apply values that weren't explicitly set in config file
+        if (!temperature_from_config) temperature = gen_temperature;
+        if (!top_p_from_config) top_p = gen_top_p;
+        if (!top_k_from_config) top_k = gen_top_k;
+    }
+
+    dout(1) << "LlamaCppBackend initialized with model: " + model_path << std::endl;
+    initialized = true;
+
+    // Add system message in cli mode
+    if (!g_server_mode) {
+        // Format system message with tools using chat template
+        std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
+
+        // Use add_message to properly decode and add system message
+        // This ensures it's in KV cache before being added to session.messages
+        add_message(session, Message::SYSTEM, formatted_system, "", "", 0);
+
+        // Update session tracking (add_message already added to session.messages)
+        session.system_message_tokens = count_tokens_in_text(formatted_system);
+
+        dout(1) << "Added system message to session" << std::endl;
+    }
+#else
+    throw BackendError("LlamaCpp backend not compiled in");
+#endif
 }
 
 void LlamaCppBackend::parse_backend_config() {
@@ -72,12 +462,15 @@ void LlamaCppBackend::parse_backend_config() {
 
         if (config->json.contains("ubatch")) n_batch = config->json["ubatch"].get<int>();
 
-        LOG_DEBUG("Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
+        // KV cache type
+        if (config->json.contains("cache_type")) cache_type = config->json["cache_type"].get<std::string>();
+
+        dout(1) << "Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
                   ", gpu_layers=" + std::to_string(gpu_layers) +
-                  ", tensor_parallel=" + std::to_string(tensor_parallel));
+                  ", tensor_parallel=" + std::to_string(tensor_parallel) << std::endl;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to parse llamacpp backend config: " + std::string(e.what()));
+        std::cerr << "Failed to parse llamacpp backend config: " + std::string(e.what()) << std::endl;
     }
 }
 
@@ -100,7 +493,7 @@ int LlamaCppBackend::count_tokens_in_text(const std::string& text) const {
     return static_cast<int>(text.length() / 4.0 + 0.5);
 }
 
-int LlamaCppBackend::count_message_tokens(Message::Type type, const std::string& content, const std::string& tool_name, const std::string& tool_id) {
+int LlamaCppBackend::count_message_tokens(Message::Role role, const std::string& content, const std::string& tool_name, const std::string& tool_id) {
 #ifdef ENABLE_LLAMACPP
     if (!model || !template_node) {
         // Fallback to simple text tokenization if model not initialized
@@ -115,27 +508,28 @@ int LlamaCppBackend::count_message_tokens(Message::Type type, const std::string&
     auto messages = minja::Value::array();
     auto msg_obj = minja::Value::object();
 
-    // Convert Message::Type to role string
-    std::string role;
-    switch (type) {
+    // Convert Message::Role to role string
+    std::string role_str;
+    switch (role) {
         case Message::SYSTEM:
-            role = "system";
+            role_str = "system";
             break;
         case Message::USER:
-            role = "user";
+            role_str = "user";
             break;
         case Message::ASSISTANT:
-            role = "assistant";
+            role_str = "assistant";
             break;
-        case Message::TOOL:
-            role = "tool";
+        case Message::TOOL_RESPONSE:
+        case Message::FUNCTION:
+            role_str = "tool";
             break;
         default:
-            role = "user";
+            role_str = "user";
             break;
     }
 
-    msg_obj.set("role", minja::Value(role));
+    msg_obj.set("role", minja::Value(role_str));
     msg_obj.set("content", minja::Value(content));
 
     // Add tool metadata if present
@@ -157,7 +551,7 @@ int LlamaCppBackend::count_message_tokens(Message::Type type, const std::string&
     try {
         rendered = (*template_ptr)->render(context);
     } catch (const std::exception& e) {
-        LOG_WARN("Exception rendering message through template: " + std::string(e.what()));
+        dout(1) << std::string("WARNING: ") +"Exception rendering message through template: " + std::string(e.what()) << std::endl;
         // Fallback to simple tokenization
         return count_tokens_in_text(content);
     }
@@ -169,14 +563,14 @@ int LlamaCppBackend::count_message_tokens(Message::Type type, const std::string&
                                    tokens.data(), tokens.size(), false, true);
 
     if (n_tokens < 0) {
-        LOG_WARN("Failed to tokenize rendered message");
+        dout(1) << std::string("WARNING: ") +"Failed to tokenize rendered message" << std::endl;
         return count_tokens_in_text(content);
     }
 
-    LOG_DEBUG("count_message_tokens: role=" + role +
+    dout(1) << "count_message_tokens: role=" + std::to_string(static_cast<int>(role)) +
               ", content_len=" + std::to_string(content.length()) +
               ", rendered_len=" + std::to_string(rendered.length()) +
-              ", tokens=" + std::to_string(n_tokens));
+              ", tokens=" + std::to_string(n_tokens) << std::endl;
 
     return n_tokens;
 #else
@@ -226,10 +620,10 @@ bool LlamaCppBackend::is_ready() const {
 
 uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 #ifdef ENABLE_LLAMACPP
-    LOG_INFO("KV cache full - need to free " + std::to_string(tokens_needed) + " tokens");
+    dout(1) << "KV cache full - need to free " + std::to_string(tokens_needed) + " tokens" << std::endl;
 
     if (!current_session) {
-        LOG_ERROR("No current session - cannot evict");
+        std::cerr << "No current session - cannot evict" << std::endl;
         return UINT32_MAX;
     }
 
@@ -240,28 +634,28 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         cached_tokens += msg.tokens;
     }
 
-    LOG_DEBUG("KV cache state: used_tokens=" + std::to_string(kv_used) +
+    dout(1) << "KV cache state: used_tokens=" + std::to_string(kv_used) +
               ", max_ctx=" + std::to_string(context_size) +
               ", cached_tokens=" + std::to_string(cached_tokens) +
-              ", session_messages=" + std::to_string(current_session->messages.size()));
+              ", session_messages=" + std::to_string(current_session->messages.size()) << std::endl;
 
-    // In server mode, throw exception instead of evicting
+    // In server mode, signal abort instead of evicting
     // Client is responsible for managing context window
+    // NOTE: We cannot throw exceptions here - this callback is called from llama.cpp's C code
+    // and C++ exceptions cannot propagate through C stack frames (undefined behavior)
     if (g_server_mode) {
-        LOG_ERROR("KV cache full in server mode - throwing ContextFullException");
-        // Format error in OpenAI-compatible format
-        // Use actual KV cache size, not cached_tokens which doesn't include formatting overhead
-        int total_needed = kv_used + tokens_needed;
-        throw ContextFullException("This model's maximum context length is " +
-            std::to_string(context_size) + " tokens. However, your messages resulted in " +
-            std::to_string(total_needed) + " tokens.");
+        std::cerr << "KV cache full in server mode - signaling abort (context_full)" << std::endl;
+        // Return 0 to signal abort - llama_decode will fail and we handle it at the C++ level
+        context_full_in_server_mode = true;
+        context_full_tokens_needed = kv_used + tokens_needed;
+        return 0;  // Signal abort
     }
 
     // Get KV cache memory handle for eviction operations
     llama_context* ctx = static_cast<llama_context*>(model_ctx);
     llama_memory_t mem = llama_get_memory(ctx);
 
-    LOG_DEBUG("Found " + std::to_string(current_session->messages.size()) + " messages in KV cache");
+    dout(1) << "Found " + std::to_string(current_session->messages.size()) + " messages in KV cache" << std::endl;
 
     // Use current_session for eviction calculation
     // Cast away const for eviction operation
@@ -269,7 +663,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     auto ranges = mutable_session->calculate_messages_to_evict(tokens_needed);
 
     if (ranges.empty()) {
-        LOG_ERROR("Cannot calculate messages to evict - no space can be freed");
+        std::cerr << "Cannot calculate messages to evict - no space can be freed" << std::endl;
         return 0;  // Signal failure: eviction cannot proceed
     }
 
@@ -307,33 +701,33 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]\n",
                 start_msg, end_msg, start_pos, end_pos);
 
-        LOG_INFO("Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
-                 "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]");
+        dout(1) << "Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
+                 "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]" << std::endl;
     }
 
     // Step 2: Evict all ranges from KV cache in reverse order
     // Process in reverse so earlier positions don't shift before we evict later ones
     for (auto it = range_infos.rbegin(); it != range_infos.rend(); ++it) {
         llama_memory_seq_rm(mem, 0, it->start_pos, it->end_pos + 1); // +1 because llama uses exclusive end
-        LOG_DEBUG("Removed KV range [" + std::to_string(it->start_pos) + ", " + std::to_string(it->end_pos) + "]");
+        dout(1) << "Removed KV range [" + std::to_string(it->start_pos) + ", " + std::to_string(it->end_pos) + "]" << std::endl;
     }
 
     // Step 3: Shift remaining tokens down to keep positions contiguous
     // Process ranges in reverse order, shifting after each eviction
     for (auto it = range_infos.rbegin(); it != range_infos.rend(); ++it) {
         llama_memory_seq_add(mem, 0, it->end_pos + 1, -1, -it->tokens);
-        LOG_DEBUG("Shifted KV cache positions >= " + std::to_string(it->end_pos + 1) + " down by " + std::to_string(it->tokens));
+        dout(1) << "Shifted KV cache positions >= " + std::to_string(it->end_pos + 1) + " down by " + std::to_string(it->tokens) << std::endl;
     }
 
     // Step 4: Archive to RAG and remove messages from session (all ranges at once)
     if (!mutable_session->evict_messages(ranges)) {
-        LOG_ERROR("Failed to evict messages from session");
+        std::cerr << "Failed to evict messages from session" << std::endl;
         return UINT32_MAX;
     }
 
-    LOG_DEBUG("Evicted " + std::to_string(total_messages_evicted) + " messages from cache");
-    LOG_INFO("Successfully evicted " + std::to_string(total_messages_evicted) + " messages (" +
-             std::to_string(total_tokens_removed) + " tokens) from KV cache");
+    dout(1) << "Evicted " + std::to_string(total_messages_evicted) + " messages from cache" << std::endl;
+    dout(1) << "Successfully evicted " + std::to_string(total_messages_evicted) + " messages (" +
+             std::to_string(total_tokens_removed) + " tokens) from KV cache" << std::endl;
 
     // KV cache is the source of truth - query actual state
     dprintf(2, "KV cache after eviction: %d tokens\n", get_context_token_count());
@@ -341,17 +735,17 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 
 #ifdef TEST_EVICTION_VALIDATION
     // Step 5: Optional validation - verify messages remaining in session match KV cache
-    LOG_INFO("Validating eviction: checking message/KV alignment");
+    dout(1) << "Validating eviction: checking message/KV alignment" << std::endl;
     int expected_kv_tokens = 0;
     for (const auto& msg : current_session->messages) {
         expected_kv_tokens += msg.tokens;
     }
     int actual_kv_tokens = get_context_token_count();
     if (expected_kv_tokens != actual_kv_tokens) {
-        LOG_ERROR("Eviction validation FAILED: expected " + std::to_string(expected_kv_tokens) +
+        std::cerr << "Eviction validation FAILED: expected " + std::to_string(expected_kv_tokens) +
                   " tokens in KV cache but found " + std::to_string(actual_kv_tokens));
     } else {
-        LOG_INFO("Eviction validation PASSED: " + std::to_string(actual_kv_tokens) + " tokens match");
+        dout(1) << "Eviction validation PASSED: " + std::to_string(actual_kv_tokens) + " tokens match" << std::endl;
     }
 #endif
 
@@ -364,10 +758,10 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
             first_range_pos += current_session->messages[i].tokens;
         }
     }
-    LOG_DEBUG("Eviction complete - returning new head position: " + std::to_string(first_range_pos));
+    dout(1) << "Eviction complete - returning new head position: " + std::to_string(first_range_pos) << std::endl;
     return static_cast<uint32_t>(first_range_pos);
 #else
-    LOG_ERROR("llama.cpp not enabled");
+    std::cerr << "llama.cpp not enabled" << std::endl;
     return UINT32_MAX;
 #endif
 }
@@ -396,7 +790,7 @@ void LlamaCppBackend::shutdown() {
 #endif
 
     initialized = false;
-    LOG_DEBUG("LlamaCppBackend shutdown complete");
+    dout(1) << "LlamaCppBackend shutdown complete" << std::endl;
 }
 
 int LlamaCppBackend::get_context_token_count() const {
@@ -417,8 +811,8 @@ int LlamaCppBackend::get_context_token_count() const {
 #endif
 }
 
-std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
-    LOG_DEBUG("=== GENERATE START ===");
+std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
+    dout(1) << "=== GENERATE START ===" << std::endl;
     if (!is_ready()) {
         throw std::runtime_error("LlamaCpp backend not initialized");
     }
@@ -453,14 +847,14 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
             );
 
             if (!params.preserved_tokens.empty()) {
-                LOG_INFO("Extracted " + std::to_string(params.preserved_tokens.size()) + " preserved tokens from template:");
+                dout(1) << "Extracted " + std::to_string(params.preserved_tokens.size()) + " preserved tokens from template:" << std::endl;
 
                 // Separate start and end markers
                 std::vector<std::string> start_markers;
                 std::vector<std::string> end_markers;
 
                 for (const auto& marker : params.preserved_tokens) {
-                    LOG_INFO("  - " + marker);
+                    dout(1) << "  - " + marker << std::endl;
 
                     if (marker.size() >= 3 && marker[0] == '<' && marker[1] == '/') {
                         // This is a closing tag
@@ -475,10 +869,10 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
                 model_config.tool_call_start_markers = start_markers;
                 model_config.tool_call_end_markers = end_markers;
 
-                LOG_INFO("Separated into " + std::to_string(start_markers.size()) + " start markers and " +
-                        std::to_string(end_markers.size()) + " end markers");
+                dout(1) << "Separated into " + std::to_string(start_markers.size()) + " start markers and " +
+                        std::to_string(end_markers.size()) + " end markers" << std::endl;
             } else {
-                LOG_INFO("No preserved_tokens from template - checking vocabulary");
+                dout(1) << "No preserved_tokens from template - checking vocabulary" << std::endl;
 
                 // Check if model has <|python_tag|> in its vocabulary
                 std::vector<llama_token> tokens;
@@ -498,21 +892,21 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
                 // If it tokenizes to exactly 1 token, it's a special token in vocabulary
                 if (n_tokens == 1) {
                     tool_call_markers.push_back(test_marker);
-                    LOG_INFO("Found <|python_tag|> in model vocabulary (token " + std::to_string(tokens[0]) + ")");
+                    dout(1) << "Found <|python_tag|> in model vocabulary (token " + std::to_string(tokens[0]) + ")" << std::endl;
                 } else {
-                    LOG_INFO("Model does not have <|python_tag|> special token (tokenized to " + std::to_string(n_tokens) + " tokens)");
+                    dout(1) << "Model does not have <|python_tag|> special token (tokenized to " + std::to_string(n_tokens) + " tokens)" << std::endl;
                 }
             }
 
             have_tool_markers = true;
         } catch (const std::exception& e) {
-            LOG_INFO("Exception during tool marker extraction: " + std::string(e.what()));
+            dout(1) << "Exception during tool marker extraction: " + std::string(e.what()) << std::endl;
             have_tool_markers = true;
         }
 
         // If no tool markers were found, add common fallback markers
         if (tool_call_markers.empty()) {
-            LOG_INFO("No tool markers found from template, adding fallback markers");
+            dout(1) << "No tool markers found from template, adding fallback markers" << std::endl;
             tool_call_markers.push_back("<tool_call");
             tool_call_markers.push_back("<function_call");
             model_config.tool_call_start_markers = tool_call_markers;
@@ -525,7 +919,7 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
 
     // In debug mode, show what's in the KV cache
     if (g_debug_level && current_session) {
-        LOG_DEBUG("=== MESSAGES IN KV CACHE ===");
+        dout(1) << "=== MESSAGES IN KV CACHE ===" << std::endl;
         char line[128];
         for (int i = 0; i < static_cast<int>(current_session->messages.size()); i++) {
             const auto& msg = current_session->messages[i];
@@ -554,12 +948,12 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
                     strcat(line, content);
                 }
             }
-            LOG_DEBUG(line);
+            dout(1) << line << std::endl;
         }
-        LOG_DEBUG("=== END KV CACHE ===");
+        dout(1) << "=== END KV CACHE ===" << std::endl;
     }
 
-    LOG_DEBUG("Running generation (messages already cached)");
+    dout(1) << "Running generation (messages already cached)" << std::endl;
 
     // Before generation, we need to add the generation prompt to KV cache
     // Use chat template to get the generation prompt
@@ -580,14 +974,14 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
 
         if (n_tokens > 0) {
             prompt_tokens.resize(n_tokens);
-            LOG_DEBUG("Decoding generation prompt (" + generation_prompt + "): " + std::to_string(n_tokens) + " tokens");
+            dout(1) << "Decoding generation prompt (" + generation_prompt + "): " + std::to_string(n_tokens) + " tokens" << std::endl;
 
             for (size_t i = 0; i < prompt_tokens.size(); i += n_batch) {
                 int batch_size = std::min(n_batch, static_cast<int>(prompt_tokens.size() - i));
                 llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
                 if (llama_decode(ctx, batch) != 0) {
-                    LOG_ERROR("Failed to decode generation prompt at position " + std::to_string(i));
+                    std::cerr << "Failed to decode generation prompt at position " + std::to_string(i) << std::endl;
                 }
             }
         }
@@ -597,10 +991,10 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
     // Tools are OK with streaming - the terminal filter will hide <tool_call> tags
     bool suppress_stream = g_server_mode;
     std::string raw_response = run_inference("", max_tokens, suppress_stream, callback);  // Empty prompt since everything is cached
-    LOG_DEBUG("Got raw response length: " + std::to_string(raw_response.length()));
+    dout(1) << "Got raw response length: " + std::to_string(raw_response.length()) << std::endl;
     // Log first 500 chars to avoid terminal truncation issues
     std::string debug_content = raw_response.length() > 500 ? raw_response.substr(0, 500) + "..." : raw_response;
-    LOG_DEBUG("Raw response content: " + debug_content);
+    dout(1) << "Raw response content: " + debug_content << std::endl;
 
     // Always write full response to debug file for inspection
     {
@@ -628,9 +1022,9 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
             closing_tokens.resize(n_closing);
             llama_batch closing_batch = llama_batch_get_one(closing_tokens.data(), n_closing);
             if (llama_decode(ctx, closing_batch) != 0) {
-                LOG_WARN("Failed to decode closing tag into KV cache");
+                dout(1) << std::string("WARNING: ") +"Failed to decode closing tag into KV cache" << std::endl;
             } else {
-                LOG_DEBUG("Added closing tag to KV cache: " + assistant_end_tag);
+                dout(1) << "Added closing tag to KV cache: " + assistant_end_tag << std::endl;
             }
         }
     }
@@ -638,14 +1032,6 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
     // Store prompt token count for server to return (like API backends do)
     // This is the total number of tokens in the KV cache before generation
     // Calculate total tokens from current session messages
-    int total_tokens = 0;
-    if (current_session) {
-        for (const auto& msg : current_session->messages) {
-            total_tokens += msg.tokens;
-        }
-    }
-    last_prompt_tokens = total_tokens;
-
     // Store the actual tokens added to KV cache for this assistant message
     // This includes: generation_prompt + generated_tokens + closing_tag
     // Note: last_completion_tokens is set by run_inference() to n_generated
@@ -655,16 +1041,17 @@ std::string LlamaCppBackend::generate(int max_tokens, StreamCallback callback) {
     return raw_response;
 }
 
-std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming, StreamCallback callback) {
+std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming, EventCallback callback) {
 #ifdef ENABLE_LLAMACPP
     // Reset cancellation flag at start of generation
     g_generation_cancelled = false;
 
-    // Reset TerminalIO filtering state for new generation
-    tio.reset();
+    reset_output_state();
+
+    // Note: TerminalIO reset removed
 
     if (!model || !model_ctx) {
-        LOG_ERROR("llama.cpp model or context not initialized");
+        std::cerr << "llama.cpp model or context not initialized" << std::endl;
         return "Error: Model not initialized";
     }
 
@@ -689,39 +1076,39 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));           // greedy sampling from dist
 
-    LOG_DEBUG("Sampling params: temperature=" + std::to_string(temperature) +
+    dout(1) << "Sampling params: temperature=" + std::to_string(temperature) +
               ", top_p=" + std::to_string(top_p) +
               ", top_k=" + std::to_string(top_k) +
               ", min_keep=" + std::to_string(min_keep) +
               ", penalty_repeat=" + std::to_string(penalty_repeat) +
               ", penalty_freq=" + std::to_string(penalty_freq) +
               ", penalty_present=" + std::to_string(penalty_present) +
-              ", penalty_last_n=" + std::to_string(penalty_last_n));
+              ", penalty_last_n=" + std::to_string(penalty_last_n) << std::endl;
 
     // If prompt_text is empty, everything is already in KV cache
     // Just skip straight to generation
     if (!prompt_text.empty()) {
         // Legacy path: tokenize and decode prompt
         // This is kept for backward compatibility but shouldn't be used with stateful KV cache
-        LOG_WARN("run_inference() called with non-empty prompt - this is wasteful with stateful KV cache");
+        dout(1) << std::string("WARNING: ") +"run_inference() called with non-empty prompt - this is wasteful with stateful KV cache" << std::endl;
 
         std::vector<llama_token> prompt_tokens(prompt_text.length() + 256);
         int n_prompt_tokens = llama_tokenize(vocab, prompt_text.c_str(), prompt_text.length(),
                                              prompt_tokens.data(), prompt_tokens.size(), false, true);
 
         if (n_prompt_tokens < 0) {
-            LOG_ERROR("Failed to tokenize input text");
+            std::cerr << "Failed to tokenize input text" << std::endl;
             llama_sampler_free(sampler);
             return "Error: Tokenization failed";
         }
 
         prompt_tokens.resize(n_prompt_tokens);
-        LOG_DEBUG("Evaluating " + std::to_string(n_prompt_tokens) + " prompt tokens");
+        dout(1) << "Evaluating " + std::to_string(n_prompt_tokens) + " prompt tokens" << std::endl;
 
         // Check if prompt alone is larger than entire context window
         if (n_prompt_tokens > static_cast<int>(context_size)) {
-            LOG_ERROR("Prompt too large for context: " + std::to_string(n_prompt_tokens) + " tokens exceeds max context size " +
-                      std::to_string(context_size));
+            std::cerr << "Prompt too large for context: " + std::to_string(n_prompt_tokens) + " tokens exceeds max context size " +
+                      std::to_string(context_size) << std::endl;
             llama_sampler_free(sampler);
             if (g_server_mode) {
                 throw ContextFullException("This model's maximum context length is " +
@@ -735,7 +1122,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         for (size_t i = 0; i < prompt_tokens.size(); i += n_batch) {
             // Check for cancellation between batches
             if (g_generation_cancelled) {
-                LOG_INFO("Generation cancelled during prompt processing");
+                dout(1) << "Generation cancelled during prompt processing" << std::endl;
                 llama_sampler_free(sampler);
                 return "";
             }
@@ -745,30 +1132,20 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
             llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
             if (llama_decode(ctx, batch) != 0) {
-                LOG_ERROR("Failed to evaluate prompt tokens at position " + std::to_string(i));
+                std::cerr << "Failed to evaluate prompt tokens at position " + std::to_string(i) << std::endl;
                 llama_sampler_free(sampler);
                 return "Error: Evaluation failed";
             }
         }
     } else {
-        LOG_DEBUG("Prompt already cached, skipping tokenization/decoding");
+        dout(1) << "Prompt already cached, skipping tokenization/decoding" << std::endl;
     }
 
     // Generate tokens
     std::string response;
     int n_generated = 0;
 
-    // Initialize terminal filtering for this response
-    extern TerminalIO tio;
-    // Update markers in case model was just loaded (they're extracted from template during init_model)
-    if (tio.markers.tool_call_start.empty() && !tool_call_markers.empty()) {
-        tio.markers.tool_call_start = tool_call_markers;
-        tio.markers.tool_call_end = model_config.tool_call_end_markers;
-    }
-    tio.begin_response();
-
-    // Enable raw mode for escape key detection during generation
-    tio.set_raw_mode();
+    // Note: TerminalIO marker update removed
     bool cancelled_by_escape = false;
 
     // Calculate max generation tokens: context_size - system - current_user
@@ -778,11 +1155,11 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     // Use explicit max_tokens if provided, otherwise use all available space
     int max_gen_tokens = max_tokens > 0 ? max_tokens : available_for_generation;
 
-    LOG_DEBUG("Generation limits: available=" + std::to_string(available_for_generation) +
+    dout(1) << "Generation limits: available=" + std::to_string(available_for_generation) +
               " (context=" + std::to_string(context_size) +
               " - system=" + std::to_string(system_formatted_tokens) +
               " - user=" + std::to_string(current_user_formatted_tokens) +
-              "), max_gen_tokens=" + std::to_string(max_gen_tokens));
+              "), max_gen_tokens=" + std::to_string(max_gen_tokens) << std::endl;
 
     // Start timing for t/s measurement
     auto gen_start_time = std::chrono::high_resolution_clock::now();
@@ -790,16 +1167,11 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     for (int i = 0; i < max_gen_tokens; i++) {
         // Check for cancellation (from SIGUSR1 signal)
         if (g_generation_cancelled) {
-            LOG_INFO("Generation cancelled by signal");
+            dout(1) << "Generation cancelled by signal" << std::endl;
             break;
         }
 
-        // Check for escape key press
-        if (tio.check_escape_pressed()) {
-            LOG_INFO("Generation cancelled by escape key");
-            cancelled_by_escape = true;
-            break;
-        }
+        // TODO: Escape key cancellation removed with TerminalIO
 
         // Sample next token
         llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
@@ -807,14 +1179,14 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         int32_t n_vocab = llama_vocab_n_tokens(vocab);
         dprintf(3, "Sampled token: %d (vocab size: %d)", next_token, n_vocab);
         if (next_token < 0 || next_token >= n_vocab) {
-            LOG_ERROR("Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")");
+            std::cerr << "Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")" << std::endl;
             break;
         }
 
         // Check for end of generation using llama.cpp's native EOG detection
         // This handles all model-specific end tokens automatically
         if (llama_vocab_is_eog(vocab, next_token)) {
-            LOG_DEBUG("End of generation token detected");
+            dout(1) << "End of generation token detected" << std::endl;
             break;
         }
 
@@ -830,21 +1202,11 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
             // Accumulate for final response
             response.append(token_str, token_len);
 
-            // Call streaming callback if provided (for API server streaming)
-            if (callback) {
-                Response partial_resp;
-                partial_resp.content = response;
-                partial_resp.success = true;
-                std::string delta(token_str, token_len);
-                if (!callback(delta, response, partial_resp)) {
-                    // Callback returned false - stop generation
-                    break;
-                }
-            }
-
-            // Stream output to terminal only if not suppressed (suppressed for tool calls)
-            if (!suppress_streaming) {
-                g_output_queue.push(std::string(token_str, token_len));
+            // Route through unified output filter
+            std::string delta(token_str, token_len);
+            if (!output(delta)) {
+                // Callback returned false - stop generation
+                break;
             }
         }
 
@@ -858,12 +1220,12 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                 break;
             }
             if (retry == 0) {
-                LOG_DEBUG("Token decode failed (likely eviction), retrying");
+                dout(1) << "Token decode failed (likely eviction), retrying" << std::endl;
             }
         }
 
         if (!decode_ok) {
-            LOG_ERROR("Failed to evaluate generated token after retries");
+            std::cerr << "Failed to evaluate generated token after retries" << std::endl;
             break;
         }
 
@@ -883,16 +1245,15 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         int context_used = get_context_token_count();
         int context_max = context_size;
 
-        // Ensure stats appear on their own line (only add newline if needed)
-        extern TerminalIO tio;
-        std::cerr << (tio.last_char_was_newline ? "" : "\n")
-                  << "\033[90m[Decode: " << n_generated << " tokens, "
+        // Performance stats
+        std::cerr << "\n\033[90m[Decode: " << n_generated << " tokens, "
                   << std::fixed << std::setprecision(1) << tokens_per_second << " t/s, "
                   << "context: " << context_used << "/" << context_max << "]\033[0m\n";
     }
 
-    LOG_INFO("Generation (decode): " + std::to_string(n_generated) + " tokens in " +
-             std::to_string(seconds) + "s (" + std::to_string(tokens_per_second) + " t/s)");
+    dout(1) << "Generation (decode): " + std::to_string(n_generated) + " tokens in " +
+             std::to_string(seconds) + "s (" + std::to_string(tokens_per_second) + " t/s" << std::endl;
+
 
     // Store completion token count for server to return (like API backends do)
     last_completion_tokens = n_generated;
@@ -900,7 +1261,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     // Check if we hit the length limit (generated exactly max_gen_tokens)
     last_generation_hit_length_limit = (n_generated == max_gen_tokens);
     if (last_generation_hit_length_limit) {
-        LOG_DEBUG("Generation stopped due to max_tokens limit (" + std::to_string(max_gen_tokens) + " tokens)");
+        dout(1) << "Generation stopped due to max_tokens limit (" + std::to_string(max_gen_tokens) + " tokens)" << std::endl;
     }
 
     // Set cancellation flag if escape was pressed
@@ -908,16 +1269,13 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         g_generation_cancelled = true;
     }
 
-    // Restore terminal to normal mode
-    tio.restore_terminal();
-
-    // Finalize terminal filtering for this response
-    tio.end_response();
+    // Flush any remaining output from the filter
+    flush_output();
 
     return response;
 #else
     // Fallback when llama.cpp not available
-    LOG_ERROR("llama.cpp not compiled in");
+    std::cerr << "llama.cpp not compiled in" << std::endl;
     return "Error: llama.cpp not available";
 #endif
 }
@@ -929,13 +1287,13 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::string& args_str) {
     std::map<std::string, std::any> args;
 
-    LOG_DEBUG("Parsing tool arguments: " + args_str);
+    dout(1) << "Parsing tool arguments: " + args_str << std::endl;
 
     // Try JSON parsing first
     if (args_str.find('{') != std::string::npos && args_str.find('}') != std::string::npos) {
         try {
             // Extract "key": "value" patterns from JSON-like format
-            std::regex json_regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"");
+            std::regex json_regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\""  );
             std::sregex_iterator iter(args_str.begin(), args_str.end(), json_regex);
             std::sregex_iterator end;
 
@@ -945,16 +1303,16 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
             }
 
             if (!args.empty()) {
-                LOG_DEBUG("Successfully parsed JSON-style arguments");
+                dout(1) << "Successfully parsed JSON-style arguments" << std::endl;
                 return args;
             }
         } catch (...) {
-            LOG_DEBUG("JSON parsing failed, trying other formats");
+            dout(1) << "JSON parsing failed, trying other formats" << std::endl;
         }
     }
 
     // Try simple key=value format
-    std::regex kv_regex("(\\w+)\\s*=\\s*\"([^\"]*)\"");
+    std::regex kv_regex("(\\w+)\\s*=\\s*\"([^\"]*)\""  );
     std::sregex_iterator iter(args_str.begin(), args_str.end(), kv_regex);
     std::sregex_iterator end;
 
@@ -964,7 +1322,7 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
     }
 
     if (!args.empty()) {
-        LOG_DEBUG("Successfully parsed key=value arguments");
+        dout(1) << "Successfully parsed key=value arguments" << std::endl;
         return args;
     }
 
@@ -977,7 +1335,7 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
         } else {
             args["command"] = args_str;
         }
-        LOG_DEBUG("Using fallback argument parsing");
+        dout(1) << "Using fallback argument parsing" << std::endl;
     }
 
     return args;
@@ -986,7 +1344,7 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
 std::string LlamaCppBackend::render_message(const Message& msg, bool add_generation_prompt) {
 #ifdef ENABLE_LLAMACPP
     if (!chat_template) {
-        LOG_ERROR("No chat template available, falling back to simple format");
+        std::cerr << "No chat template available, falling back to simple format" << std::endl;
         return msg.get_role() + ": " + msg.content + "\n\n";
     }
 
@@ -998,7 +1356,7 @@ std::string LlamaCppBackend::render_message(const Message& msg, bool add_generat
         formatted += chat_template->get_generation_prompt();
     }
 
-    LOG_DEBUG("Rendered message (" + std::to_string(formatted.length()) + " chars, role=" + msg.get_role() + ")");
+    dout(1) << "Rendered message (" + std::to_string(formatted.length()) + " chars, role=" + msg.get_role() + ")" << std::endl;
     return formatted;
 #else
     // Fallback when llama.cpp not available
@@ -1009,7 +1367,7 @@ std::string LlamaCppBackend::render_message(const Message& msg, bool add_generat
 bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 #ifdef ENABLE_LLAMACPP
     if (!model || !model_ctx) {
-        LOG_ERROR("Model or context not initialized");
+        std::cerr << "Model or context not initialized" << std::endl;
         return false;
     }
 
@@ -1035,7 +1393,7 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
                                    msg_tokens.data(), msg_tokens.size(), false, true);
 
     if (n_tokens < 0) {
-        LOG_ERROR("Failed to tokenize message");
+        std::cerr << "Failed to tokenize message" << std::endl;
         return false;
     }
     msg_tokens.resize(n_tokens);
@@ -1044,12 +1402,12 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     // This is the actual number of tokens in KV cache, not just the raw content
     msg.tokens = n_tokens;
 
-    LOG_DEBUG("Decoding " + std::to_string(n_tokens) + " tokens for new message (updated msg.tokens)");
+    dout(1) << "Decoding " + std::to_string(n_tokens) + " tokens for new message (updated msg.tokens)" << std::endl;
 
     // Check if message alone is larger than entire context window
     if (n_tokens > static_cast<int>(context_size)) {
-        LOG_ERROR("Message too large for context: " + std::to_string(n_tokens) + " tokens exceeds max context size " +
-                  std::to_string(context_size));
+        std::cerr << "Message too large for context: " + std::to_string(n_tokens) + " tokens exceeds max context size " +
+                  std::to_string(context_size) << std::endl;
         if (g_server_mode) {
             throw ContextFullException("This model's maximum context length is " +
                 std::to_string(context_size) + " tokens. However, your messages resulted in " +
@@ -1066,6 +1424,10 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     const int MAX_DECODE_RETRIES = 1;
     int retry_count = 0;
 
+    // Reset server-mode context-full flag before decode
+    context_full_in_server_mode = false;
+    context_full_tokens_needed = 0;
+
     while (retry_count <= MAX_DECODE_RETRIES) {
         bool decode_failed = false;
 
@@ -1075,13 +1437,22 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
             llama_batch batch = llama_batch_get_one(msg_tokens.data() + i, batch_size);
 
             if (llama_decode(ctx, batch) != 0) {
+                // Check if this was a server-mode context-full abort
+                if (context_full_in_server_mode) {
+                    // Throw exception at C++ level (safe - we're back in C++ code)
+                    throw ContextFullException("This model's maximum context length is " +
+                        std::to_string(context_size) + " tokens. However, your messages resulted in " +
+                        std::to_string(context_full_tokens_needed) + " tokens.");
+                }
+
                 if (retry_count < MAX_DECODE_RETRIES) {
-                    LOG_WARN("Decode failed at position " + std::to_string(i) + ", retrying (attempt " +
-                            std::to_string(retry_count + 1) + "/" + std::to_string(MAX_DECODE_RETRIES + 1) + ")");
+                    dout(1) << std::string("WARNING: ") +"Decode failed at position " + std::to_string(i) + ", retrying (attempt " +
+                            std::to_string(retry_count + 1) + "/" + std::to_string(MAX_DECODE_RETRIES + 1) + "" << std::endl;
+
                     decode_failed = true;
                     break;
                 } else {
-                    LOG_ERROR("Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts");
+                    std::cerr << "Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts" << std::endl;
                     return false;
                 }
             }
@@ -1112,8 +1483,9 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
               << std::fixed << std::setprecision(1) << prefill_tokens_per_second << " t/s, "
               << "context: " << context_used << "/" << context_max << "]\033[0m" << std::endl;
 
-    LOG_INFO("Prompt processing: " + std::to_string(n_tokens) + " tokens in " +
-             std::to_string(prefill_seconds) + "s (" + std::to_string(prefill_tokens_per_second) + " t/s)");
+    dout(1) << "Prompt processing: " + std::to_string(n_tokens) + " tokens in " +
+             std::to_string(prefill_seconds) + "s (" + std::to_string(prefill_tokens_per_second) + " t/s" << std::endl;
+
 
     return true;
 #else
@@ -1124,7 +1496,7 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
 
 
 
-Response LlamaCppBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
+void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 #ifdef ENABLE_LLAMACPP
     if (!is_ready()) {
         Response err_resp;
@@ -1132,22 +1504,22 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
         err_resp.code = Response::ERROR;
         err_resp.finish_reason = "error";
         err_resp.error = "LlamaCpp backend not initialized";
-        return err_resp;
+        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
     }
 
-    LOG_DEBUG("LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages");
+    dout(1) << "LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
 
     // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
     size_t cached_count = backend_session.messages.size();
 
-    LOG_DEBUG("Backend has " + std::to_string(cached_count) + " cached messages, " +
-              "incoming session has " + std::to_string(session.messages.size()) + " messages");
+    dout(1) << "Backend has " + std::to_string(cached_count) + " cached messages, " +
+              "incoming session has " + std::to_string(session.messages.size()) + " messages" << std::endl;
 
     // Account for system message offset: backend_session may have SYSTEM at [0], but session doesn't
     size_t backend_offset = 0;
-    if (!backend_session.messages.empty() && backend_session.messages[0].type == Message::SYSTEM) {
+    if (!backend_session.messages.empty() && backend_session.messages[0].role == Message::SYSTEM) {
         backend_offset = 1;
-        LOG_DEBUG("Backend has system message at index 0, offsetting comparison by 1");
+        dout(1) << "Backend has system message at index 0, offsetting comparison by 1" << std::endl;
     }
 
     // Find how many messages match (prefix caching)
@@ -1170,21 +1542,21 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
             matching_prefix++;
         } else {
             // Messages diverged
-            LOG_WARN("DIVERGENCE at session message " + std::to_string(i) + " (backend index " + std::to_string(backend_idx) + "):");
-            LOG_WARN("  Cached: [" + cached_msg.get_role() + "] " + cached_msg.content.substr(0, 50) + "...");
-            LOG_WARN("  Session: [" + session_msg.get_role() + "] " + session_msg.content.substr(0, 50) + "...");
+            dout(1) << std::string("WARNING: ") +"DIVERGENCE at session message " + std::to_string(i) + " (backend index " + std::to_string(backend_idx) + "):" << std::endl;
+            dout(1) << std::string("WARNING: ") +"  Cached: [" + cached_msg.get_role() + "] " + cached_msg.content.substr(0, 50) + "..." << std::endl;
+            dout(1) << std::string("WARNING: ") +"  Session: [" + session_msg.get_role() + "] " + session_msg.content.substr(0, 50) + "..." << std::endl;
             break;
         }
     }
 
-    LOG_DEBUG("Prefix match: " + std::to_string(matching_prefix) + " messages (out of " + std::to_string(session.messages.size()) + " in session)");
+    dout(1) << "Prefix match: " + std::to_string(matching_prefix) + " messages (out of " + std::to_string(session.messages.size()) + " in session)" << std::endl;
 
     // Check if backend has more messages than what matched
     // Keep: system message (if present) + matching_prefix messages
     size_t expected_backend_count = backend_offset + matching_prefix;
 
     if (cached_count > expected_backend_count) {
-        LOG_WARN("Conversation diverged - clearing " + std::to_string(cached_count - expected_backend_count) + " cached messages");
+        dout(1) << std::string("WARNING: ") +"Conversation diverged - clearing " + std::to_string(cached_count - expected_backend_count) + " cached messages" << std::endl;
 
         // Clear KV cache from divergence point onward
         llama_context* ctx = static_cast<llama_context*>(model_ctx);
@@ -1197,7 +1569,7 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
         }
 
         llama_memory_seq_rm(mem, 0, clear_from_pos, -1);
-        LOG_DEBUG("Cleared KV cache from token position " + std::to_string(clear_from_pos));
+        dout(1) << "Cleared KV cache from token position " + std::to_string(clear_from_pos) << std::endl;
 
         // Remove diverged messages from backend_session
         while (backend_session.messages.size() > expected_backend_count) {
@@ -1210,13 +1582,13 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
 
     // Handle system message if present (server mode sends it separately)
     if (!session.system_message.empty() &&
-        (backend_session.messages.empty() || backend_session.messages[0].type != Message::SYSTEM)) {
+        (backend_session.messages.empty() || backend_session.messages[0].role != Message::SYSTEM)) {
 
-        LOG_DEBUG("Adding system message to KV cache");
+        dout(1) << "Adding system message to KV cache" << std::endl;
 
         // Format system message with tools using chat template
         std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
-        LOG_DEBUG("Formatted system prompt with " + std::to_string(session.tools.size()) + " tools");
+        dout(1) << "Formatted system prompt with " + std::to_string(session.tools.size()) + " tools" << std::endl;
 
         // Create system message
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
@@ -1226,25 +1598,25 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
 
         // Decode to KV cache
         if (!format_and_decode_message(sys_msg)) {
-            LOG_ERROR("Failed to decode system message to KV cache");
+            std::cerr << "Failed to decode system message to KV cache" << std::endl;
             Response err_resp;
             err_resp.success = false;
             err_resp.code = Response::ERROR;
             err_resp.finish_reason = "error";
             err_resp.error = "Failed to decode system message to KV cache";
-            return err_resp;
+            callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
         }
 
         // Add to backend_session
         backend_session.messages.push_back(sys_msg);
         backend_session.system_message = session.system_message;
-        LOG_DEBUG("System message added to KV cache (" + std::to_string(sys_msg.tokens) + " tokens)");
+        dout(1) << "System message added to KV cache (" + std::to_string(sys_msg.tokens) + " tokens)" << std::endl;
     }
 
     // Add NEW messages (from matching_prefix onward)
     size_t new_messages = session.messages.size() - matching_prefix;
     if (new_messages > 0) {
-        LOG_DEBUG("Adding " + std::to_string(new_messages) + " new messages to KV cache");
+        dout(1) << "Adding " + std::to_string(new_messages) + " new messages to KV cache" << std::endl;
 
         for (size_t i = matching_prefix; i < session.messages.size(); i++) {
             const auto& msg = session.messages[i];
@@ -1252,40 +1624,40 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
 
             // Set token count if not already set
             if (msg_copy.tokens == 0) {
-                msg_copy.tokens = count_message_tokens(msg_copy.type, msg_copy.content,
+                msg_copy.tokens = count_message_tokens(msg_copy.role, msg_copy.content,
                                                         msg_copy.tool_name, msg_copy.tool_call_id);
             }
 
             // Decode to KV cache
             if (!format_and_decode_message(msg_copy)) {
-                LOG_ERROR("Failed to decode message to KV cache");
+                std::cerr << "Failed to decode message to KV cache" << std::endl;
                 Response err_resp;
                 err_resp.success = false;
                 err_resp.code = Response::ERROR;
                 err_resp.finish_reason = "error";
                 err_resp.error = "Failed to decode message to KV cache";
-                return err_resp;
+                callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
             }
 
             // Successfully decoded - add to backend_session
             backend_session.messages.push_back(msg_copy);
 
             // Update last_user/last_assistant for eviction protection
-            if (msg.type == Message::USER) {
+            if (msg.role == Message::USER) {
                 backend_session.last_user_message_index = backend_session.messages.size() - 1;
                 backend_session.last_user_message_tokens = msg_copy.tokens;
-            } else if (msg.type == Message::ASSISTANT) {
+            } else if (msg.role == Message::ASSISTANT) {
                 backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
                 backend_session.last_assistant_message_tokens = msg_copy.tokens;
             }
 
-            LOG_DEBUG("Decoded message " + std::to_string(i) + " to KV cache");
+            dout(1) << "Decoded message " + std::to_string(i) + " to KV cache" << std::endl;
         }
 
-        LOG_DEBUG("Prefix caching: " + std::to_string(matching_prefix) + " cached, " +
-                  std::to_string(new_messages) + " new, total " + std::to_string(session.messages.size()));
+        dout(1) << "Prefix caching: " + std::to_string(matching_prefix) + " cached, " +
+                  std::to_string(new_messages) + " new, total " + std::to_string(session.messages.size()) << std::endl;
     } else {
-        LOG_DEBUG("All messages already in KV cache (100% prefix cache hit)");
+        dout(1) << "All messages already in KV cache (100% prefix cache hit)" << std::endl;
     }
 
     // Copy tools to backend_session
@@ -1294,7 +1666,7 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
 
     // Update member variables used by generate() for token calculations
     // System message tokens
-    if (!backend_session.messages.empty() && backend_session.messages[0].type == Message::SYSTEM) {
+    if (!backend_session.messages.empty() && backend_session.messages[0].role == Message::SYSTEM) {
         system_formatted_tokens = backend_session.messages[0].tokens;
     } else {
         system_formatted_tokens = 0;
@@ -1307,412 +1679,36 @@ Response LlamaCppBackend::generate_from_session(const Session& session, int max_
         current_user_formatted_tokens = 0;
     }
 
-    LOG_DEBUG("Server mode generation - system_tokens=" + std::to_string(system_formatted_tokens) +
-              ", user_tokens=" + std::to_string(current_user_formatted_tokens));
+    dout(1) << "Server mode generation - system_tokens=" + std::to_string(system_formatted_tokens) +
+              ", user_tokens=" + std::to_string(current_user_formatted_tokens) << std::endl;
 
     // Generate response (pass streaming callback if provided)
     std::string result = generate(max_tokens, callback);
 
-    // Wrap in Response
-    Response success_resp;
-    success_resp.success = true;
-    success_resp.code = Response::SUCCESS;
-    success_resp.content = result;
-    success_resp.finish_reason = "stop";
-    success_resp.prompt_tokens = last_prompt_tokens;
-    success_resp.completion_tokens = last_completion_tokens;
-    return success_resp;
+    // Update session token counts from KV cache (session is source of truth)
+    int kv_tokens = get_context_token_count();
+    session.total_tokens = kv_tokens;
+    session.last_prompt_tokens = kv_tokens - last_assistant_kv_tokens;
+    session.last_assistant_message_tokens = last_assistant_kv_tokens;
+
+    dout(1) << "generate_from_session token update: kv_tokens=" << kv_tokens
+            << ", last_assistant_kv_tokens=" << last_assistant_kv_tokens
+            << ", session.total_tokens=" << session.total_tokens
+            << ", session.last_prompt_tokens=" << session.last_prompt_tokens << std::endl;
+
+    // Content already delivered via callback during generate()
+    // Signal completion
+    callback(CallbackEvent::STOP, "stop", "", "");
 #else
-    Response err_resp;
-    err_resp.success = false;
-    err_resp.code = Response::ERROR;
-    err_resp.finish_reason = "error";
-    err_resp.error = "LlamaCpp backend not compiled in";
-    return err_resp;
+    callback(CallbackEvent::ERROR, "LlamaCpp backend not compiled in", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 #endif
 }
 
-// Backend interface - initialize from Session
-void LlamaCppBackend::initialize(Session& session) {
-#ifdef ENABLE_LLAMACPP
-    if (initialized) {
-        LOG_WARN("LlamaCppBackend already initialized");
-        return;
-    }
 
-    // Construct full model path from config
-    std::string model_filename = config->model;
-    std::string model_dir = config->model_path;
-
-    if (model_filename.empty()) {
-        throw BackendError("Model name is required for LlamaCpp backend");
-    }
-
-    std::string full_model_path;
-
-    // Check if model_filename is already a full path (absolute path)
-    if (model_filename[0] == '/' || model_filename[0] == '~') {
-        // Model is already a full path - use it directly
-        full_model_path = model_filename;
-    } else {
-        // Combine model_path directory with model filename
-        if (model_dir.empty()) {
-            throw BackendError("Model path directory is required when model is not an absolute path");
-        }
-        full_model_path = (std::filesystem::path(model_dir) / model_filename).string();
-    }
-
-    // Expand ~ if present
-    if (!full_model_path.empty() && full_model_path[0] == '~') {
-        full_model_path = Config::get_home_directory() + full_model_path.substr(1);
-    }
-
-    LOG_INFO("Using model path: " + full_model_path);
-
-    this->model_path = full_model_path;
-    model_name = full_model_path;  // Set public variable
-
-    // Suppress llama.cpp logging unless in debug mode (but always show errors)
-    if (!g_debug_level) {
-        llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
-            // Only show ERROR messages (suppress INFO and WARN unless debug enabled)
-            if (level == GGML_LOG_LEVEL_ERROR) {
-                fprintf(stderr, "%s", text);
-            }
-        }, nullptr);
-    }
-
-    // Detect GPU support (can be disabled with GGML_METAL=0 or GGML_NO_METAL=1)
-    bool has_gpu = llama_supports_gpu_offload();
-    const char* disable_metal = getenv("GGML_METAL");
-    const char* no_metal = getenv("GGML_NO_METAL");
-    if ((disable_metal && strcmp(disable_metal, "0") == 0) ||
-        (no_metal && strcmp(no_metal, "1") == 0)) {
-        has_gpu = false;
-        LOG_INFO("Metal GPU disabled by environment variable");
-    }
-
-    // Load actual llama.cpp model
-    llama_model_params model_params = llama_model_default_params();
-
-    if (has_gpu) {
-        // Priority: environment variable > config setting > auto
-        const char* gpu_layers_env = getenv("GGML_N_GPU_LAYERS");
-        if (gpu_layers_env) {
-            model_params.n_gpu_layers = atoi(gpu_layers_env);
-            LOG_INFO("Using GPU layer count from GGML_N_GPU_LAYERS env: " + std::to_string(model_params.n_gpu_layers));
-        } else if (gpu_layers >= 0) {
-            model_params.n_gpu_layers = gpu_layers;
-            LOG_INFO("Using GPU layer count from config: " + std::to_string(model_params.n_gpu_layers));
-        } else {
-            // -1 = auto: set to extremely high number - llama.cpp will automatically cap at actual layer count
-            model_params.n_gpu_layers = INT32_MAX;
-            LOG_INFO("Auto GPU layers (loading all layers to GPU)");
-        }
-
-        // Multi-GPU support: Use pipeline_parallel or tensor_parallel config to control GPU usage
-        // Note: pipeline_parallel is preferred over tensor_parallel for semantic clarity
-        // Both use LLAMA_SPLIT_MODE_LAYER which distributes layers across GPUs
-        int num_gpus_for_splitting = 0;
-
-        // Determine which config to use (prefer pipeline_parallel if both specified)
-        if (pipeline_parallel > 1) {
-            num_gpus_for_splitting = pipeline_parallel;
-        } else if (tensor_parallel == 0 || tensor_parallel > 1) {
-            num_gpus_for_splitting = tensor_parallel;
-        }
-
-        if (num_gpus_for_splitting != 0) {
-            // Multi-GPU support: choose split mode based on TP vs PP
-            // LAYER mode = pipeline parallelism (splits layers, no P2P needed)
-            // ROW mode = tensor parallelism (splits tensors, requires P2P)
-            if (tensor_parallel > 1) {
-                model_params.split_mode = LLAMA_SPLIT_MODE_ROW;
-            } else {
-                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
-            }
-            model_params.main_gpu = 0;
-
-            // Configure tensor_split array to distribute model across GPUs
-            int num_gpus = num_gpus_for_splitting > 0 ? num_gpus_for_splitting : 16;  // Max 16 GPUs if auto
-            tensor_split.resize(128, 0.0f);  // Initialize all to 0 (unused)
-            for (int i = 0; i < num_gpus && i < 128; i++) {
-                tensor_split[i] = 1.0f;  // Equal proportion for each GPU
-            }
-            model_params.tensor_split = tensor_split.data();
-
-            // Configure devices array
-            size_t dev_count = ggml_backend_dev_count();
-            gpu_devices.clear();
-            for (size_t i = 0; i < dev_count && (int)gpu_devices.size() < num_gpus; i++) {
-                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                if (dev) {
-                    const char* dev_name = ggml_backend_dev_name(dev);
-                    // Only include CUDA devices
-                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
-                        gpu_devices.push_back(static_cast<void*>(dev));
-                        LOG_DEBUG("Added device " + std::to_string(i) + ": " + std::string(dev_name));
-                    }
-                }
-            }
-            gpu_devices.push_back(nullptr);  // NULL terminator
-            model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices.data());
-
-            LOG_INFO("Configured " + std::to_string(gpu_devices.size() - 1) + " devices for multi-GPU");
-
-            if (pipeline_parallel > 1) {
-                LOG_INFO("Pipeline parallelism: PP=" + std::to_string(pipeline_parallel) + " GPUs with ROW split mode (tensor + layer splitting)");
-            } else if (num_gpus_for_splitting == 0) {
-                LOG_INFO("Multi-GPU: AUTO (using all available GPUs with ROW split mode)");
-            } else {
-                LOG_INFO("Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with ROW split mode (consider using --pp for clarity)");
-            }
-        } else {
-            // No explicit TP/PP specified - auto-detect GPUs
-            size_t dev_count = ggml_backend_dev_count();
-            int cuda_gpu_count = 0;
-            for (size_t i = 0; i < dev_count; i++) {
-                ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                if (dev) {
-                    const char* dev_name = ggml_backend_dev_name(dev);
-                    if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
-                        cuda_gpu_count++;
-                    }
-                }
-            }
-
-            if (cuda_gpu_count > 1) {
-                // Multiple GPUs detected - auto-split layers across them
-                model_params.split_mode = LLAMA_SPLIT_MODE_LAYER;
-                model_params.main_gpu = 0;
-
-                // Configure tensor_split array for equal distribution
-                tensor_split.resize(128, 0.0f);
-                for (int i = 0; i < cuda_gpu_count && i < 128; i++) {
-                    tensor_split[i] = 1.0f;
-                }
-                model_params.tensor_split = tensor_split.data();
-
-                // Configure devices array
-                gpu_devices.clear();
-                for (size_t i = 0; i < dev_count && (int)gpu_devices.size() < cuda_gpu_count; i++) {
-                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-                    if (dev) {
-                        const char* dev_name = ggml_backend_dev_name(dev);
-                        if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
-                            gpu_devices.push_back(static_cast<void*>(dev));
-                        }
-                    }
-                }
-                gpu_devices.push_back(nullptr);
-                model_params.devices = reinterpret_cast<ggml_backend_dev_t*>(gpu_devices.data());
-
-                LOG_INFO("Auto-detected " + std::to_string(cuda_gpu_count) + " GPUs, using layer split mode");
-            } else {
-                // Single GPU only, no splitting
-                model_params.split_mode = LLAMA_SPLIT_MODE_NONE;
-                model_params.main_gpu = 0;
-                model_params.tensor_split = nullptr;
-                LOG_INFO("Single GPU mode (no splitting)");
-            }
-        }
-
-        LOG_INFO("GPU detected, offloading layers to GPU (n_gpu_layers=" + std::to_string(model_params.n_gpu_layers) + ")");
-    } else {
-        model_params.n_gpu_layers = 0;
-        LOG_INFO("GPU not available, using CPU only");
-    }
-
-    model = llama_model_load_from_file(model_path.c_str(), model_params);
-    if (!model) {
-        throw BackendError("Failed to load model: " + model_path);
-    }
-
-    // Log actual layer offload count
-    if (has_gpu) {
-        int32_t n_layers = llama_model_n_layer(static_cast<llama_model*>(model));
-        LOG_INFO("Model has " + std::to_string(n_layers) + " layers, all offloaded to GPU");
-    }
-
-    LOG_INFO("LlamaCpp model loaded successfully");
-
-    // If user didn't specify context size (0), get it from the model
-    if (context_size == 0) {
-        int32_t model_context_size = llama_model_n_ctx_train(static_cast<llama_model*>(model));
-        if (model_context_size <= 0) {
-            LOG_ERROR("No context size specified and model has none defined");
-            throw BackendError("Cannot determine context size: model provides no context size and none was specified");
-        }
-        context_size = static_cast<size_t>(model_context_size);
-        LOG_INFO("Using model's full context size: " + std::to_string(context_size));
-    }
-    // else: use user's specified context_size as-is
-
-    LOG_INFO("Using context size: " + std::to_string(context_size) + " tokens");
-
-    // Determine optimal batch size (only if not set via --ubatch)
-    if (n_batch == 512) {  // Default value means not overridden
-        if (has_gpu) {
-            if (context_size >= 32768) {
-                n_batch = 4096;
-            } else if (context_size >= 8192) {
-                n_batch = 2048;
-            } else {
-                n_batch = std::min(static_cast<int>(context_size), 2048);
-            }
-        } else {
-            n_batch = std::min(static_cast<int>(context_size) / 4, 1024);
-        }
-        LOG_INFO("Using n_batch = " + std::to_string(n_batch) + " (auto, GPU: " + (has_gpu ? "yes" : "no") + ")");
-    } else {
-        LOG_INFO("Using n_batch = " + std::to_string(n_batch) + " (from --ubatch)");
-    }
-
-    // Create llama context with KV space callback
-    llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx = static_cast<uint32_t>(context_size);
-    ctx_params.n_batch = static_cast<uint32_t>(n_batch);
-    ctx_params.offload_kqv = has_gpu;
-
-    // Set KV cache space callback for interrupt-driven eviction
-    ctx_params.kv_need_space_callback = [](uint32_t tokens_needed, void* user_data) -> uint32_t {
-        auto* backend = static_cast<LlamaCppBackend*>(user_data);
-        uint32_t new_head = backend->evict_to_free_space(tokens_needed);
-        if (new_head == UINT32_MAX) {
-            LOG_DEBUG("Eviction succeeded, retrying operation with freed space");
-        }
-        return new_head;
-    };
-    ctx_params.kv_need_space_callback_data = this;
-
-    model_ctx = llama_init_from_model(static_cast<llama_model*>(model), ctx_params);
-    if (!model_ctx) {
-        llama_model_free(static_cast<llama_model*>(model));
-        model = nullptr;
-        throw BackendError("Failed to create llama context");
-    }
-
-    // Initialize chat templates
-    auto templates = common_chat_templates_init(
-        static_cast<llama_model*>(model),
-        "",  // Use model's default chat template
-        "",  // Default BOS token
-        ""   // Default EOS token
-    );
-    chat_templates = templates.release();
-
-    if (!chat_templates) {
-        LOG_WARN("Failed to initialize chat templates - tool support may be limited");
-    } else {
-        LOG_DEBUG("Chat templates initialized successfully");
-    }
-
-    // Get chat template from model (no custom template support for now)
-    const char* template_ptr = llama_model_chat_template(static_cast<llama_model*>(model), nullptr);
-    const char* tool_use_template_ptr = llama_model_chat_template(static_cast<llama_model*>(model), "tool_use");
-
-    if (template_ptr) {
-        chat_template_text = std::string(template_ptr);
-        LOG_INFO("Retrieved default chat template from model (" + std::to_string(chat_template_text.length()) + " characters)");
-
-        // Dump template to file for inspection
-        std::ofstream template_file("/tmp/shepherd_chat_template.jinja");
-        template_file << chat_template_text;
-        template_file.close();
-        LOG_INFO("Chat template saved to /tmp/shepherd_chat_template.jinja for inspection");
-    }
-
-    if (tool_use_template_ptr) {
-        std::string tool_use_template = std::string(tool_use_template_ptr);
-        LOG_INFO("Retrieved tool_use chat template from model (" + std::to_string(tool_use_template.length()) + " characters)");
-
-        // Use tool_use template if it has python_tag support
-        if (tool_use_template.find("<|python_tag|>") != std::string::npos) {
-            chat_template_text = tool_use_template;
-            LOG_INFO("Using tool_use template variant for tool calling support");
-        }
-    }
-
-    if (!template_ptr && !tool_use_template_ptr) {
-        throw BackendError("No chat template found in model");
-    }
-
-    // Parse the chat template with minja
-    try {
-        minja::Options options{};
-        auto parsed_template = minja::Parser::parse(chat_template_text, options);
-        template_node = new std::shared_ptr<minja::TemplateNode>(parsed_template);
-        LOG_INFO("Successfully parsed chat template with minja");
-    } catch (const std::exception& e) {
-        throw BackendError("Failed to parse chat template with minja: " + std::string(e.what()));
-    }
-
-    // Detect model family - priority: chat template -> config.json -> path
-    model_config = Models::detect_from_chat_template(chat_template_text, model_path);
-    if (model_config.family == ModelFamily::GENERIC) {
-        // Try config.json in model directory
-        std::filesystem::path model_dir = std::filesystem::path(model_path).parent_path();
-        model_config = Models::detect_from_config_file(model_dir.string());
-    }
-    if (model_config.family == ModelFamily::GENERIC) {
-        // Last resort: path-based detection
-        model_config = Models::detect_from_model_path(model_path);
-    }
-    max_output_tokens = model_config.max_output_tokens;
-    LOG_INFO("Model configuration: family=" + std::to_string(static_cast<int>(model_config.family)) +
-             ", version=" + model_config.version +
-             ", tool_result_role=" + model_config.tool_result_role +
-             ", uses_eom_token=" + (model_config.uses_eom_token ? "true" : "false") +
-             ", uses_python_tag=" + (model_config.uses_python_tag ? "true" : "false"));
-
-    // Create chat template instance
-    chat_template = ChatTemplates::ChatTemplateFactory::create(chat_template_text, model_config, template_node);
-    LOG_INFO("Created chat template for family: " + std::to_string(static_cast<int>(model_config.family)));
-
-    // Try to load sampling parameters from generation_config.json
-    // Priority: config file values > generation_config.json > hardcoded defaults
-    std::filesystem::path model_file_path(model_path);
-    std::filesystem::path model_dir_path = model_file_path.parent_path();
-
-    float gen_temperature = temperature;  // Start with current value
-    float gen_top_p = top_p;
-    int gen_top_k = top_k;
-
-    if (Models::load_generation_config(model_dir_path.string(), gen_temperature, gen_top_p, gen_top_k)) {
-        // Only apply values that weren't explicitly set in config file
-        if (!temperature_from_config) temperature = gen_temperature;
-        if (!top_p_from_config) top_p = gen_top_p;
-        if (!top_k_from_config) top_k = gen_top_k;
-    }
-
-    LOG_INFO("LlamaCppBackend initialized with model: " + model_path);
-    initialized = true;
-
-    // Add system message in cli mode
-	if (!g_server_mode) {
-        // Format system message with tools using chat template
-        std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
-
-        // Use add_message to properly decode and add system message
-        // This ensures it's in KV cache before being added to session.messages
-        Response sys_resp = add_message(session, Message::SYSTEM, formatted_system, "", "", 0, 0);
-
-        if (!sys_resp.success) {
-            LOG_ERROR("Failed to add system message: " + sys_resp.error);
-            throw BackendError("Failed to initialize system message: " + sys_resp.error);
-        }
-
-        // Update session tracking (add_message already added to session.messages)
-        session.system_message_tokens = sys_resp.prompt_tokens;
-
-        LOG_INFO("Added system message to session (tokens=" + std::to_string(sys_resp.prompt_tokens) + ")");
-    }
-#else
-    throw BackendError("LlamaCpp backend not compiled in");
-#endif
-}
-
-Response LlamaCppBackend::add_message(Session& session, Message::Type type, const std::string& content, const std::string& tool_name, const std::string& tool_id, int prompt_tokens, int max_tokens) {
+void LlamaCppBackend::add_message(Session& session, Message::Role role, const std::string& content,
+                                      const std::string& tool_name, const std::string& tool_id,
+                                      int max_tokens) {
 #ifdef ENABLE_LLAMACPP
     if (!is_ready()) {
         Response err_resp;
@@ -1720,44 +1716,44 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
         err_resp.code = Response::ERROR;
         err_resp.finish_reason = "error";
         err_resp.error = "LlamaCpp backend not initialized";
-        return err_resp;
+        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
     }
 
     // Set current session for eviction callbacks
     current_session = &session;
 
-    LOG_DEBUG("LlamaCpp add_message called: type=" + std::to_string(type) +
-              ", content_len=" + std::to_string(content.length()));
+    dout(1) << "LlamaCpp add_message called: role=" + std::to_string(static_cast<int>(role)) +
+              ", content_len=" + std::to_string(content.length()) << std::endl;
 
-    // Count tokens for this message if not provided
-    int message_tokens = prompt_tokens;
-    if (message_tokens == 0) {
-        if (type == Message::SYSTEM && !session.tools.empty()) {
+    // Count tokens for this message
+    int message_tokens = 0;
+    {
+        if (role == Message::SYSTEM && !session.tools.empty()) {
             // Format system message with tools using chat template
             std::string formatted_content = chat_template->format_system_message(content, session.tools);
-            message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
+            message_tokens = count_message_tokens(role, formatted_content, tool_name, tool_id);
         } else {
-            message_tokens = count_message_tokens(type, content, tool_name, tool_id);
+            message_tokens = count_message_tokens(role, content, tool_name, tool_id);
         }
     }
 
-    LOG_DEBUG("Message token count: " + std::to_string(message_tokens));
+    dout(1) << "Message token count: " + std::to_string(message_tokens) << std::endl;
 
     // Create the message object (NOT in session yet)
-    Message msg(type, content, message_tokens);
+    Message msg(role, content, message_tokens);
     msg.tool_name = tool_name;
     msg.tool_call_id = tool_id;
 
     // TRY to decode to KV cache FIRST
     if (!format_and_decode_message(msg)) {
-        LOG_ERROR("Failed to decode message to KV cache");
+        std::cerr << "Failed to decode message to KV cache" << std::endl;
         // Session is unchanged - no rollback needed
         Response err_resp;
         err_resp.success = false;
         err_resp.code = Response::ERROR;
         err_resp.finish_reason = "error";
         err_resp.error = "Failed to decode message to KV cache";
-        return err_resp;
+        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
     }
 
     // SUCCESS - now add message to session
@@ -1768,9 +1764,15 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     session.total_tokens += message_tokens;
 
     // Track for context preservation
-    if (type == Message::USER) {
+    if (role == Message::USER) {
         session.last_user_message_index = new_message_index;
         session.last_user_message_tokens = message_tokens;
+    }
+
+    // Fire USER event callback when prompt is accepted
+    // This displays the user prompt before generation starts
+    if (callback && role == Message::USER && !content.empty()) {
+        callback(CallbackEvent::USER_PROMPT, content, "", "");
     }
 
     // Generate response (unless this is a system message)
@@ -1778,17 +1780,17 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
     resp.success = true;
     resp.code = Response::SUCCESS;
 
-    if (type != Message::SYSTEM) {
+    if (role != Message::SYSTEM) {
         // Update member variables used by generate() for token calculations
         // System message tokens (first message if it's a SYSTEM type)
-        if (!session.messages.empty() && session.messages[0].type == Message::SYSTEM) {
+        if (!session.messages.empty() && session.messages[0].role == Message::SYSTEM) {
             system_formatted_tokens = session.messages[0].tokens;
         } else {
             system_formatted_tokens = 0;
         }
 
         // Last user message tokens
-        if (type == Message::USER) {
+        if (role == Message::USER) {
             // Current message being added
             current_user_formatted_tokens = message_tokens;
         } else if (session.last_user_message_index >= 0) {
@@ -1798,7 +1800,10 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
             current_user_formatted_tokens = 0;
         }
 
-        std::string response_text = generate(max_tokens);
+        // User prompt echo moved to frontend - backend never outputs directly
+
+        // Generate with callback if provided (streaming), otherwise accumulate
+        std::string response_text = generate(max_tokens, callback);
 
         // Add assistant message to session (generation was successful)
         Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
@@ -1811,6 +1816,9 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
         session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
         session.last_assistant_message_tokens = last_assistant_kv_tokens;
 
+        // Tool call detection now handled by unified output() filter during streaming
+        // Keeping this code disabled for reference
+#if 0
         // Parse tool calls from response if present
         std::vector<ToolParser::ToolCall> tool_calls;
         if (!response_text.empty()) {
@@ -1831,186 +1839,34 @@ Response LlamaCppBackend::add_message(Session& session, Message::Type type, cons
                 }
             }
         }
+#endif
 
         // Determine finish reason
         std::string finish_reason = "stop";
         if (g_generation_cancelled) {
             finish_reason = "cancelled";
-        } else if (!tool_calls.empty()) {
-            finish_reason = "tool_calls";
         } else if (last_generation_hit_length_limit) {
             finish_reason = "length";
         }
 
-        // Build Response
-        resp.content = response_text;
-        resp.tool_calls = tool_calls;
-        resp.prompt_tokens = last_prompt_tokens;
-        resp.completion_tokens = last_completion_tokens;
-        resp.finish_reason = finish_reason;
-        resp.was_streamed = !g_server_mode;  // Streamed unless in server mode
+#if 0
+        // Send tool calls via callback - now handled by output() filter
+        for (const auto& tc : tool_calls) {
+            callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+        }
+#endif
+
+        // Signal completion
+        callback(CallbackEvent::STOP, finish_reason, "", "");
     } else {
         // System message - no generation, just success
-        resp.finish_reason = "system";
-        resp.prompt_tokens = message_tokens;
-        resp.completion_tokens = 0;
+        callback(CallbackEvent::STOP, "system", "", "");
     }
 
-    LOG_DEBUG("add_message complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
-              ", completion_tokens=" + std::to_string(resp.completion_tokens) +
-              ", finish_reason=" + resp.finish_reason);
-
-    return resp;
+    dout(1) << "add_message complete" << std::endl;
 #else
-    Response err_resp;
-    err_resp.success = false;
-    err_resp.code = Response::ERROR;
-    err_resp.finish_reason = "error";
-    err_resp.error = "LlamaCpp backend not compiled in";
-    return err_resp;
+    callback(CallbackEvent::ERROR, "LlamaCpp backend not compiled in", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 #endif
 }
 
-Response LlamaCppBackend::add_message_stream(Session& session, Message::Type type, const std::string& content,
-                                            StreamCallback callback,
-                                            const std::string& tool_name, const std::string& tool_id,
-                                            int prompt_tokens, int max_tokens) {
-#ifdef ENABLE_LLAMACPP
-    if (!is_ready()) {
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "LlamaCpp backend not initialized";
-        return err_resp;
-    }
-
-    // Set current session for eviction callbacks
-    current_session = &session;
-
-    LOG_DEBUG("LlamaCpp add_message_stream called: type=" + std::to_string(type) +
-              ", content_len=" + std::to_string(content.length()));
-
-    // Count tokens for this message if not provided
-    int message_tokens = prompt_tokens;
-    if (message_tokens == 0) {
-        if (type == Message::SYSTEM && !session.tools.empty()) {
-            std::string formatted_content = chat_template->format_system_message(content, session.tools);
-            message_tokens = count_message_tokens(type, formatted_content, tool_name, tool_id);
-        } else {
-            message_tokens = count_message_tokens(type, content, tool_name, tool_id);
-        }
-    }
-
-    // Create the message object
-    Message msg(type, content, message_tokens);
-    msg.tool_name = tool_name;
-    msg.tool_call_id = tool_id;
-
-    // Decode to KV cache
-    if (!format_and_decode_message(msg)) {
-        LOG_ERROR("Failed to decode message to KV cache");
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "Failed to decode message to KV cache";
-        return err_resp;
-    }
-
-    // Add message to session
-    session.messages.push_back(msg);
-    int new_message_index = static_cast<int>(session.messages.size()) - 1;
-    session.total_tokens += message_tokens;
-
-    if (type == Message::USER) {
-        session.last_user_message_index = new_message_index;
-        session.last_user_message_tokens = message_tokens;
-    }
-
-    // Generate response
-    Response resp;
-    resp.success = true;
-    resp.code = Response::SUCCESS;
-
-    if (type != Message::SYSTEM) {
-        // Update member variables for token calculations
-        if (!session.messages.empty() && session.messages[0].type == Message::SYSTEM) {
-            system_formatted_tokens = session.messages[0].tokens;
-        } else {
-            system_formatted_tokens = 0;
-        }
-
-        if (type == Message::USER) {
-            current_user_formatted_tokens = message_tokens;
-        } else if (session.last_user_message_index >= 0) {
-            current_user_formatted_tokens = session.last_user_message_tokens;
-        } else {
-            current_user_formatted_tokens = 0;
-        }
-
-        // Generate with streaming callback
-        std::string response_text = generate(max_tokens, callback);
-
-        // Add assistant message to session
-        Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
-        session.messages.push_back(assistant_msg);
-        session.total_tokens += last_assistant_kv_tokens;
-        session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
-        session.last_assistant_message_tokens = last_assistant_kv_tokens;
-
-        // Parse tool calls
-        std::vector<ToolParser::ToolCall> tool_calls;
-        if (!response_text.empty()) {
-            bool has_marker = false;
-            for (const auto& marker : tool_call_markers) {
-                if (response_text.find(marker) != std::string::npos) {
-                    has_marker = true;
-                    break;
-                }
-            }
-
-            if (has_marker || (response_text[0] == '{' && response_text.find("\"name\"") != std::string::npos)) {
-                auto tool_call = ToolParser::parse_tool_call(response_text, tool_call_markers);
-                if (tool_call.has_value()) {
-                    tool_calls.push_back(tool_call.value());
-                }
-            }
-        }
-
-        // Determine finish reason
-        std::string finish_reason = "stop";
-        if (g_generation_cancelled) {
-            finish_reason = "cancelled";
-        } else if (!tool_calls.empty()) {
-            finish_reason = "tool_calls";
-        } else if (last_generation_hit_length_limit) {
-            finish_reason = "length";
-        }
-
-        resp.content = response_text;
-        resp.tool_calls = tool_calls;
-        resp.prompt_tokens = last_prompt_tokens;
-        resp.completion_tokens = last_completion_tokens;
-        resp.finish_reason = finish_reason;
-        resp.was_streamed = (callback != nullptr);
-    } else {
-        resp.finish_reason = "system";
-        resp.prompt_tokens = message_tokens;
-        resp.completion_tokens = 0;
-    }
-
-    LOG_DEBUG("add_message_stream complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
-              ", completion_tokens=" + std::to_string(resp.completion_tokens) +
-              ", finish_reason=" + resp.finish_reason);
-
-    return resp;
-#else
-    Response err_resp;
-    err_resp.success = false;
-    err_resp.code = Response::ERROR;
-    err_resp.finish_reason = "error";
-    err_resp.error = "LlamaCpp backend not compiled in";
-    return err_resp;
-#endif
-}

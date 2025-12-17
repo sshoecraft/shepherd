@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <functional>
 
 /// @brief MCP server configuration entry
 struct MCPServerEntry {
@@ -34,7 +35,9 @@ public:
 
     /// @brief List all MCP servers
     /// @param check_health If true, test connection to each server
-    static void list_servers(const std::string& config_path, bool check_health = false);
+    static void list_servers(const std::string& config_path,
+                             std::function<void(const std::string&)> callback,
+                             bool check_health = false);
 
     /// @brief Check if server exists
     static bool server_exists(const std::string& config_path, const std::string& name);
@@ -42,4 +45,6 @@ public:
 
 // Common MCP command implementation (takes parsed args)
 // Returns 0 on success, 1 on error
-int handle_mcp_args(const std::vector<std::string>& args);
+// callback: function to emit output
+int handle_mcp_args(const std::vector<std::string>& args,
+                    std::function<void(const std::string&)> callback);

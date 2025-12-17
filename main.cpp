@@ -8,10 +8,10 @@
 #include "provider.h"
 #include "frontend.h"
 #include "cli.h"
-#include "server/cli_server.h"
-#include "server/control.h"
-#include "terminal_io.h"
-#include "backends/backend.h"
+#include "tui.h"
+#include "cli_server.h"
+#include "server.h"
+#include "backend.h"
 #include "backends/factory.h"
 #include "backends/models.h"
 #include "version.h"
@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <atomic>
 #include <thread>
+#include <chrono>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
@@ -62,9 +63,17 @@ void get_global_args(int& argc, char**& argv) {
 #endif
 
 // Global debug level (0=off, 1-9=increasing verbosity)
-// Used by dprintf() macro in debug.h for fine-grained debug control
+// Used by dprintf() macro for fine-grained debug control
 int g_debug_level = 0;
 bool g_show_thinking = false;
+
+// Null stream for discarding debug output when level not met
+static std::ofstream null_stream("/dev/null");
+
+// Debug output stream
+std::ostream& dout(int level) {
+    return (g_debug_level >= level) ? std::cerr : null_stream;
+}
 
 // Global config instance
 std::unique_ptr<Config> config;
@@ -93,7 +102,6 @@ static void print_usage(int, char** argv) {
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
-	printf("	-l, --log-file	   Log to file instead of console\n");
 	printf("	-m, --model		   Model name or file (overrides config)\n");
 	printf("	-p, --provider	   Provider name to use (from provider list)\n");
 	printf("	--model_path	   Model directory path (overrides config, e.g., ~/models)\n");
@@ -105,11 +113,13 @@ static void print_usage(int, char** argv) {
 	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
 	printf("	--pp N			   Pipeline parallelism size (llamacpp only, default: 1)\n");
 	printf("	--ubatch N		   Micro-batch size for prompt processing (llamacpp only, default: auto)\n");
+	printf("	--cache-type TYPE  KV cache data type: f16, f32, q8_0, q4_0 (llamacpp only, default: f16)\n");
 	printf("	--models-file FILE Path to models database JSON file (default: ~/.config/shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.local/share/shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
 	printf("	--nosched		   Disable scheduler (no scheduled tasks run)\n");
+	printf("	--nostream		   Disable streaming (wait for complete response)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
@@ -166,8 +176,9 @@ static int handle_config_subcommand(int argc, char** argv) {
 		args.push_back(argv[i]);
 	}
 
-	// Call common implementation
-	return handle_config_args(args);
+	// Call common implementation with stdout output
+	auto out = [](const std::string& msg) { std::cout << msg; };
+	return handle_config_args(args, out);
 }
 
 static int handle_provider_subcommand(int argc, char** argv) {
@@ -177,8 +188,9 @@ static int handle_provider_subcommand(int argc, char** argv) {
 		args.push_back(argv[i]);
 	}
 
-	// Call common implementation
-	return handle_provider_args(args);
+	// Call common implementation with stdout output
+	auto out = [](const std::string& msg) { std::cout << msg; };
+	return handle_provider_args(args, out, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 static int handle_mcp_subcommand(int argc, char** argv) {
@@ -188,8 +200,9 @@ static int handle_mcp_subcommand(int argc, char** argv) {
 		args.push_back(argv[i]);
 	}
 
-	// Call common implementation
-	return handle_mcp_args(args);
+	// Call common implementation with stdout output
+	auto out = [](const std::string& msg) { std::cout << msg; };
+	return handle_mcp_args(args, out);
 }
 
 static int handle_sched_command(int argc, char** argv) {
@@ -199,8 +212,9 @@ static int handle_sched_command(int argc, char** argv) {
 		args.push_back(argv[i]);
 	}
 
-	// Call common implementation
-	return handle_sched_args(args);
+	// Call common implementation with stdout output
+	auto out = [](const std::string& msg) { std::cout << msg; };
+	return handle_sched_args(args, out);
 }
 
 static int handle_edit_system_command(int argc, char** argv) {
@@ -228,13 +242,6 @@ static int handle_edit_system_command(int argc, char** argv) {
 
 	// Write current system prompt to temp file
 	std::string current_prompt = config.system_prompt;
-	if (current_prompt.empty()) {
-		// Use default prompt as starting point
-		current_prompt = "You have access to tools, but they are OPTIONAL. Only use tools when you need external information that you don't have:\n\n";
-		current_prompt += "When you see a NOTICE about conversations moved to long-term memory, you can use the search_memory tool to retrieve that information if the user asks about it.\n\n";
-		current_prompt += "Directive: Whenever you invoke a tool, output exactly one line containing only the JSON object for the tool call.\nThe line must start with { and end with }.\nDo not include any text, explanations, extra lines, or formatting before or after the JSON.\nThe JSON must appear on its own line with nothing else.\n\n";
-	}
-
 	if (write(temp_fd, current_prompt.c_str(), current_prompt.length()) == -1) {
 		std::cerr << "Error: Failed to write to temporary file" << std::endl;
 		close(temp_fd);
@@ -325,13 +332,15 @@ int main(int argc, char** argv) {
 
 	// Detect interactivity BEFORE any MPI re-exec (isatty fails after mpirun)
 	// Only check if not already set (preserve across MPI re-exec)
+	bool is_interactive = true;
 	if (!getenv("SHEPHERD_INTERACTIVE")) {
-		int is_interactive = isatty(STDIN_FILENO);
+		is_interactive = isatty(STDIN_FILENO);
 		setenv("SHEPHERD_INTERACTIVE", is_interactive ? "1" : "0", 0);
-		LOG_DEBUG("Set SHEPHERD_INTERACTIVE=" + std::string(is_interactive ? "1" : "0") +
-		          " (isatty=" + std::to_string(is_interactive) + ")");
+		dout(1) << "Set SHEPHERD_INTERACTIVE=" << (is_interactive ? "1" : "0")
+		        << " (isatty=" << is_interactive << ")" << std::endl;
 	} else {
-		LOG_DEBUG("SHEPHERD_INTERACTIVE already set to: " + std::string(getenv("SHEPHERD_INTERACTIVE")));
+		is_interactive = (std::string(getenv("SHEPHERD_INTERACTIVE")) == "1");
+		dout(1) << "SHEPHERD_INTERACTIVE already set to: " + std::string(getenv("SHEPHERD_INTERACTIVE")) << std::endl;
 	}
 
 	// Detect MPI rank early (for multi-GPU TensorRT models)
@@ -367,7 +376,8 @@ int main(int argc, char** argv) {
 			args.push_back(argv[i]);
 		}
 
-		return tools.handle_tools_args(args);
+		auto out = [](const std::string& msg) { std::cout << msg; };
+		return tools.handle_tools_args(args, out);
 	}
 
 	// Handle provider subcommand
@@ -401,10 +411,10 @@ int main(int argc, char** argv) {
 
 	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
+	bool no_stream = false;
 	bool no_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
-	std::string log_file;
 	std::string config_file_path;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
@@ -433,12 +443,12 @@ int main(int argc, char** argv) {
 		std::string memory_db;
 		std::string models_file;
 		std::string system_prompt;
+		std::string cache_type;
 	} override;
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
 		{"debug", optional_argument, 0, 'd'},
-		{"log-file", required_argument, 0, 'l'},
 		{"model", required_argument, 0, 'm'},
 		{"provider", required_argument, 0, 'p'},
 		{"model_path", required_argument, 0, 1018},
@@ -451,6 +461,7 @@ int main(int argc, char** argv) {
 		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
 		{"nosched", no_argument, 0, 1037},
+		{"nostream", no_argument, 0, 1041},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
 		{"template", required_argument, 0, 1006},
@@ -464,6 +475,7 @@ int main(int argc, char** argv) {
 		{"tp", required_argument, 0, 1029},
 		{"pp", required_argument, 0, 1030},
 		{"ubatch", required_argument, 0, 1035},
+		{"cache-type", required_argument, 0, 1040},
 		{"thinking", no_argument, 0, 1031},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
@@ -477,7 +489,7 @@ int main(int argc, char** argv) {
 
 	int opt;
 	int option_index = 0;
-	while ((opt = getopt_long(argc, argv, "c:dl:m:p:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:dm:p:vh", long_options, &option_index)) != -1) {
 		switch (opt) {
 			case 'c':
 				config_file_path = optarg;
@@ -490,9 +502,6 @@ int main(int argc, char** argv) {
 				} else {
 					g_debug_level = 1;
 				}
-				break;
-			case 'l':
-				log_file = optarg;
 				break;
 			case 'm':
 				override.model = optarg;
@@ -527,6 +536,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1037: // --nosched
 				g_disable_scheduler = true;
+				break;
+			case 1041: // --nostream
+				no_stream = true;
 				break;
 			case 1027: // --notools
 				no_tools = true;
@@ -588,6 +600,14 @@ int main(int argc, char** argv) {
 					return 1;
 				}
 				break;
+			case 1040: // --cache-type
+				override.cache_type = optarg;
+				if (override.cache_type != "f16" && override.cache_type != "f32" &&
+				    override.cache_type != "q8_0" && override.cache_type != "q4_0") {
+					printf("Error: cache-type must be one of: f16, f32, q8_0, q4_0\n");
+					return 1;
+				}
+				break;
 			case 1031: // --thinking
 				override.thinking = true;
 				break;
@@ -618,36 +638,7 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	// Initialize terminal I/O early (before logger and other systems)
-	// Server modes should never use TUI or interactive input - force TUI off
-	if (g_server_mode || frontend_mode == "cli-server") {
-		tui_override = 0;  // Force TUI off for server modes
-	}
-	if (!tio.init(color_override, tui_override)) {
-		return 1;  // Failed to initialize terminal
-	}
-
-	// Initialize logger early
-	Logger& logger = Logger::instance();
-	// g_debug_level already set during argument parsing, don't overwrite it
-
-	if (g_debug_level) {
-		logger.set_log_level(LogLevel::DEBUG);
-		std::cout << "Debug mode enabled (level " << g_debug_level << ")" << std::endl;
-
-		// Log interactivity detection for debugging
-		const char* interactive_env = getenv("SHEPHERD_INTERACTIVE");
-		std::string debug_msg = "SHEPHERD_INTERACTIVE=" + std::string(interactive_env ? interactive_env : "not set") +
-		                        " (tio.interactive_mode=" + std::to_string(tio.interactive_mode) + ")";
-		std::cerr << "[DEBUG-MAIN] " << debug_msg << std::endl;
-		LOG_DEBUG(debug_msg);
-	} else if (!g_server_mode) {
-		// In client mode, suppress INFO logs unless debug is enabled
-		logger.set_log_level(LogLevel::WARN);
-	}
-	// In server mode, default log level is INFO (set in Logger constructor)
-
-	// Load configuration
+	// Load configuration early (before terminal init to get TUI setting)
 	config = std::make_unique<Config>();
 
 	// Set custom config path if specified
@@ -660,6 +651,35 @@ int main(int argc, char** argv) {
 	} catch (const ConfigError& e) {
 		fprintf(stderr, "Configuration error: %s\n", e.what());
 		return 1;
+	}
+
+	// Determine if we need TUI mode
+	// Server modes should never use TUI or interactive input - force TUI off
+	bool use_tui = false;
+	if (g_server_mode || frontend_mode == "cli-server") {
+		tui_override = 0;  // Force TUI off for server modes
+	} else if (tui_override == -1) {
+		// No command-line override - use config setting
+		if (config->tui) {
+			tui_override = 1;
+		}
+	}
+	use_tui = (tui_override == 1);
+
+	// Set frontend mode based on TUI flag
+	if (use_tui) {
+		frontend_mode = "tui";
+		dout(1) << "TUI mode enabled, frontend_mode=tui" << std::endl;
+	}
+
+	// Debug mode initialization
+	if (g_debug_level) {
+		std::cout << "Debug mode enabled (level " << g_debug_level << ")" << std::endl;
+
+		// Log interactivity detection for debugging
+		const char* interactive_env = getenv("SHEPHERD_INTERACTIVE");
+		std::string debug_msg = "SHEPHERD_INTERACTIVE=" + std::string(interactive_env ? interactive_env : "not set");
+		dout(1) << debug_msg << std::endl;
 	}
 
 	// Apply command-line overrides to config
@@ -708,6 +728,10 @@ int main(int argc, char** argv) {
 		config->thinking = true;
 	}
 	g_show_thinking = config->thinking;
+	if (no_stream) {
+		config->streaming = false;
+		dout(1) << "Streaming disabled via --nostream flag" << std::endl;
+	}
 	if (override.gpu_layers != -999) {
 		config->json["gpu_layers"] = override.gpu_layers;
 	}
@@ -719,6 +743,9 @@ int main(int argc, char** argv) {
 	}
 	if (override.ubatch != -1) {
 		config->json["ubatch"] = override.ubatch;
+	}
+	if (!override.cache_type.empty()) {
+		config->json["cache_type"] = override.cache_type;
 	}
 
 	// Validate configuration (skip model path check if overridden)
@@ -775,14 +802,8 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	if (!log_file.empty()) {
-		logger.set_log_file(log_file);
-		logger.set_console_output(false);
-		LOG_INFO("Logging to file: " + log_file);
-	}
-
-	LOG_INFO("Shepherd starting up...");
-	LOG_INFO("Backend: " + config->backend);
+	dout(1) << "Shepherd starting up..." << std::endl;
+	dout(1) << "Backend: " + config->backend << std::endl;
 
 
 	// Initialize models database if specified
@@ -803,31 +824,22 @@ int main(int argc, char** argv) {
 			cmdline_provider_ptr = &cmdline_provider;
 		}
 
-		// Create the session that will be used throughout (not in server mode)
-		Session session;
-		session.system_message = config->system_message;
-
-		// Create frontend - this loads providers and adds cmdline provider if provided
-		auto frontend = Frontend::create(frontend_mode, server_host, server_port, cmdline_provider_ptr);
-
-		// Initialize frontend (RAG, tools, MCP) - skip in server mode, clients handle their own
-		if (!g_server_mode) {
-			frontend->init(session, no_mcp, no_tools);
-		} else {
-			LOG_INFO("Server mode: Tool registration skipped (client-side tools)");
-		}
+		// Create and initialize frontend (loads providers, registers tools)
+		// Session is owned by frontend
+		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
+		                                 cmdline_provider_ptr, no_mcp, no_tools);
 
 		// Connect to provider (stores backend in frontend)
 		bool connected = false;
 		if (!override.provider.empty()) {
 			// Specific provider requested via --provider
-			connected = frontend->connect_provider(override.provider, session);
+			connected = frontend->connect_provider(override.provider);
 		} else if (has_cmdline_override) {
 			// Command-line overrides → use ephemeral _cmdline provider
-			connected = frontend->connect_provider("_cmdline", session);
+			connected = frontend->connect_provider("_cmdline");
 		} else {
 			// No overrides → try providers in priority order
-			connected = frontend->connect_next_provider(session);
+			connected = frontend->connect_next_provider();
 		}
 
 		if (!connected) {
@@ -842,12 +854,12 @@ int main(int argc, char** argv) {
 				CLI* cli = dynamic_cast<CLI*>(frontend.get());
 				if (cli) {
 					register_provider_tools(cli->tools, active_provider);
-					cli->tools.populate_session_tools(session);
+					cli->tools.populate_session_tools(frontend->session);
 				}
 			}
 		}
 
-		LOG_INFO("Shepherd initialization complete");
+		dout(1) << "Shepherd initialization complete" << std::endl;
 
 		// ============================================================================
 		// Server Mode - HTTP API via FastAPI
@@ -857,9 +869,9 @@ int main(int argc, char** argv) {
 
 			// MPI rank check: Only rank 0 should run the server
 			// (backend->initialize() may have re-exec'd with mpirun for multi-GPU models)
-			LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
+			dout(1) << "MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false") << std::endl;
 			if (!is_mpi_leader) {
-				LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0...");
+				dout(1) << "MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for work from rank 0..." << std::endl;
 				// Keep process alive - backend will be controlled via MPI by rank 0
 				while (true) {
 					std::this_thread::sleep_for(std::chrono::seconds(3600));
@@ -867,15 +879,15 @@ int main(int argc, char** argv) {
 			}
 
 			// Only rank 0 continues to run server
-			return frontend->run(session);
+			return frontend->run();
 		}
 
 		// Session tools already populated during frontend->init() above
-		LOG_DEBUG("Session has " + std::to_string(session.tools.size()) + " tools");
+		dout(1) << "Session has " + std::to_string(frontend->session.tools.size()) + " tools" << std::endl;
 
 		// Calculate desired completion tokens once (used throughout session lifetime)
 		// Must be calculated AFTER backend initialization when context_size is finalized
-		session.desired_completion_tokens = calculate_desired_completion_tokens(
+		frontend->session.desired_completion_tokens = calculate_desired_completion_tokens(
 			frontend->backend->context_size,
 			frontend->backend->max_output_tokens
 		);
@@ -884,35 +896,35 @@ int main(int argc, char** argv) {
 		// In server mode, never auto-evict - return 400 error and let client handle cleanup
 		// Local backends (llamacpp) handle eviction through reactive callbacks
 		// Must be set AFTER initialization when backend->context_size is finalized
-		session.auto_evict = (!g_server_mode && frontend->backend->context_size > 0 && !frontend->backend->is_local);
-		if (session.auto_evict) {
-			LOG_INFO("Auto-eviction enabled (context_size=" + std::to_string(frontend->backend->context_size) +
-			         ", desired_completion=" + std::to_string(session.desired_completion_tokens) + ")");
+		frontend->session.auto_evict = (!g_server_mode && frontend->backend->context_size > 0 && !frontend->backend->is_local);
+		if (frontend->session.auto_evict) {
+			dout(1) << "Auto-eviction enabled (context_size=" << frontend->backend->context_size
+			        << ", desired_completion=" << frontend->session.desired_completion_tokens << ")" << std::endl;
 		}
 
 		// ============================================================================
 		// MPI Multi-GPU: Non-leader ranks wait for shutdown signal
 		// ============================================================================
-		LOG_DEBUG("MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false"));
+		dout(1) << "MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false") << std::endl;
 		if (!is_mpi_leader) {
-			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for shutdown signal...");
+			dout(1) << "MPI rank " + std::to_string(mpi_rank) + " initialization complete, waiting for shutdown signal..." << std::endl;
 			// Workers wait at barrier - rank 0 will hit this barrier when done
 			// The executor's internal threads handle MPI work distribution
 #ifdef ENABLE_TENSORRT
 			MPI_Barrier(MPI_COMM_WORLD);
 #endif
-			LOG_INFO("MPI rank " + std::to_string(mpi_rank) + " received shutdown signal, exiting");
+			dout(1) << "MPI rank " + std::to_string(mpi_rank) + " received shutdown signal, exiting" << std::endl;
 			return 0;
 		}
 
 		// From here on, only rank 0 continues...
-		LOG_DEBUG("Rank 0 continuing to user input loop...");
+		dout(1) << "Rank 0 continuing to user input loop..." << std::endl;
 
 
 	// ============================================================================
 	// Run Frontend (created earlier during tool initialization)
 	// ============================================================================
-	int result = frontend->run(session);
+	int result = frontend->run();
 
 	// Clean shutdown for MPI
 	// Signal workers to exit via barrier, then all ranks exit together
@@ -920,7 +932,7 @@ int main(int argc, char** argv) {
 	bool is_mpi = mpi_size_env && std::atoi(mpi_size_env) > 1;
 
 	if (is_mpi) {
-		LOG_DEBUG("Rank 0 done, signaling workers via barrier");
+		dout(1) << "Rank 0 done, signaling workers via barrier" << std::endl;
 #ifdef ENABLE_TENSORRT
 		MPI_Barrier(MPI_COMM_WORLD);
 #endif
@@ -931,8 +943,7 @@ int main(int argc, char** argv) {
 
 } catch (const std::exception& e) {
 	std::string error_msg = std::string("Fatal error: ") + e.what();
-	LOG_FATAL(error_msg);
-	fprintf(stderr, "FATAL: %s\n", error_msg.c_str());
+	fprintf(stderr, "Error: %s\n", error_msg.c_str());
 
 	// For fatal errors, use MPI_Abort to terminate all ranks immediately
 	const char* mpi_size_env = getenv("OMPI_COMM_WORLD_SIZE");
@@ -944,8 +955,7 @@ int main(int argc, char** argv) {
 
 	return 1;
 } catch (...) {
-	LOG_FATAL("Fatal error: Unknown exception");
-	fprintf(stderr, "FATAL: Unknown exception caught\n");
+	fprintf(stderr, "Fatal error: Unknown exception\n");
 	return 1;
 }
 }

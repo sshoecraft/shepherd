@@ -3,8 +3,8 @@
 #include "mcp/mcp.h"
 #include "tools/tool.h"
 #include "tools/tools.h"
-#include "logger.h"
 #include "nlohmann/json.hpp"
+
 
 MCP& MCP::instance() {
     static MCP manager;
@@ -12,12 +12,12 @@ MCP& MCP::instance() {
 }
 
 bool MCP::initialize(Tools& tools) {
-    LOG_INFO("Initializing MCP Manager...");
+    dout(1) << "Initializing MCP Manager..." << std::endl;
 
     std::string mcp_json = config->mcp_config;
-    LOG_DEBUG("MCP config string: " + (mcp_json.empty() ? "(empty)" : mcp_json));
+    dout(1) << "MCP config string: " + (mcp_json.empty() ? "(empty)" : mcp_json) << std::endl;
     if (mcp_json.empty()) {
-        LOG_INFO("No MCP servers configured");
+        dout(1) << "No MCP servers configured" << std::endl;
         return true;
     }
 
@@ -49,32 +49,32 @@ bool MCP::initialize(Tools& tools) {
         return initialize(tools, server_configs);
 
     } catch (const nlohmann::json::exception& e) {
-        LOG_ERROR("Failed to parse MCP configuration: " + std::string(e.what()));
+        std::cerr << "Failed to parse MCP configuration: " + std::string(e.what()) << std::endl;
         return false;
     }
 }
 
 bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_configs) {
-    LOG_INFO("Initializing MCP Manager with " + std::to_string(server_configs.size()) + " servers");
+    dout(1) << "Initializing MCP Manager with " + std::to_string(server_configs.size()) + " servers" << std::endl;
 
     bool any_success = false;
 
     for (const auto& sconfig : server_configs) {
-        LOG_INFO("Connecting to MCP server: " + sconfig.name);
+        dout(1) << "Connecting to MCP server: " + sconfig.name << std::endl;
         if (connect_server(tools, sconfig)) {
             any_success = true;
-            LOG_INFO("Successfully connected to MCP server: " + sconfig.name);
+            dout(1) << "Successfully connected to MCP server: " + sconfig.name << std::endl;
         } else {
-            LOG_WARN("Failed to connect to MCP server: " + sconfig.name);
+            dout(1) << std::string("WARNING: ") +"Failed to connect to MCP server: " + sconfig.name << std::endl;
         }
     }
 
     if (any_success) {
-        LOG_INFO("MCP Manager initialized with " +
+        dout(1) << "MCP Manager initialized with " +
                  std::to_string(clients_.size()) + " servers, " +
-                 std::to_string(total_tools_) + " tools");
+                 std::to_string(total_tools_) + " tools" << std::endl;
     } else {
-        LOG_DEBUG("No MCP servers could be initialized");
+        dout(1) << "No MCP servers could be initialized" << std::endl;
     }
 
     return any_success;
@@ -101,13 +101,13 @@ bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
 
         // Discover tools
         auto mcp_tools = client->list_tools();
-        LOG_DEBUG("Discovered " + std::to_string(mcp_tools.size()) + " tools from " + server_config.name);
+        dout(1) << "Discovered " + std::to_string(mcp_tools.size()) + " tools from " + server_config.name << std::endl;
 
         // Register tools with Tools instance
         for (const auto& mcp_tool : mcp_tools) {
             // Skip deprecated tools
             if (mcp_tool.description.find("DEPRECATED") != std::string::npos) {
-                LOG_DEBUG("Skipping deprecated MCP tool: " + mcp_tool.name);
+                dout(1) << "Skipping deprecated MCP tool: " + mcp_tool.name << std::endl;
                 continue;
             }
 
@@ -116,7 +116,7 @@ bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
             std::string tool_name = adapter->unsanitized_name();
 
             tools.register_tool(std::move(adapter), "mcp");
-            LOG_DEBUG("Registered MCP tool: " + tool_name + " (sanitized)");
+            dout(1) << "Registered MCP tool: " + tool_name + " (sanitized)" << std::endl;
             total_tools_++;
         }
 
@@ -127,20 +127,20 @@ bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
         return true;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Exception connecting to MCP server " + sconfig.name + ": " + e.what());
+        std::cerr << "Exception connecting to MCP server " + sconfig.name + ": " + e.what() << std::endl;
         return false;
     }
 }
 
 void MCP::shutdown() {
-    LOG_INFO("Shutting down MCP Manager...");
+    dout(1) << "Shutting down MCP Manager..." << std::endl;
 
     // Shutdown all clients
     for (auto& client : clients_) {
         try {
             // MCPClient destructor will handle shutdown
         } catch (const std::exception& e) {
-            LOG_ERROR("Error shutting down MCP client: " + std::string(e.what()));
+            std::cerr << "Error shutting down MCP client: " + std::string(e.what()) << std::endl;
         }
     }
 
@@ -148,7 +148,7 @@ void MCP::shutdown() {
     servers_by_name_.clear();
     total_tools_ = 0;
 
-    LOG_INFO("MCP Manager shutdown complete");
+    dout(1) << "MCP Manager shutdown complete" << std::endl;
 }
 
 std::vector<std::string> MCP::get_server_names() const {
@@ -168,12 +168,12 @@ std::map<std::string, std::vector<MCPResource>> MCP::list_all_resources() const 
             auto resources = client->list_resources();
             if (!resources.empty()) {
                 all_resources[server_name] = resources;
-                LOG_DEBUG("Listed " + std::to_string(resources.size()) +
-                         " resources from server: " + server_name);
+                dout(1) << "Listed " + std::to_string(resources.size()) +
+                         " resources from server: " + server_name << std::endl;
             }
         } catch (const std::exception& e) {
-            LOG_ERROR("Failed to list resources from server: " +
-                     client->get_server_name() + " - " + e.what());
+            std::cerr << "Failed to list resources from server: " +
+                     client->get_server_name() + " - " + e.what() << std::endl;
         }
     }
 
@@ -189,7 +189,7 @@ std::vector<MCPResource> MCP::list_resources(const std::string& server_name) con
     try {
         return it->second->list_resources();
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to list resources from " + server_name + ": " + e.what());
+        std::cerr << "Failed to list resources from " + server_name + ": " + e.what() << std::endl;
         throw;
     }
 }
@@ -201,10 +201,10 @@ nlohmann::json MCP::read_resource(const std::string& server_name, const std::str
     }
 
     try {
-        LOG_DEBUG("Reading resource '" + uri + "' from server: " + server_name);
+        dout(1) << "Reading resource '" + uri + "' from server: " + server_name << std::endl;
         return it->second->read_resource(uri);
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to read resource from " + server_name + ": " + e.what());
+        std::cerr << "Failed to read resource from " + server_name + ": " + e.what() << std::endl;
         throw;
     }
 }

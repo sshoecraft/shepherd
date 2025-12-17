@@ -1,8 +1,9 @@
+#include "shepherd.h"
 
 #include "mcp_resource_tools.h"
 #include "tools.h"
 #include "mcp/mcp.h"
-#include "logger.h"
+
 #include <sstream>
 
 std::string ListMcpResourcesTool::unsanitized_name() const {
@@ -33,6 +34,7 @@ std::map<std::string, std::any> ListMcpResourcesTool::execute(const std::map<std
             if (all_resources.empty()) {
                 result["success"] = true;
                 result["content"] = std::string("No resources found from any MCP server");
+                result["summary"] = std::string("Listed 0 resources");
                 return result;
             }
 
@@ -56,6 +58,7 @@ std::map<std::string, std::any> ListMcpResourcesTool::execute(const std::map<std
             if (resources.empty()) {
                 result["success"] = true;
                 result["content"] = std::string("No resources found from server: ") + server_name;
+                result["summary"] = std::string("Listed 0 resources");
                 return result;
             }
 
@@ -73,8 +76,20 @@ std::map<std::string, std::any> ListMcpResourcesTool::execute(const std::map<std
         result["success"] = true;
         result["content"] = oss.str();
 
+        // Count total resources
+        size_t total_resources = 0;
+        if (server_name.empty()) {
+            auto all_resources = manager.list_all_resources();
+            for (const auto& [srv_name, resources] : all_resources) {
+                total_resources += resources.size();
+            }
+        } else {
+            total_resources = manager.list_resources(server_name).size();
+        }
+        result["summary"] = std::string("Listed ") + std::to_string(total_resources) + " resource" + (total_resources != 1 ? "s" : "");
+
     } catch (const std::exception& e) {
-        LOG_ERROR("Error listing MCP resources: " + std::string(e.what()));
+        std::cerr << "Error listing MCP resources: " + std::string(e.what()) << std::endl;
         result["success"] = false;
         result["error"] = std::string("Failed to list resources: ") + e.what();
     }
@@ -112,7 +127,7 @@ std::map<std::string, std::any> ReadMcpResourcesTool::execute(const std::map<std
         return result;
     }
 
-    LOG_DEBUG("Reading resource '" + uri + "' from server: " + server_name);
+    dout(1) << "Reading resource '" + uri + "' from server: " + server_name << std::endl;
 
     try {
         auto& manager = MCP::instance();
@@ -127,8 +142,16 @@ std::map<std::string, std::any> ReadMcpResourcesTool::execute(const std::map<std
         result["success"] = true;
         result["content"] = oss.str();
 
+        // Extract the resource name from URI for summary
+        std::string resource_name = uri;
+        size_t last_slash = uri.rfind('/');
+        if (last_slash != std::string::npos && last_slash + 1 < uri.length()) {
+            resource_name = uri.substr(last_slash + 1);
+        }
+        result["summary"] = std::string("Read resource: ") + resource_name;
+
     } catch (const std::exception& e) {
-        LOG_ERROR("Error reading MCP resource: " + std::string(e.what()));
+        std::cerr << "Error reading MCP resource: " + std::string(e.what()) << std::endl;
         result["success"] = false;
         result["error"] = std::string("Failed to read resource: ") + e.what();
     }

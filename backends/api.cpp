@@ -3,12 +3,11 @@
 #include "api.h"
 #include "session.h"
 #include "message.h"
-#include "terminal_io.h"
-#include "output_queue.h"
 #include "sse_parser.h"
 
 // ApiBackend implementation
-ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
+ApiBackend::ApiBackend(size_t context_size, Session& session, EventCallback callback)
+    : Backend(context_size, session, callback) {
 	http_client = std::make_unique<HttpClient>();
 	http_client->set_timeout(timeout_seconds);
 
@@ -17,39 +16,39 @@ ApiBackend::ApiBackend(size_t context_size) : Backend(context_size) {
 		if (config->json.contains("ssl_verify")) {
 			bool ssl_verify = config->json["ssl_verify"].get<bool>();
 			http_client->set_ssl_verify(ssl_verify);
-			LOG_DEBUG("SSL verification: " + std::string(ssl_verify ? "enabled" : "disabled"));
+			dout(1) << "SSL verification: " + std::string(ssl_verify ? "enabled" : "disabled") << std::endl;
 		}
 		if (config->json.contains("ca_bundle_path")) {
 			std::string ca_bundle = config->json["ca_bundle_path"].get<std::string>();
 			http_client->set_ca_bundle(ca_bundle);
-			LOG_DEBUG("CA bundle path: " + ca_bundle);
+			dout(1) << "CA bundle path: " + ca_bundle << std::endl;
 		}
 
 		// Load OAuth configuration
 		if (config->json.contains("client_id")) {
 			oauth_client_id_ = config->json["client_id"].get<std::string>();
-			LOG_DEBUG("OAuth client_id loaded");
+			dout(1) << "OAuth client_id loaded" << std::endl;
 		}
 		if (config->json.contains("client_secret")) {
 			oauth_client_secret_ = config->json["client_secret"].get<std::string>();
-			LOG_DEBUG("OAuth client_secret loaded (length: " + std::to_string(oauth_client_secret_.length()) + ")");
+			dout(1) << "OAuth client_secret loaded (length: " + std::to_string(oauth_client_secret_.length()) + ")" << std::endl;
 		}
 		if (config->json.contains("token_url")) {
 			oauth_token_url_ = config->json["token_url"].get<std::string>();
-			LOG_DEBUG("OAuth token_url: " + oauth_token_url_);
+			dout(1) << "OAuth token_url: " + oauth_token_url_ << std::endl;
 		}
 		if (config->json.contains("token_scope")) {
 			oauth_scope_ = config->json["token_scope"].get<std::string>();
-			LOG_DEBUG("OAuth scope: " + oauth_scope_);
+			dout(1) << "OAuth scope: " + oauth_scope_ << std::endl;
 		}
 	}
 
-	LOG_DEBUG("ApiBackend created");
+	dout(1) << "ApiBackend created" << std::endl;
 }
 
 void ApiBackend::parse_backend_config() {
     if (config->json.is_null() || config->json.empty()) {
-        LOG_DEBUG("ApiBackend::parse_backend_config: empty config, using defaults");
+        dout(1) << "ApiBackend::parse_backend_config: empty config, using defaults" << std::endl;
         return;  // No config, use defaults
     }
 
@@ -69,109 +68,42 @@ void ApiBackend::parse_backend_config() {
             }
             // If stop is empty array [], stop_sequences remains empty (no stopping)
         }
+        if (config->json.contains("timeout")) {
+            timeout_seconds = config->json["timeout"].get<long>();
+            if (http_client) {
+                http_client->set_timeout(timeout_seconds);
+            }
+        }
 
-        LOG_DEBUG("Loaded API backend config: temperature=" + std::to_string(temperature) +
+        dout(1) << "Loaded API backend config: timeout=" + std::to_string(timeout_seconds) +
+                  "s, temperature=" + std::to_string(temperature) +
                   ", top_p=" + std::to_string(top_p) +
                   ", top_k=" + std::to_string(top_k) +
                   ", frequency_penalty=" + std::to_string(frequency_penalty) +
                   ", presence_penalty=" + std::to_string(presence_penalty) +
                   ", repeat_penalty=" + std::to_string(repeat_penalty) +
-                  ", stop_sequences=" + std::to_string(stop_sequences.size()));
+                  ", stop_sequences=" + std::to_string(stop_sequences.size()) << std::endl;
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to parse API backend config: " + std::string(e.what()));
+        std::cerr << "Failed to parse API backend config: " + std::string(e.what()) << std::endl;
     }
 }
 
-void ApiBackend::initialize(Session& session) {
-    LOG_INFO("Initializing API backend...");
+void ApiBackend::add_message(Session& session, Message::Role role, const std::string& content, const std::string& tool_name, const std::string& tool_id, int max_tokens) {
+    dout(1) << "ApiBackend::add_message: max_tokens=" + std::to_string(max_tokens) +
+             ", streaming=" + (config->streaming ? "yes" : "no") << std::endl;
 
-    // If context_size is 0, query it from the API
-    if (context_size == 0) {
-        size_t api_context_size = query_model_context_size(model_name);
-        if (api_context_size > 0) {
-            context_size = api_context_size;
-            LOG_INFO("Using API's context size: " + std::to_string(context_size));
-        } else {
-            LOG_ERROR("No context size specified and could not detect from API");
-            LOG_ERROR("Please specify context size using --context-size argument");
-            throw BackendError("Cannot determine context size: API detection failed and none was specified. Use --context-size to set manually.");
-        }
-    }
+    // Non-streaming implementation (base class)
+    // Derived classes (OpenAI, Anthropic, Gemini) override for true streaming
+    // All output flows through callback (CONTENT, TOOL_CALL, ERROR, STOP)
 
-    // Calibrate token counts (if enabled in config)
-    if (config->calibration) {
-        LOG_INFO("Calibrating token counts...");
-        calibrate_token_counts(session);
-    } else {
-        LOG_INFO("Calibration disabled, using default estimates");
-        // Use default chars_per_token (already set to 2.5f in ApiBackend constructor)
-        session.system_message_tokens = estimate_message_tokens(session.system_message);
-        session.last_prompt_tokens = session.system_message_tokens;
-    }
-
-    LOG_INFO("API backend initialization complete");
-}
-
-Response ApiBackend::add_message(Session& session, Message::Type type, const std::string& content, const std::string& tool_name, const std::string& tool_id, int prompt_tokens, int max_tokens) {
-    LOG_DEBUG("ApiBackend::add_message: prompt_tokens=" + std::to_string(prompt_tokens) +
-             ", max_tokens=" + std::to_string(max_tokens));
-
-    // On first message, check config and try streaming if enabled
-    if (!streaming_tested) {
-        streaming_tested = true;
-        if (!config->streaming) {
-            streaming_enabled = false;
-            LOG_INFO("Streaming disabled via configuration");
-        } else {
-            streaming_enabled = true; // Will disable if it fails
-            LOG_INFO("Attempting streaming for first message...");
-        }
-    }
-
-    // If streaming is enabled, try it
-    if (streaming_enabled) {
-        tio.begin_response();  // Reset TerminalIO state before streaming
-
-        Response resp = add_message_stream(session, type, content,
-            [](const std::string& delta, const std::string& accumulated, const Response& partial) -> bool {
-                g_output_queue.push(delta);
-                return true;
-            },
-            tool_name, tool_id, prompt_tokens, max_tokens);
-
-        tio.end_response();  // Consume any incomplete tags
-
-        // If streaming succeeded, mark it and return
-        if (resp.success) {
-            resp.was_streamed = true;
-            return resp;
-        }
-
-        // Check if request was cancelled by user
-        if (resp.error == "Request cancelled by user") {
-            LOG_INFO("Request cancelled by user");
-            // Don't disable streaming - cancellation is not a failure
-            // Return a special cancelled response
-            resp.code = Response::ERROR;
-            resp.finish_reason = "cancelled";
-            return resp;
-        }
-
-        // Streaming failed - disable it and fall through to non-streaming
-        LOG_WARN("Streaming failed, disabling for future messages: " + resp.error);
-        streaming_enabled = false;
-        // Fall through to non-streaming code below
-    }
-
-    // Otherwise use non-streaming
     const int MAX_RETRIES = 3;
     int retry = 0;
 
     while (retry < MAX_RETRIES) {
         // Build request with entire session + new message + max_tokens
-        nlohmann::json request = build_request(session, type, content, tool_name, tool_id, max_tokens);
+        nlohmann::json request = build_request(session, role, content, tool_name, tool_id, max_tokens);
 
-        LOG_DEBUG("Sending to API with max_tokens=" + std::to_string(max_tokens));
+        dout(1) << "Sending to API with max_tokens=" + std::to_string(max_tokens) << std::endl;
 
         // Enforce rate limits before making request
         enforce_rate_limits();
@@ -180,28 +112,33 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
         auto headers = get_api_headers();
         std::string endpoint = get_api_endpoint();
 
-        // Try to send
-//		std::cout << "request: " << request << std::endl;
+//		std::cout << "request: " << request " << std::endl;
         HttpResponse http_response = http_client->post(endpoint, request.dump(), headers);
-//		std::cout << "response: " << http_response.body << std::endl;
+//		std::cout << "response: " << http_response.body " << std::endl;
 
         // Parse response using backend-specific parser
         Response resp = parse_http_response(http_response);
 
         if (resp.success) {
+			// user prompt accepted by the provider, send a user event
+	        if (config->streaming && role == Message::USER && !content.empty()) {
+				callback(CallbackEvent::USER_PROMPT, content, "", "");
+        	}
+
             // Success! Use delta method to get exact tokens for the new message
             // Delta = current_prompt_tokens - last_prompt_tokens
             int new_message_tokens;
             if (resp.prompt_tokens > 0 && session.last_prompt_tokens > 0) {
                 new_message_tokens = resp.prompt_tokens - session.last_prompt_tokens;
                 if (new_message_tokens < 0) new_message_tokens = 1; // Safety floor
-                LOG_DEBUG("Exact message tokens from delta: " + std::to_string(new_message_tokens) +
+                dout(1) << "Exact message tokens from delta: " + std::to_string(new_message_tokens) +
                          " (current=" + std::to_string(resp.prompt_tokens) +
-                         " - last=" + std::to_string(session.last_prompt_tokens) + ")");
+                         " - last=" + std::to_string(session.last_prompt_tokens) + "" << std::endl;
+
             } else {
                 // Fallback to estimate if API doesn't provide usage
                 new_message_tokens = estimate_message_tokens(content);
-                LOG_DEBUG("Estimated message tokens: " + std::to_string(new_message_tokens));
+                dout(1) << "Estimated message tokens: " + std::to_string(new_message_tokens) << std::endl;
             }
 
             // Update EMA with actual token ratio from this message
@@ -220,30 +157,32 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
                     chars_per_token = (1.0f - alpha) * chars_per_token + alpha * actual_ratio;
 
                     // Clamp to absolute reasonable bounds as safety net
-                    const float MIN_CPT = 2.0f;  // Very dense tokens (code, numbers)
+                    const float MIN_CPT = 1.0f;  // Very dense tokens (1:1 char:token ratio)
                     const float MAX_CPT = 5.0f;  // Very sparse tokens (English prose)
                     if (chars_per_token < MIN_CPT) chars_per_token = MIN_CPT;
                     if (chars_per_token > MAX_CPT) chars_per_token = MAX_CPT;
 
-                    LOG_DEBUG("Updated EMA chars_per_token: " + std::to_string(old_cpt) + " -> " +
+                    dout(1) << "Updated EMA chars_per_token: " + std::to_string(old_cpt) + " -> " +
                              std::to_string(chars_per_token) +
                              " (actual: " + std::to_string(actual_ratio) +
-                             ", deviation: " + std::to_string(deviation_ratio) + "x)");
+                             ", deviation: " + std::to_string(deviation_ratio) + "x" << std::endl;
+
                 } else {
-                    LOG_DEBUG("Skipping EMA update - deviation ratio out of bounds: " +
+                    dout(1) << "Skipping EMA update - deviation ratio out of bounds: " +
                              std::to_string(deviation_ratio) + "x (actual: " +
-                             std::to_string(actual_ratio) + ", likely prompt caching)");
+                             std::to_string(actual_ratio) + ", likely prompt caching" << std::endl;
+
                 }
             }
 
             // Add user/tool message to session with exact token count
-            Message user_msg(type, content, new_message_tokens);
+            Message user_msg(role, content, new_message_tokens);
             user_msg.tool_name = tool_name;
             user_msg.tool_call_id = tool_id;
             session.messages.push_back(user_msg);
 
             // Track last user message for context preservation
-            if (type == Message::USER) {
+            if (role == Message::USER) {
                 session.last_user_message_index = session.messages.size() - 1;
                 session.last_user_message_tokens = new_message_tokens;
             }
@@ -271,11 +210,26 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
             // Set total tokens from API (authoritative source of truth)
             session.total_tokens = resp.prompt_tokens + assistant_tokens;
 
-            LOG_DEBUG("Message tokens - new msg: " + std::to_string(new_message_tokens) +
+            dout(1) << "Message tokens - new msg: " + std::to_string(new_message_tokens) +
                      ", assistant: " + std::to_string(assistant_tokens) +
-                     ", session total: " + std::to_string(session.total_tokens));
+                     ", session total: " + std::to_string(session.total_tokens) << std::endl;
 
-            return resp;
+            // Route content through unified output filter (handles tool call detection)
+            if (!resp.content.empty()) {
+                output(resp.content);
+                flush_output();
+            }
+
+            // Send any structured tool calls from API (in addition to content-detected ones)
+            if (!resp.tool_calls.empty()) {
+                for (const auto& tc : resp.tool_calls) {
+                    callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+                }
+            }
+
+            // Signal completion with finish reason
+            callback(CallbackEvent::STOP, resp.finish_reason, "", "");
+            return;
         }
 
         // Check if context length error
@@ -286,43 +240,36 @@ Response ApiBackend::add_message(Session& session, Message::Type type, const std
             auto ranges = session.calculate_messages_to_evict(tokens_to_evict);
 
             if (ranges.empty()) {
-                Response err_resp;
-                err_resp.success = false;
-                err_resp.code = Response::CONTEXT_FULL;
-                err_resp.finish_reason = "error";
-                err_resp.error = "Context full, cannot evict enough messages";
-                return err_resp;
+                callback(CallbackEvent::ERROR, "Context full, cannot evict enough messages", "context_full", "");
+                callback(CallbackEvent::STOP, "error", "", "");
+                return;
             }
 
             // Evict messages using Session's eviction method
             if (!session.evict_messages(ranges)) {
-                Response err_resp;
-                err_resp.success = false;
-                err_resp.code = Response::ERROR;
-                err_resp.finish_reason = "error";
-                err_resp.error = "Failed to evict messages";
-                return err_resp;
+                callback(CallbackEvent::ERROR, "Failed to evict messages", "eviction_failed", "");
+                callback(CallbackEvent::STOP, "error", "", "");
+                return;
             }
 
             retry++;
-            LOG_INFO("Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
-                    std::to_string(MAX_RETRIES) + ")");
+            dout(1) << "Evicted messages, retrying (attempt " + std::to_string(retry + 1) + "/" +
+                    std::to_string(MAX_RETRIES) + "" << std::endl;
+
 
         } else {
-            // Not a context error - return the error from response
-            return resp;
+            // Not a context error - signal error via callback
+            callback(CallbackEvent::ERROR, resp.error, "api_error", "");
+            callback(CallbackEvent::STOP, "error", "", "");
+            return;
         }
     }
 
-    Response err_resp;
-    err_resp.success = false;
-    err_resp.code = Response::ERROR;
-    err_resp.finish_reason = "error";
-    err_resp.error = "Max retries exceeded trying to fit context";
-    return err_resp;
+    callback(CallbackEvent::ERROR, "Max retries exceeded trying to fit context", "max_retries", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 }
 
-Response ApiBackend::generate_from_session(const Session& session, int max_tokens, StreamCallback callback) {
+void ApiBackend::generate_from_session(Session& session, int max_tokens) {
     // Build request using backend-specific format
     nlohmann::json request = build_request_from_session(session, max_tokens);
 
@@ -336,7 +283,30 @@ Response ApiBackend::generate_from_session(const Session& session, int max_token
     // Parse response using backend-specific parser
     Response resp = parse_http_response(http_response);
 
-    return resp;
+    // Update session token counts from API response (session is source of truth)
+    if (resp.prompt_tokens > 0 || resp.completion_tokens > 0) {
+        session.total_tokens = resp.prompt_tokens + resp.completion_tokens;
+        session.last_prompt_tokens = resp.prompt_tokens;
+        session.last_assistant_message_tokens = resp.completion_tokens;
+    }
+
+    if (resp.success) {
+        // Route content through unified output filter (handles tool call detection)
+        if (!resp.content.empty()) {
+            output(resp.content);
+            flush_output();
+        }
+        // Send any structured tool calls from API (in addition to content-detected ones)
+        if (!resp.tool_calls.empty()) {
+            for (const auto& tc : resp.tool_calls) {
+                callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+            }
+        }
+        callback(CallbackEvent::STOP, resp.finish_reason, "", "");
+    } else {
+        callback(CallbackEvent::ERROR, resp.error, "api_error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+    }
 }
 
 int ApiBackend::estimate_message_tokens(const std::string& content) const {
@@ -344,7 +314,7 @@ int ApiBackend::estimate_message_tokens(const std::string& content) const {
     return static_cast<int>(content.length() / chars_per_token);
 }
 
-int ApiBackend::count_message_tokens(Message::Type type,
+int ApiBackend::count_message_tokens(Message::Role role,
                                      const std::string& content,
                                      const std::string& tool_name,
                                      const std::string& tool_id) {
@@ -354,7 +324,7 @@ int ApiBackend::count_message_tokens(Message::Type type,
     temp_session.system_message = ""; // Empty for counting just this message
     temp_session.tools = {}; // No tools for counting just this message
 
-    nlohmann::json request = build_request(temp_session, type, content, tool_name, tool_id);
+    nlohmann::json request = build_request(temp_session, role, content, tool_name, tool_id);
 
     // Get formatted JSON string length
     std::string json_str = request.dump();
@@ -363,42 +333,16 @@ int ApiBackend::count_message_tokens(Message::Type type,
     // Apply EMA to estimate tokens
     int estimated_tokens = static_cast<int>(json_length / chars_per_token);
 
-    LOG_DEBUG("count_message_tokens: JSON length=" + std::to_string(json_length) +
+    dout(1) << "count_message_tokens: JSON length=" + std::to_string(json_length) +
              ", estimated tokens=" + std::to_string(estimated_tokens) +
-             " (chars_per_token=" + std::to_string(chars_per_token) + ")");
+             " (chars_per_token=" + std::to_string(chars_per_token) + "" << std::endl;
+
 
     return estimated_tokens;
 }
 
-Response ApiBackend::add_message_stream(Session& session,
-                                       Message::Type type,
-                                       const std::string& content,
-                                       StreamCallback callback,
-                                       const std::string& tool_name,
-                                       const std::string& tool_id,
-                                       int prompt_tokens,
-                                       int max_tokens) {
-    // Base implementation: temporarily disable streaming and call add_message
-    // This prevents infinite recursion when derived class doesn't override this method
-    // The streaming_enabled flag is checked at the start of add_message
-
-    bool was_streaming_enabled = streaming_enabled;
-    streaming_enabled = false;  // Prevent recursion
-
-    Response resp = add_message(session, type, content, tool_name, tool_id, prompt_tokens, max_tokens);
-
-    streaming_enabled = was_streaming_enabled;  // Restore
-
-    // Invoke callback once with full response to simulate streaming
-    if (resp.success && callback) {
-        callback(resp.content, resp.content, resp);
-    }
-
-    return resp;
-}
-
 void ApiBackend::calibrate_token_counts(Session& session) {
-    LOG_INFO("Calibrating token counts with single probe message...");
+    dout(1) << "Calibrating token counts with single probe message..." << std::endl;
 
     try {
         // Create probe session with system + tools + "."
@@ -414,7 +358,7 @@ void ApiBackend::calibrate_token_counts(Session& session) {
         std::string endpoint = get_api_endpoint();
 
         // Send probe
-        LOG_DEBUG("Sending calibration probe (system + tools + dot)...");
+        dout(1) << "Sending calibration probe (system + tools + dot)..." << std::endl;
         HttpResponse response = http_client->post(endpoint, request.dump(), headers);
 
         // Parse response using backend-specific parser
@@ -427,7 +371,7 @@ void ApiBackend::calibrate_token_counts(Session& session) {
                 parsed.error.find("authentication") != std::string::npos ||
                 parsed.error.find("invalid x-api-key") != std::string::npos ||
                 parsed.error.find("unauthorized") != std::string::npos) {
-                LOG_ERROR("Authentication failed: " + parsed.error);
+                std::cerr << "Authentication failed: " + parsed.error << std::endl;
                 throw BackendError("Authentication failed: " + parsed.error);
             }
 
@@ -435,11 +379,11 @@ void ApiBackend::calibrate_token_counts(Session& session) {
             if (response.status_code == 0 ||
                 parsed.error.find("Could not connect") != std::string::npos ||
                 parsed.error.find("connect to server") != std::string::npos) {
-                LOG_ERROR("Connection failed: " + parsed.error);
+                std::cerr << "Connection failed: " + parsed.error << std::endl;
                 throw BackendError("Connection failed: " + parsed.error);
             }
 
-            LOG_WARN("Calibration probe failed: " + parsed.error + ", using estimates");
+            dout(1) << std::string("WARNING: ") +"Calibration probe failed: " + parsed.error + ", using estimates" << std::endl;
             throw std::runtime_error("Calibration probe failed");
         }
 
@@ -449,32 +393,32 @@ void ApiBackend::calibrate_token_counts(Session& session) {
         // Set baseline: probe includes system + tools + ".", but we don't store the dot or response
         // So baseline should be system + tools only (minus the dot)
         session.last_prompt_tokens = probe_tokens - 1;
-        LOG_INFO("Calibration baseline set: " + std::to_string(session.last_prompt_tokens) + " tokens (system + tools, excluding probe '.')");
+        dout(1) << "Calibration baseline set: " + std::to_string(session.last_prompt_tokens) + " tokens (system + tools, excluding probe '.')" << std::endl;
 
         // For display/debugging purposes, calculate approximate breakdown
         // (Not used for actual token counting - we use delta method)
         session.system_message_tokens = probe_tokens - 1; // Rough estimate: everything minus the dot (includes tools)
 
-        LOG_INFO("Calibration complete - baseline: " + std::to_string(session.last_prompt_tokens) + " tokens");
+        dout(1) << "Calibration complete - baseline: " + std::to_string(session.last_prompt_tokens) + " tokens" << std::endl;
 
     } catch (const BackendError& e) {
         // Re-throw authentication and other critical errors - don't catch these
         throw;
     } catch (const std::exception& e) {
-        LOG_ERROR("Calibration failed: " + std::string(e.what()));
+        std::cerr << "Calibration failed: " + std::string(e.what()) << std::endl;
         // Fall back to estimates for non-critical errors
         session.system_message_tokens = estimate_message_tokens(session.system_message);
         // Note: system_message_tokens includes tools estimate
         session.last_prompt_tokens = session.system_message_tokens;
 
         // Use conservative default ratio for API models (optimized for code-heavy content)
-        chars_per_token = 2.5f;
+        chars_per_token = 1.75f;
     }
 }
 
 // Rate limiting enforcement
 void ApiBackend::enforce_rate_limits() {
-    LOG_DEBUG("enforce_rate_limits() called");
+    dout(1) << "enforce_rate_limits() called" << std::endl;
     std::lock_guard<std::mutex> lock(rate_limit_mutex_);
 
     auto now = std::chrono::steady_clock::now();
@@ -488,16 +432,16 @@ void ApiBackend::enforce_rate_limits() {
         requests_per_minute = config->json.value("requests_per_minute", 0);
     }
 
-    LOG_DEBUG("Rate limit check: requests_per_second=" + std::to_string(requests_per_second) +
-              ", requests_per_minute=" + std::to_string(requests_per_minute));
+    dout(1) << "Rate limit check: requests_per_second=" + std::to_string(requests_per_second) +
+              ", requests_per_minute=" + std::to_string(requests_per_minute) << std::endl;
 
     // If no rate limits configured, return immediately
     if (requests_per_second == 0 && requests_per_minute == 0) {
-        LOG_DEBUG("No rate limits configured, skipping");
+        dout(1) << "No rate limits configured, skipping" << std::endl;
         return;
     }
 
-    LOG_DEBUG("Rate limits are configured, proceeding with enforcement");
+    dout(1) << "Rate limits are configured, proceeding with enforcement" << std::endl;
 
     // Remove timestamps older than 1 minute (we only need to track up to 1 minute)
     auto one_minute_ago = now - std::chrono::minutes(1);
@@ -524,19 +468,20 @@ void ApiBackend::enforce_rate_limits() {
             auto sleep_duration = wait_until - now;
 
             if (sleep_duration.count() > 0) {
-                LOG_DEBUG("Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
-                         "ms (requests_per_second=" + std::to_string(requests_per_second) + ")");
+                dout(1) << "Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
+                         "ms (requests_per_second=" + std::to_string(requests_per_second) + "" << std::endl;
+
                 std::this_thread::sleep_for(sleep_duration);
                 now = std::chrono::steady_clock::now();
             }
         }
     }
 
-    LOG_DEBUG("About to check requests_per_minute limit");
+    dout(1) << "About to check requests_per_minute limit" << std::endl;
 
     // Check requests_per_minute limit
     if (requests_per_minute > 0) {
-        LOG_DEBUG("Checking requests_per_minute: " + std::to_string(request_timestamps_.size()) + " requests in last minute, limit=" + std::to_string(requests_per_minute));
+        dout(1) << "Checking requests_per_minute: " + std::to_string(request_timestamps_.size()) + " requests in last minute, limit=" + std::to_string(requests_per_minute) << std::endl;
         if ((int)request_timestamps_.size() >= requests_per_minute) {
             // Calculate how long to sleep
             auto oldest_in_window = request_timestamps_.front();
@@ -544,14 +489,15 @@ void ApiBackend::enforce_rate_limits() {
             auto sleep_duration = wait_until - now;
 
             if (sleep_duration.count() > 0) {
-                LOG_DEBUG("Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
-                         "ms (requests_per_minute=" + std::to_string(requests_per_minute) + ")");
+                dout(1) << "Rate limit: sleeping " + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count()) +
+                         "ms (requests_per_minute=" + std::to_string(requests_per_minute) + "" << std::endl;
+
                 std::this_thread::sleep_for(sleep_duration);
                 now = std::chrono::steady_clock::now();
             }
         }
     } else {
-        LOG_DEBUG("requests_per_minute is NOT > 0, it is: " + std::to_string(requests_per_minute));
+        dout(1) << "requests_per_minute is NOT > 0, it is: " + std::to_string(requests_per_minute) << std::endl;
     }
 
     // Record this request timestamp
@@ -563,7 +509,7 @@ ApiBackend::OAuthToken ApiBackend::acquire_oauth_token(const std::string& client
                                                         const std::string& client_secret,
                                                         const std::string& token_url,
                                                         const std::string& scope) {
-    LOG_DEBUG("Acquiring OAuth token from: " + token_url);
+    dout(1) << "Acquiring OAuth token from: " + token_url << std::endl;
 
     OAuthToken token;
 
@@ -585,8 +531,8 @@ ApiBackend::OAuthToken ApiBackend::acquire_oauth_token(const std::string& client
         HttpResponse response = http_client->post(token_url, body, headers);
 
         if (!response.is_success()) {
-            LOG_ERROR("OAuth token request failed with status " + std::to_string(response.status_code));
-            LOG_ERROR("Response body: " + response.body);
+            std::cerr << "OAuth token request failed with status " + std::to_string(response.status_code) << std::endl;
+            std::cerr << "Response body: " + response.body << std::endl;
             return token;  // Return empty token
         }
 
@@ -600,10 +546,10 @@ ApiBackend::OAuthToken ApiBackend::acquire_oauth_token(const std::string& client
         // Set expiry time (current time + expires_in, minus 60 seconds buffer)
         token.expires_at = time(nullptr) + expires_in - 60;
 
-        LOG_INFO("OAuth token acquired successfully (expires in " + std::to_string(expires_in) + " seconds)");
+        dout(1) << "OAuth token acquired successfully (expires in " + std::to_string(expires_in) + " seconds)" << std::endl;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Failed to acquire OAuth token: " + std::string(e.what()));
+        std::cerr << "Failed to acquire OAuth token: " + std::string(e.what()) << std::endl;
     }
 
     return token;
@@ -618,20 +564,20 @@ bool ApiBackend::ensure_valid_oauth_token() {
 
     // Check if current token is valid
     if (oauth_token_.is_valid()) {
-        LOG_DEBUG("OAuth token is valid");
+        dout(1) << "OAuth token is valid" << std::endl;
         return true;
     }
 
     // Token is expired or missing, acquire new one
-    LOG_INFO("OAuth token expired or missing, acquiring new token...");
+    dout(1) << "OAuth token expired or missing, acquiring new token..." << std::endl;
     oauth_token_ = acquire_oauth_token(oauth_client_id_, oauth_client_secret_,
                                        oauth_token_url_, oauth_scope_);
 
     if (!oauth_token_.access_token.empty()) {
-        LOG_INFO("OAuth token refreshed successfully");
+        dout(1) << "OAuth token refreshed successfully" << std::endl;
         return true;
     }
 
-    LOG_ERROR("Failed to acquire OAuth token");
+    std::cerr << "Failed to acquire OAuth token" << std::endl;
     return false;
 }

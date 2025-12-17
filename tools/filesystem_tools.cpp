@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "filesystem_tools.h"
 #include "tools.h"
-#include "../logger.h"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -124,32 +125,18 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
         int current_line = 1;
         int lines_read = 0;
 
-        // Default limits: 2000 lines max, 2000 chars per line max
-        const int DEFAULT_MAX_LINES = 2000;
-        const int MAX_LINE_LENGTH = 2000;
-        int effective_limit = (limit > 0) ? limit : DEFAULT_MAX_LINES;
-
+        // Read file - no limits here, truncation handled by CLI based on context window
         while (std::getline(file, line)) {
             // Check if we're at or past the start line
             if (current_line >= start_line) {
-                // Truncate long lines
-                if (line.length() > MAX_LINE_LENGTH) {
-                    content_stream << line.substr(0, MAX_LINE_LENGTH) << " [... line truncated]\n";
-                } else {
-                    content_stream << line << "\n";
-                }
+                content_stream << line << "\n";
                 lines_read++;
 
-                // Stop if we've read the requested number of lines
-                if (lines_read >= effective_limit) {
-                    if (limit < 0) {
-                        // Hit default limit, inform user
-                        content_stream << "\n[... output truncated after " << DEFAULT_MAX_LINES << " lines. Use offset and limit parameters to read more]\n";
-                    }
+                // Stop if user specified a limit
+                if (limit > 0 && lines_read >= limit) {
                     break;
                 }
             }
-
             current_line++;
         }
 
@@ -157,11 +144,21 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
         result["path"] = abs_path.string();
         result["success"] = true;
 
-        if (start_line > 1 || limit > 0) {
-            LOG_DEBUG("Read: Read " + std::to_string(lines_read) + " lines starting from line " +
-                      std::to_string(start_line) + " from " + abs_path.string());
+        // Build summary
+        std::string summary;
+        if (start_line > 1) {
+            summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "") +
+                      " from offset " + std::to_string(start_line);
         } else {
-            LOG_DEBUG("Read: Successfully read " + abs_path.string());
+            summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "");
+        }
+        result["summary"] = summary;
+
+        if (start_line > 1 || limit > 0) {
+            dout(1) << "Read: Read " + std::to_string(lines_read) + " lines starting from line " +
+                      std::to_string(start_line) + " from " + abs_path.string() << std::endl;
+        } else {
+            dout(1) << "Read: Successfully read " + abs_path.string() << std::endl;
         }
 
     } catch (const std::exception& e) {
@@ -219,9 +216,10 @@ std::map<std::string, std::any> WriteFileTool::execute(const std::map<std::strin
 
         result["status"] = std::string("success");
         result["path"] = abs_path.string();
+        result["summary"] = std::string("Wrote ") + std::to_string(content.length()) + " bytes to " + abs_path.filename().string();
         result["success"] = true;
 
-        LOG_DEBUG("Write: Successfully wrote " + std::to_string(content.length()) + " bytes to " + abs_path.string());
+        dout(1) << "Write: Successfully wrote " + std::to_string(content.length()) + " bytes to " + abs_path.string() << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error writing file: ") + e.what();
@@ -305,6 +303,7 @@ std::map<std::string, std::any> ListDirectoryTool::execute(const std::map<std::s
         }
 
         result["content"] = content.str();
+        result["summary"] = std::string("Listed ") + std::to_string(files.size()) + " item" + (files.size() != 1 ? "s" : "");
         result["success"] = true;
 
     } catch (const std::exception& e) {
@@ -334,5 +333,5 @@ void register_filesystem_tools(Tools& tools) {
     tools.register_tool(std::make_unique<ListDirectoryTool>());
     tools.register_tool(std::make_unique<ListTool>());  // Register alias
 
-    LOG_DEBUG("Registered filesystem tools: Read, Write, list_directory, List");
+    dout(1) << "Registered filesystem tools: Read, Write, list_directory, List" << std::endl;
 }

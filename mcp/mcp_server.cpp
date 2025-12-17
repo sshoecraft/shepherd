@@ -1,6 +1,7 @@
+#include "shepherd.h"
 #include "mcp_server.h"
-#include "../logger.h"
 #include <unistd.h>
+
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -119,7 +120,7 @@ void MCPServer::start() {
     fcntl(stdout_fd_, F_SETFL, fcntl(stdout_fd_, F_GETFL) | O_NONBLOCK);
     fcntl(stderr_fd_, F_SETFL, fcntl(stderr_fd_, F_GETFL) | O_NONBLOCK);
 
-    LOG_INFO("MCP server '" + config_.name + "' started with PID " + std::to_string(pid_));
+    dout(1) << "MCP server '" + config_.name + "' started with PID " + std::to_string(pid_) << std::endl;
 }
 
 void MCPServer::stop() {
@@ -127,7 +128,7 @@ void MCPServer::stop() {
         return;
     }
 
-    LOG_INFO("Stopping MCP server '" + config_.name + "' (PID " + std::to_string(pid_) + ")");
+    dout(1) << "Stopping MCP server '" + config_.name + "' (PID " + std::to_string(pid_) + ")" << std::endl;
 
     // Close stdin to signal EOF
     if (stdin_fd_ >= 0) {
@@ -147,7 +148,7 @@ void MCPServer::stop() {
 
     if (result == 0) {
         // Force kill
-        LOG_DEBUG("Forcefully terminating MCP server '" + config_.name + "'");
+        dout(1) << "Forcefully terminating MCP server '" + config_.name + "'" << std::endl;
         kill(pid_, SIGTERM);
         usleep(500000);
         waitpid(pid_, &status, WNOHANG);

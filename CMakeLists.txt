@@ -20,24 +20,25 @@ pkg_check_modules(CURL REQUIRED libcurl)
 set(SHEPHERD_SOURCES
     # Core sources
     main.cpp
-    cli.cpp
     session.cpp
     config.cpp
     provider.cpp
-    logger.cpp
-    terminal_io.cpp
-    tui_screen_ftxui.cpp
-    input_reader.cpp
-    output_queue.cpp
     generation_thread.cpp
     http_client.cpp
     rag.cpp
     sse_parser.cpp
     scheduler.cpp
     frontend.cpp
+    backend.cpp
+    server.cpp
+
+    # Frontend sources
+    frontends/cli.cpp
+    frontends/tui.cpp
+    frontends/api_server.cpp
+    frontends/cli_server.cpp
 
     # Backend sources (always included)
-    backends/backend.cpp
     backends/factory.cpp
     backends/models.cpp
 
@@ -64,12 +65,6 @@ set(SHEPHERD_SOURCES
 
     # API tools sources
     tools/api_tools.cpp
-
-    # Server sources
-    server/server.cpp
-    server/api_server.cpp
-    server/cli_server.cpp
-    server/control.cpp
 )
 
 # Add backend sources conditionally
@@ -103,6 +98,7 @@ add_executable(shepherd ${SHEPHERD_SOURCES})
 # Include directories
 target_include_directories(shepherd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/frontends
     ${SQLITE3_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
@@ -190,6 +186,7 @@ target_link_libraries(shepherd PRIVATE
     OpenSSL::Crypto
     pthread
     dl
+    ncurses
 )
 
 # TensorRT-LLM library from pip installation
@@ -421,11 +418,3 @@ message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
 
 # Install targets
 install(TARGETS shepherd RUNTIME DESTINATION bin)
-
-# Install server directory for HTTP API mode
-install(DIRECTORY server/
-        DESTINATION share/shepherd/server
-        FILES_MATCHING
-        PATTERN "*.py"
-        PATTERN "*.txt"
-        PATTERN "*.md")

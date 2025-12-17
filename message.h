@@ -4,26 +4,19 @@
 #include <string>
 #include <iostream>
 
-#if 0
-#include <string>
-#include <vector>
-#include <memory>
-#include <deque>
-#include <stdexcept>
-#include "model_config.h"
-#endif
-
 /// @brief Represents a single message in the conversation
+/// Stored in session.messages and sent to API providers
 struct Message {
-	enum Type {
-		SYSTEM,
-		USER,
-		ASSISTANT,
-		TOOL,		 // Tool response message
-		FUNCTION	 // Function call message
+	/// Message roles that are actually stored in session and sent to APIs
+	enum Role {
+		SYSTEM,         // System prompt
+		USER,           // User messages
+		ASSISTANT,      // Provider responses
+		TOOL_RESPONSE,  // Result of tool execution (modern "tool" role)
+		FUNCTION        // Legacy OpenAI function result (role: "function")
 	};
 
-	Type type;
+	Role role;
 	std::string content;
 	int tokens;
 
@@ -35,27 +28,31 @@ struct Message {
 	// Or for storing structured content (Gemini parts array, etc.)
 	std::string tool_calls_json;
 
-	Message(Type t, const std::string& c, int tokens = 0) : type(t), content(c), tokens(tokens) {}
+	Message(Role r, const std::string& c, int tokens = 0) : role(r), content(c), tokens(tokens) {}
 
-	// Convert role string to Type enum
-	static Type stringToType(const std::string& role) {
-		if (role == "system") return SYSTEM;
-		if (role == "user") return USER;
-		if (role == "assistant") return ASSISTANT;
-		if (role == "tool") return TOOL;
-		if (role == "function") return FUNCTION;
+	// Helper: is this a tool call response (result of executing a tool)?
+	bool is_tool_response() const {
+		return role == TOOL_RESPONSE || role == FUNCTION;
+	}
+
+	// Convert role string to Role enum
+	static Role stringToRole(const std::string& roleStr) {
+		if (roleStr == "system") return SYSTEM;
+		if (roleStr == "user") return USER;
+		if (roleStr == "assistant") return ASSISTANT;
+		if (roleStr == "tool") return TOOL_RESPONSE;
+		if (roleStr == "function") return FUNCTION;
 		return USER;  // Default fallback
 	}
 
 	// Get standardized role string for RAG storage
 	// Backends will translate these to their specific format
-	// (e.g., Gemini translates "assistant" -> "model")
 	std::string get_role() const {
-		switch (type) {
+		switch (role) {
 			case SYSTEM: return "system";
 			case USER: return "user";
-			case ASSISTANT: return "assistant";  // Standardized, not backend-specific
-			case TOOL: return "tool";
+			case ASSISTANT: return "assistant";
+			case TOOL_RESPONSE: return "tool";
 			case FUNCTION: return "function";
 			default: return "user";
 		}

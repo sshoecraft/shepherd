@@ -1,11 +1,12 @@
+#include "shepherd.h"
 #include "api_tools.h"
 #include "tools.h"
 #include "../shepherd.h"
-#include "../backends/backend.h"
+#include "backend.h"
 #include "../backends/factory.h"
 #include "../message.h"
 #include "../session.h"
-#include "../logger.h"
+
 #include <sstream>
 
 // ============================================================================
@@ -113,9 +114,21 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
         // Use configured context size (0 = auto-detect from models database)
         size_t context_size = this->config.context_size;
 
-        // Create backend instance
+        // Create a simple session with just the user prompt
+        Session temp_session;
+        temp_session.system_message = "You are a helpful AI assistant.";
+
+        // Create backend instance with accumulating callback
         std::string backend_name = this->config.backend;
-        auto backend = BackendFactory::create_backend(backend_name, context_size);
+        std::string accumulated_content;
+        Backend::EventCallback stub_callback = [&accumulated_content](CallbackEvent event, const std::string& content,
+                                                   const std::string&, const std::string&) {
+            if (event == CallbackEvent::CONTENT) {
+                accumulated_content += content;
+            }
+            return true;
+        };
+        auto backend = BackendFactory::create_backend(backend_name, context_size, temp_session, stub_callback);
 
         if (!backend) {
             // Restore original config
@@ -126,9 +139,7 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
             return result;
         }
 
-        // Create a simple session with just the user prompt
-        Session temp_session;
-        temp_session.system_message = "You are a helpful AI assistant.";
+        // Add user message to session
         Message user_msg(Message::USER, prompt);
         temp_session.messages.push_back(user_msg);
 
@@ -179,10 +190,9 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
             }
         }
 
-        LOG_DEBUG("APIToolAdapter: sub-session has " + std::to_string(temp_session.tools.size()) + " tools");
+        dout(1) << "APIToolAdapter: sub-session has " + std::to_string(temp_session.tools.size()) + " tools" << std::endl;
 
-        // Initialize backend (validates API key, etc.)
-        backend->initialize(temp_session);
+        // Backend initialization happens in constructor - no separate initialize() call needed
 
         // Use configured max_tokens (0 = auto-calculate from available space)
         int generation_max_tokens = max_tokens;
@@ -190,36 +200,95 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
         // Tool execution loop - handle tool calls from sub-model
         const int MAX_TOOL_ITERATIONS = 10;
         int tool_iteration = 0;
-        Response resp;
+
+        // Callback state for accumulating responses
+        struct CallbackState {
+            std::string content;
+            std::vector<ToolParser::ToolCall> tool_calls;
+            std::string finish_reason;
+            std::string error;
+            bool success = true;
+        };
+        CallbackState cb_state;
+
+        // Set up callback to capture output
+        Backend::EventCallback capture_callback = [&cb_state](CallbackEvent event, const std::string& content,
+                                                               const std::string& name, const std::string& id) {
+            switch (event) {
+                case CallbackEvent::CONTENT:
+                    cb_state.content += content;
+                    break;
+                case CallbackEvent::TOOL_CALL: {
+                    ToolParser::ToolCall tc;
+                    tc.name = name;
+                    tc.tool_call_id = id;
+                    tc.raw_json = content;
+                    // Parse parameters from JSON
+                    try {
+                        auto params = nlohmann::json::parse(content);
+                        for (auto it = params.begin(); it != params.end(); ++it) {
+                            if (it.value().is_string()) {
+                                tc.parameters[it.key()] = it.value().get<std::string>();
+                            } else if (it.value().is_number_integer()) {
+                                tc.parameters[it.key()] = it.value().get<int>();
+                            } else if (it.value().is_number_float()) {
+                                tc.parameters[it.key()] = it.value().get<double>();
+                            } else if (it.value().is_boolean()) {
+                                tc.parameters[it.key()] = it.value().get<bool>();
+                            } else {
+                                tc.parameters[it.key()] = it.value().dump();
+                            }
+                        }
+                    } catch (...) {}
+                    cb_state.tool_calls.push_back(tc);
+                    break;
+                }
+                case CallbackEvent::ERROR:
+                    cb_state.error = content;
+                    cb_state.success = false;
+                    break;
+                case CallbackEvent::STOP:
+                    cb_state.finish_reason = content;
+                    break;
+                default:
+                    break;
+            }
+            return true;
+        };
+
+        // Replace stub callback with capture callback to get TOOL_CALL events
+        backend->callback = capture_callback;
 
         while (tool_iteration < MAX_TOOL_ITERATIONS) {
-            // Generate response
-            resp = backend->generate_from_session(temp_session, generation_max_tokens);
+            // Reset callback state
+            cb_state = CallbackState{};
 
-            LOG_DEBUG("APIToolAdapter iteration " + std::to_string(tool_iteration) +
-                      ": resp.code=" + std::to_string(resp.code) +
-                      ", content.length=" + std::to_string(resp.content.length()) +
-                      ", tool_calls=" + std::to_string(resp.tool_calls.size()) +
-                      ", error=" + resp.error);
+            // Generate response (output flows through callback)
+            backend->generate_from_session(temp_session, generation_max_tokens);
+
+            dout(1) << "APIToolAdapter iteration " + std::to_string(tool_iteration) +
+                      ": success=" + std::string(cb_state.success ? "true" : "false") +
+                      ", content.length=" + std::to_string(cb_state.content.length()) +
+                      ", tool_calls=" + std::to_string(cb_state.tool_calls.size()) +
+                      ", error=" + cb_state.error << std::endl;
 
             // Check for errors
-            if (resp.code != Response::SUCCESS) {
+            if (!cb_state.success) {
                 break;
             }
 
             // If no tool calls, we're done
-            if (resp.tool_calls.empty()) {
+            if (cb_state.tool_calls.empty()) {
                 break;
             }
 
             // Add assistant message with tool calls to session
-            Message asst_msg(Message::ASSISTANT, resp.content);
-            asst_msg.tool_calls_json = resp.tool_calls_json;
+            Message asst_msg(Message::ASSISTANT, cb_state.content);
             temp_session.messages.push_back(asst_msg);
 
             // Execute each tool call
-            for (const auto& tool_call : resp.tool_calls) {
-                LOG_DEBUG("APIToolAdapter executing tool: " + tool_call.name);
+            for (const auto& tool_call : cb_state.tool_calls) {
+                dout(1) << "APIToolAdapter executing tool: " + tool_call.name << std::endl;
 
                 // Find the tool
                 Tool* tool = nullptr;
@@ -257,7 +326,7 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
                 }
 
                 // Add tool result to session
-                Message tool_msg(Message::TOOL, tool_result);
+                Message tool_msg(Message::TOOL_RESPONSE, tool_result);
                 tool_msg.tool_call_id = tool_call.tool_call_id;
                 tool_msg.tool_name = tool_call.name;
                 temp_session.messages.push_back(tool_msg);
@@ -267,18 +336,11 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
         }
 
         // Build result
-        if (resp.code == Response::SUCCESS) {
-            result["content"] = resp.content;
+        if (cb_state.success) {
+            result["content"] = cb_state.content;
             result["success"] = true;
-
-            // Include token usage if available
-            if (resp.prompt_tokens > 0) {
-                result["prompt_tokens"] = resp.prompt_tokens;
-                result["completion_tokens"] = resp.completion_tokens;
-                result["total_tokens"] = resp.prompt_tokens + resp.completion_tokens;
-            }
         } else {
-            result["error"] = resp.error.empty() ? "API call failed" : resp.error;
+            result["error"] = cb_state.error.empty() ? "API call failed" : cb_state.error;
             result["success"] = false;
         }
 
@@ -346,7 +408,7 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
     }
 
     tools.build_all_tools();
-    LOG_INFO("Registered " + std::to_string(tools.api_tools.size()) + " provider tools");
+    dout(1) << "Registered " + std::to_string(tools.api_tools.size()) + " provider tools" << std::endl;
 }
 
 void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
@@ -362,12 +424,12 @@ void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
     }
 
     if (!found) {
-        LOG_WARN("Provider not found: " + provider_name);
+        dout(1) << "WARNING: Provider not found: " + provider_name << std::endl;
         return;
     }
 
     if (!found->is_api()) {
-        LOG_DEBUG("Skipping non-API provider: " + provider_name);
+        dout(1) << "Skipping non-API provider: " + provider_name << std::endl;
         return;
     }
 
@@ -380,11 +442,11 @@ void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
     tools.register_tool(std::move(adapter), "api");
 
     tools.build_all_tools();
-    LOG_INFO("Registered provider as tool: " + tool_name);
+    dout(1) << "Registered provider as tool: " + tool_name << std::endl;
 }
 
 void unregister_provider_tool(Tools& tools, const std::string& provider_name) {
     std::string tool_name = "ask_" + provider_name;
     tools.remove_tool(tool_name);
-    LOG_INFO("Unregistered provider tool: " + tool_name);
+    dout(1) << "Unregistered provider tool: " + tool_name << std::endl;
 }

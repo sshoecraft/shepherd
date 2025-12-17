@@ -45,22 +45,16 @@ private:
 /// @brief Backend for TensorRT-LLM acceleration
 class TensorRTBackend : public Backend {
 public:
-    explicit TensorRTBackend(size_t context_size);
+    TensorRTBackend(size_t context_size, Session& session, EventCallback callback);
     ~TensorRTBackend() override;
 
     void parse_backend_config() override;
 
-    // New v2.0.0 interface
-    void initialize(Session& session) override;
-    Response add_message(Session& session, Message::Type type, const std::string& content,
-                        const std::string& tool_name = "", const std::string& tool_id = "",
-                        int prompt_tokens = 0, int max_tokens = 0) override;
-    Response add_message_stream(Session& session, Message::Type type, const std::string& content,
-                               StreamCallback callback,
-                               const std::string& tool_name = "", const std::string& tool_id = "",
-                               int prompt_tokens = 0, int max_tokens = 0) override;
-    Response generate_from_session(const Session& session, int max_tokens = 0, StreamCallback callback = nullptr) override;
-    int count_message_tokens(Message::Type type, const std::string& content,
+    void add_message(Session& session, Message::Role role, const std::string& content,
+                    const std::string& tool_name = "", const std::string& tool_id = "",
+                    int max_tokens = 0) override;
+    void generate_from_session(Session& session, int max_tokens = 0) override;
+    int count_message_tokens(Message::Role role, const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
 
@@ -86,7 +80,7 @@ private:
     bool tokenize_and_accumulate_message(Message& msg, bool add_generation_prompt = false);
 
     /// @brief Internal generation logic called by add_message and generate_from_session
-    std::string generate(const Session& session, int max_tokens, StreamCallback callback = nullptr);
+    std::string generate(const Session& session, int max_tokens, EventCallback callback = nullptr);
 
     // TensorRT executor and event management
     void* executor_ = nullptr;    // tensorrt_llm::executor::Executor*

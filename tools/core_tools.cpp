@@ -26,23 +26,33 @@ static size_t curl_string_write_callback(void* contents, size_t size, size_t nme
     return total_size;
 }
 
+// Helper struct for command execution result
+struct CommandResult {
+    std::string output;
+    int exit_code;
+    bool success;
+};
+
 // Helper function to execute command and capture output
-static std::string exec_command(const std::string& cmd, int timeout_ms = 120000) {
-    std::string result;
+static CommandResult exec_command(const std::string& cmd, int timeout_ms = 120000) {
+    CommandResult result;
+    result.exit_code = -1;
+    result.success = false;
+
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
-        return "Error: Failed to execute command";
+        result.output = "Failed to execute command";
+        return result;
     }
 
     char buffer[256];
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
+        result.output += buffer;
     }
 
     int status = pclose(pipe);
-    if (status != 0) {
-        result += "\nCommand exited with code: " + std::to_string(WEXITSTATUS(status));
-    }
+    result.exit_code = WEXITSTATUS(status);
+    result.success = (result.exit_code == 0);
 
     return result;
 }
@@ -132,13 +142,40 @@ std::map<std::string, std::any> BashTool::execute(const std::map<std::string, st
         std::string shell_id = manager.start_shell(command);
         result["content"] = std::string("Started background shell: ") + shell_id;
         result["shell_id"] = shell_id;
+        result["summary"] = std::string("Background shell started: ") + shell_id;
         result["success"] = true;
         return result;
     }
 
-    std::string output = exec_command(command, timeout);
-    result["content"] = output;
-    result["success"] = true;
+    CommandResult cmd_result = exec_command(command, timeout);
+    result["content"] = cmd_result.output;
+    result["success"] = cmd_result.success;
+
+    if (cmd_result.success) {
+        if (cmd_result.output.empty()) {
+            result["summary"] = std::string("Command completed successfully");
+        } else {
+            // Count output lines
+            int line_count = std::count(cmd_result.output.begin(), cmd_result.output.end(), '\n');
+            if (line_count == 0 && !cmd_result.output.empty()) line_count = 1;
+            result["summary"] = std::string("Output: ") + std::to_string(line_count) + " line" + (line_count != 1 ? "s" : "");
+        }
+    } else {
+        // For errors, use first line of output as summary, or generic message
+        std::string error_summary = cmd_result.output;
+        size_t newline = error_summary.find('\n');
+        if (newline != std::string::npos) {
+            error_summary = error_summary.substr(0, newline);
+        }
+        if (error_summary.empty()) {
+            error_summary = "Command failed (exit " + std::to_string(cmd_result.exit_code) + ")";
+        }
+        if (error_summary.length() > 80) {
+            error_summary = error_summary.substr(0, 77) + "...";
+        }
+        result["error"] = error_summary;
+        result["summary"] = error_summary;
+    }
     return result;
 }
 
@@ -185,6 +222,7 @@ std::map<std::string, std::any> GlobTool::execute(const std::map<std::string, st
 
         result["content"] = oss.str();
         result["count"] = static_cast<int>(matches.size());
+        result["summary"] = std::string("Found ") + std::to_string(matches.size()) + " file" + (matches.size() != 1 ? "s" : "");
         result["success"] = true;
 
     } catch (const std::exception& e) {
@@ -319,6 +357,7 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
 
             result["content"] = output.str();
             result["count"] = match_count;
+            result["summary"] = std::string("Found ") + std::to_string(match_count) + " match" + (match_count != 1 ? "es" : "");
             result["success"] = true;
             return result;
         }
@@ -405,6 +444,7 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
 
         result["content"] = output.str();
         result["count"] = match_count;
+        result["summary"] = std::string("Found ") + std::to_string(match_count) + " match" + (match_count != 1 ? "es" : "");
         result["success"] = true;
 
     } catch (const std::regex_error& e) {
@@ -482,7 +522,9 @@ std::map<std::string, std::any> EditTool::execute(const std::map<std::string, st
         out_file << content;
         out_file.close();
 
-        result["content"] = std::string("Replaced ") + std::to_string(replacement_count) + " occurrence(s)";
+        std::string summary = std::string("Replaced ") + std::to_string(replacement_count) + " occurrence" + (replacement_count != 1 ? "s" : "");
+        result["content"] = summary;
+        result["summary"] = summary;
         result["success"] = true;
 
     } catch (const std::exception& e) {
@@ -537,6 +579,7 @@ std::map<std::string, std::any> WebFetchTool::execute(const std::map<std::string
     }
 
     result["content"] = response_data;
+    result["summary"] = std::string("Fetched ") + std::to_string(response_data.size()) + " bytes";
     result["success"] = true;
     return result;
 }
@@ -591,6 +634,7 @@ std::map<std::string, std::any> WebSearchTool::execute(const std::map<std::strin
         }
 
         result["content"] = content.str();
+        result["summary"] = std::string("Found ") + std::to_string(search_results.size()) + " result" + (search_results.size() != 1 ? "s" : "");
         result["success"] = true;
 
     } catch (const std::exception& e) {
@@ -624,6 +668,7 @@ std::vector<ParameterDef> TodoWriteTool::get_parameters_schema() const {
 std::map<std::string, std::any> TodoWriteTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
     result["content"] = std::string("Todo management stored in memory");
+    result["summary"] = std::string("Todos updated");
     result["success"] = true;
     return result;
 }
@@ -657,7 +702,11 @@ std::map<std::string, std::any> BashOutputTool::execute(const std::map<std::stri
         return result;
     }
 
+    int line_count = std::count(output.begin(), output.end(), '\n');
+    if (line_count == 0 && !output.empty()) line_count = 1;
+
     result["content"] = output;
+    result["summary"] = std::string("Retrieved ") + std::to_string(line_count) + " line" + (line_count != 1 ? "s" : "");
     result["success"] = true;
     return result;
 }
@@ -690,6 +739,7 @@ std::map<std::string, std::any> KillShellTool::execute(const std::map<std::strin
     }
 
     result["content"] = std::string("Killed shell: ") + shell_id;
+    result["summary"] = std::string("Shell terminated");
     result["success"] = true;
     return result;
 }
@@ -798,7 +848,9 @@ std::map<std::string, std::any> GetTimeTool::execute(const std::map<std::string,
     std::ostringstream oss;
     oss << std::put_time(&tm, "%H:%M:%S");
 
-    result["content"] = oss.str();
+    std::string time_str = oss.str();
+    result["content"] = time_str;
+    result["summary"] = time_str;
     result["success"] = true;
     return result;
 }
@@ -817,7 +869,9 @@ std::map<std::string, std::any> GetDateTool::execute(const std::map<std::string,
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d");
 
-    result["content"] = oss.str();
+    std::string date_str = oss.str();
+    result["content"] = date_str;
+    result["summary"] = date_str;
     result["success"] = true;
     return result;
 }

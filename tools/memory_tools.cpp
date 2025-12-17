@@ -1,8 +1,9 @@
+#include "shepherd.h"
 #if 1
 #include "memory_tools.h"
 #include "tools.h"
 #include "../rag.h"
-#include "../logger.h"
+
 #include <sstream>
 #include <iomanip>
 
@@ -41,13 +42,13 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
         return result;
     }
 
-    LOG_DEBUG("SEARCH_MEMORY called with query: '" + query + "', max_results: " + std::to_string(max_results));
+    dout(1) << "SEARCH_MEMORY called with query: '" + query + "', max_results: " + std::to_string(max_results) << std::endl;
 
     try {
         auto search_results = RAGManager::search_memory(query, max_results);
 
         if (search_results.empty()) {
-            LOG_DEBUG("SEARCH_MEMORY: No results found");
+            dout(1) << "SEARCH_MEMORY: No results found" << std::endl;
             result["output"] = std::string("No archived conversations found matching: " + query);
             return result;
         }
@@ -55,12 +56,9 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
         std::ostringstream oss;
         oss << "Found " << search_results.size() << " archived conversation(s):\n\n";
 
-        // Hard limit: each search result should be max 2000 chars to prevent huge results
-        const size_t MAX_RESULT_CHARS = 2000;
-        size_t total_chars = 0;
-        const size_t MAX_TOTAL_CHARS = 10000; // Cap total output at 10K chars
+        // No limits here - truncation handled by CLI based on context window
 
-        LOG_DEBUG("SEARCH_MEMORY: Found " + std::to_string(search_results.size()) + " results:");
+        dout(1) << "SEARCH_MEMORY: Found " + std::to_string(search_results.size()) + " results:" << std::endl;
         for (size_t i = 0; i < search_results.size(); i++) {
             const auto& sr = search_results[i];
 
@@ -130,42 +128,25 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
                 }
             }
 
-            // Truncate individual result if needed
-            bool truncated = false;
-            if (content.length() > MAX_RESULT_CHARS) {
-                content = content.substr(0, MAX_RESULT_CHARS);
-                truncated = true;
-            }
-
-            // Check total size limit
-            if (total_chars + content.length() > MAX_TOTAL_CHARS) {
-                oss << "\n[Additional results truncated - total output limit reached]\n";
-                break;
-            }
-
             oss << "Result " << (i + 1) << " [Relevance: "
                 << std::fixed << std::setprecision(2) << sr.relevance_score << "]:\n"
-                << content;
-
-            if (truncated) {
-                oss << "\n[... truncated to " << MAX_RESULT_CHARS << " chars]";
-            }
-
-            oss << "\n\n";
-            total_chars += content.length();
+                << content << "\n\n";
 
             // Log each result in debug
             std::string preview = sr.content.length() > 100 ? sr.content.substr(0, 100) + "..." : sr.content;
-            LOG_DEBUG("  [" + std::to_string(i + 1) + "] Score: " + std::to_string(sr.relevance_score) +
-                      ", Content preview: " + preview);
+            dout(1) << "  [" + std::to_string(i + 1) + "] Score: " + std::to_string(sr.relevance_score) +
+                      ", Content preview: " + preview << std::endl;
         }
 
         result["output"] = oss.str();
+        result["content"] = oss.str();
+        result["summary"] = std::string("Found ") + std::to_string(search_results.size()) + " memor" + (search_results.size() != 1 ? "ies" : "y");
+        result["success"] = true;
 
-        LOG_DEBUG("SEARCH_MEMORY: Returning " + std::to_string(search_results.size()) + " results to model");
+        dout(1) << "SEARCH_MEMORY: Returning " + std::to_string(search_results.size()) + " results to model" << std::endl;
 
     } catch (const std::exception& e) {
-        LOG_ERROR("Error searching memory: " + std::string(e.what()));
+        std::cerr << "Error searching memory: " + std::string(e.what()) << std::endl;
         result["error"] = std::string("Search failed: ") + e.what();
     }
 
@@ -202,8 +183,12 @@ std::map<std::string, std::any> SetFactTool::execute(const std::map<std::string,
 
     if (response.find("Error:") == 0) {
         result["error"] = response;
+        result["success"] = false;
     } else {
         result["output"] = response;
+        result["content"] = response;
+        result["summary"] = std::string("Fact stored");
+        result["success"] = true;
     }
 
     return result;
@@ -238,8 +223,17 @@ std::map<std::string, std::any> GetFactTool::execute(const std::map<std::string,
     // "Fact not found" is a successful tool execution, just with no result
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
         result["error"] = response;
+        result["success"] = false;
     } else {
         result["output"] = response;
+        result["content"] = response;
+        // Build summary: key=value (truncated)
+        std::string summary = key + "=" + (response.length() > 40 ? response.substr(0, 37) + "..." : response);
+        if (response.find("Fact not found") != std::string::npos) {
+            summary = "Fact not found";
+        }
+        result["summary"] = summary;
+        result["success"] = true;
     }
 
     return result;
@@ -274,8 +268,12 @@ std::map<std::string, std::any> ClearFactTool::execute(const std::map<std::strin
     // "Fact not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
         result["error"] = response;
+        result["success"] = false;
     } else {
         result["output"] = response;
+        result["content"] = response;
+        result["summary"] = std::string("Fact cleared");
+        result["success"] = true;
     }
 
     return result;
@@ -311,8 +309,12 @@ std::map<std::string, std::any> StoreMemoryTool::execute(const std::map<std::str
 
     if (response.find("Error:") == 0) {
         result["error"] = response;
+        result["success"] = false;
     } else {
         result["output"] = response;
+        result["content"] = response;
+        result["summary"] = std::string("Memory stored");
+        result["success"] = true;
     }
 
     return result;
@@ -347,8 +349,12 @@ std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::str
     // "Memory not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Memory not found:") != 0) {
         result["error"] = response;
+        result["success"] = false;
     } else {
         result["output"] = response;
+        result["content"] = response;
+        result["summary"] = std::string("Memory cleared");
+        result["success"] = true;
     }
 
     return result;
@@ -362,6 +368,6 @@ void register_memory_tools(Tools& tools) {
     tools.register_tool(std::make_unique<SetFactTool>());
     tools.register_tool(std::make_unique<GetFactTool>());
     tools.register_tool(std::make_unique<ClearFactTool>());
-    LOG_DEBUG("Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact, clear_fact");
+    dout(1) << "Registered memory tools: search_memory, store_memory, clear_memory, set_fact, get_fact, clear_fact" << std::endl;
 }
 #endif

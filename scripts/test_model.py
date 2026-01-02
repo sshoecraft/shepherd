@@ -314,9 +314,7 @@ class ShepherdProcess:
         cmd = [
             SHEPHERD_BINARY,
             "--nosched",
-            "--nostream",
             "--notools",
-            "--warmup",
             "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score.",
         ]
 
@@ -337,11 +335,9 @@ class ShepherdProcess:
                 preexec_fn=os.setsid
             )
 
-            # Wait for warmup "Ready" message
-            if not self._wait_for_ready():
-                print(f"  ERROR: Shepherd did not become ready")
-                self.stop()
-                return False
+            # Drain any initial output (e.g., "Loading Provider: ...")
+            # Wait up to 2 seconds for initial output, then drain with short timeout
+            self._drain_initial_output()
 
             if self.verbose:
                 print(f"  Process started and ready")
@@ -350,6 +346,26 @@ class ShepherdProcess:
         except Exception as e:
             print(f"  ERROR: Failed to start shepherd: {e}")
             return False
+
+    def _drain_initial_output(self):
+        """Drain any initial output from shepherd (e.g., 'Loading Provider: ...')"""
+        buffer = ""
+        # Wait up to 2 seconds for first character
+        ch, timed_out = self._read_char_with_timeout(2000)
+        if timed_out:
+            # No initial output, that's fine
+            return
+
+        buffer += ch
+        # Keep reading with short timeout until no more output
+        while True:
+            ch, timed_out = self._read_char_with_timeout(200)
+            if timed_out:
+                break
+            buffer += ch
+
+        if self.verbose and buffer:
+            print(f"  Drained initial output: {repr(buffer)}")
 
     def _wait_for_ready(self, timeout_seconds: int = 120) -> bool:
         """Wait for shepherd to output 'Ready' after warmup"""
@@ -482,6 +498,8 @@ class BenchmarkTestRunner:
         import re
         # Remove everything between <think> and </think> tags
         filtered_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
+        # Remove "Loading Provider: ..." lines
+        filtered_response = re.sub(r'^Loading Provider:.*$', '', filtered_response, flags=re.MULTILINE)
         response_upper = filtered_response.upper()
 
         # First priority: Look for "< LETTER" pattern (shepherd's answer format)

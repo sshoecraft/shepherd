@@ -367,7 +367,7 @@ std::vector<std::string> OpenAIBackend::fetch_models() {
 
 std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
     if (!http_client) {
-        std::cerr << "HTTP client not initialized" << std::endl;
+        dout(1) << "HTTP client not initialized" << std::endl;
         return "";
     }
 
@@ -393,7 +393,7 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
             std::string error_msg = response.error_message.empty()
                 ? "Could not connect to server"
                 : response.error_message;
-            std::cerr << "Connection failed: " + error_msg << std::endl;
+            dout(1) << "Connection failed: " + error_msg << std::endl;
             throw BackendError("Failed to connect to API server at " + full_url + ": " + error_msg +
                              "\nPlease check that the server is running and accessible.");
         }
@@ -409,11 +409,11 @@ std::string OpenAIBackend::make_get_request(const std::string& endpoint) {
             } catch (...) {
                 error_msg = response.error_message.empty() ? error_msg : response.error_message;
             }
-            std::cerr << "Authentication failed: " + error_msg << std::endl;
+            dout(1) << "Authentication failed: " + error_msg << std::endl;
             throw BackendError("Authentication failed: " + error_msg);
         }
 
-        std::cerr << "GET request failed with status " + std::to_string(response.status_code) +
+        dout(1) << "GET request failed with status " + std::to_string(response.status_code) +
                   ": " + response.error_message << std::endl;
         return "";
     }
@@ -652,14 +652,33 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     }
 
     // Add sampling parameters
-    request["temperature"] = temperature;
-    request["top_p"] = top_p;
-    if (top_k > 0) {
-        request["top_k"] = top_k;  // Only send if explicitly set (not all APIs support this)
+    // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
+    // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
+    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
+
+    if (!is_openai_api || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+        request["temperature"] = temperature;
     }
-    request["frequency_penalty"] = frequency_penalty;
-    request["presence_penalty"] = presence_penalty;
-    // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
+    if (!is_openai_api || (top_p < 0.99f)) {
+        request["top_p"] = top_p;
+    }
+    if (!is_openai_api || frequency_penalty != 0.0f) {
+        request["frequency_penalty"] = frequency_penalty;
+    }
+    if (!is_openai_api || presence_penalty != 0.0f) {
+        request["presence_penalty"] = presence_penalty;
+    }
+
+    // Only send non-standard parameters to non-OpenAI endpoints (Shepherd servers, vLLM, etc.)
+    // OpenAI rejects unknown parameters like top_k and repetition_penalty
+    if (!is_openai_api) {
+        if (top_k > 0) {
+            request["top_k"] = top_k;
+        }
+        if (repeat_penalty != 0.0f) {
+            request["repetition_penalty"] = repeat_penalty;
+        }
+    }
 
     // Add stop sequences if configured
     dout(1) << "stop_sequences.size()=" + std::to_string(stop_sequences.size()) << std::endl;
@@ -776,14 +795,33 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     }
 
     // Add sampling parameters
-    request["temperature"] = temperature;
-    request["top_p"] = top_p;
-    if (top_k > 0) {
-        request["top_k"] = top_k;  // Only send if explicitly set (not all APIs support this)
+    // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
+    // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
+    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
+
+    if (!is_openai_api || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+        request["temperature"] = temperature;
     }
-    request["frequency_penalty"] = frequency_penalty;
-    request["presence_penalty"] = presence_penalty;
-    // Note: Azure OpenAI doesn't support repetition_penalty, only frequency_penalty and presence_penalty
+    if (!is_openai_api || (top_p < 0.99f)) {
+        request["top_p"] = top_p;
+    }
+    if (!is_openai_api || frequency_penalty != 0.0f) {
+        request["frequency_penalty"] = frequency_penalty;
+    }
+    if (!is_openai_api || presence_penalty != 0.0f) {
+        request["presence_penalty"] = presence_penalty;
+    }
+
+    // Only send non-standard parameters to non-OpenAI endpoints (Shepherd servers, vLLM, etc.)
+    // OpenAI rejects unknown parameters like top_k and repetition_penalty
+    if (!is_openai_api) {
+        if (top_k > 0) {
+            request["top_k"] = top_k;
+        }
+        if (repeat_penalty != 0.0f) {
+            request["repetition_penalty"] = repeat_penalty;
+        }
+    }
 
     // Add stop sequences if configured
     dout(1) << "stop_sequences.size()=" + std::to_string(stop_sequences.size()) << std::endl;
@@ -955,11 +993,11 @@ void OpenAIBackend::add_message(Session& session,
                                     dout(2) << "SSE delta content: [" << delta_text << "] tool_calls.size=" << accumulated_resp.tool_calls.size() << std::endl;
 
                                     // Only stream content if we haven't seen tool calls
-                                    // The unified output() filter handles tool call detection
+                                    // The unified process_output() handles channel parsing + tool call detection
                                     if (accumulated_resp.tool_calls.empty()) {
-                                        // Route through unified output filter
-                                        if (!output(delta_text)) {
-                                            // User requested cancellation
+                                        // Route through unified output filter (includes channel parsing)
+                                        if (!process_output(delta_text)) {
+                                            // User requested cancellation or channel parser signaled stop
                                             return false;
                                         }
                                     } else {
@@ -1051,12 +1089,18 @@ void OpenAIBackend::add_message(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 // Evict messages
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
@@ -1067,6 +1111,10 @@ void OpenAIBackend::add_message(Session& session,
                 continue; // Retry
             }
 
+            // Non-context error - add TOOL_RESPONSE for session consistency
+            if (role == Message::TOOL_RESPONSE) {
+                add_tool_response(session, content, tool_name, tool_id);
+            }
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
 
@@ -1201,7 +1249,7 @@ void OpenAIBackend::add_message(Session& session,
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     // Check prerequisites for making API call
     if (!http_client || api_key.empty()) {
-        std::cerr << "HTTP client or API key not available for model query" << std::endl;
+        dout(1) << "HTTP client or API key not available for model query" << std::endl;
         return 0;
     }
 

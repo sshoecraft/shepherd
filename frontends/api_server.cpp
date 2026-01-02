@@ -2,6 +2,7 @@
 #include "api_server.h"
 #include "../session.h"
 #include "backend.h"
+#include "../backends/chat_template.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
 #include "../config.h"
@@ -18,6 +19,14 @@ extern std::unique_ptr<Config> config;
 // APIServer class implementation
 APIServer::APIServer(const std::string& host, int port)
     : Server(host, port, "api") {
+    // Set up the event callback - routes to request_handler when set
+    callback = [this](CallbackEvent event, const std::string& content,
+                      const std::string& name, const std::string& id) -> bool {
+        if (request_handler) {
+            return request_handler(event, content, name, id);
+        }
+        return true;
+    };
 }
 
 APIServer::~APIServer() {
@@ -311,7 +320,10 @@ void APIServer::register_endpoints() {
                 }
                 if (msg.contains("tool_calls")) {
                     m.tool_calls_json = msg["tool_calls"].dump();
+                    dout(1) << "Parsed tool_calls for assistant message: " << m.tool_calls_json << std::endl;
                 }
+                dout(2) << "Parsed message: role=" << role << " content_len=" << content.length()
+                        << " tool_calls_json_len=" << m.tool_calls_json.length() << std::endl;
                 request_session.messages.push_back(m);
 
                 // Track last user/assistant messages for context preservation
@@ -355,7 +367,9 @@ void APIServer::register_endpoints() {
 
             dout(1) << "Session sampling params: temp=" + std::to_string(request_session.temperature) +
                      " top_p=" + std::to_string(request_session.top_p) +
-                     " freq_penalty=" + std::to_string(request_session.frequency_penalty) << std::endl;
+                     " rep_penalty=" + std::to_string(request_session.repetition_penalty) +
+                     " freq_penalty=" + std::to_string(request_session.frequency_penalty) +
+                     " pres_penalty=" + std::to_string(request_session.presence_penalty) << std::endl;
 
             dout(1) << "Calling generate_from_session with " + std::to_string(request_session.messages.size()) +
                      " messages and " + std::to_string(request_session.tools.size()) + " tools (stream=" +
@@ -372,10 +386,18 @@ void APIServer::register_endpoints() {
                 res.set_header("Cache-Control", "no-cache");
                 res.set_header("X-Accel-Buffering", "no");
 
-                // Get thinking markers for streaming filter
+                // Get thinking markers for streaming filter (for non-channel models)
                 auto thinking_start = backend->get_thinking_start_markers();
                 auto thinking_end = backend->get_thinking_end_markers();
                 bool filter_thinking = !config->thinking && !thinking_start.empty();
+
+                // Channel parsing is now handled by the backend's process_output()
+                // No need for a separate channel parser here - content arrives already filtered
+                const auto* caps = backend->get_chat_template_caps();
+                bool has_channels = caps && caps->has_channels;
+                if (has_channels) {
+                    dout(1) << "Streaming with backend channel parsing, thinking=" << (config->thinking ? "true" : "false") << std::endl;
+                }
 
                 // Capture backend pointer and mutex for lambda
                 Backend* backend_ptr = backend.get();
@@ -384,7 +406,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [backend_ptr, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, backend_ptr, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels](size_t offset, httplib::DataSink& sink) mutable {
                         // Acquire lock for backend access (serialize with other requests)
                         std::lock_guard<std::mutex> stream_lock(*mutex_ptr);
 
@@ -404,15 +426,38 @@ void APIServer::register_endpoints() {
                         std::string initial_data = "data: " + initial_chunk.dump() + "\n\n";
                         sink.write(initial_data.c_str(), initial_data.size());
 
-                        // State for thinking block filtering during streaming
+                        // State for thinking block filtering during streaming (non-channel models)
+                        // Note: For channel-based models (has_channels=true), the backend's
+                        // process_output() handles channel parsing before calling this callback
                         bool in_thinking = false;
                         std::string pending_buffer;
 
-                        auto callback = [&](CallbackEvent type,
-                                            const std::string& content,
-                                            const std::string& tool_name_arg,
-                                            const std::string& tool_call_id) -> bool {
+                        // Helper to send an SSE content chunk
+                        auto send_content_chunk = [&](const std::string& text) -> bool {
+                            if (text.empty()) return true;
+                            json delta_chunk = {
+                                {"id", request_id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", std::time(nullptr)},
+                                {"model", model_name},
+                                {"choices", json::array({{
+                                    {"index", 0},
+                                    {"delta", {{"content", sanitize_utf8(text)}}},
+                                    {"logprobs", nullptr},
+                                    {"finish_reason", nullptr}
+                                }})}
+                            };
+                            std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
+                            return sink.write(chunk_data.c_str(), chunk_data.size());
+                        };
+
+                        // Set request handler for this streaming request
+                        request_handler = [&](CallbackEvent type,
+                                              const std::string& content,
+                                              const std::string& tool_name_arg,
+                                              const std::string& tool_call_id) -> bool {
                             // Handle STOP - signals completion, don't treat finish_reason as content
+                            // Note: Channel parser flush is now handled by backend's flush_output()
                             if (type == CallbackEvent::STOP) {
                                 return true;  // Final chunk with finish_reason sent after this
                             }
@@ -424,15 +469,23 @@ void APIServer::register_endpoints() {
                             if (type == CallbackEvent::TOOL_CALL) {
                                 return true;  // Tool calls returned in response
                             }
-                            // Only process CONTENT events
-                            if (type != CallbackEvent::CONTENT && type != CallbackEvent::THINKING) {
+                            // Only process content-type events
+                            if (type != CallbackEvent::CONTENT && type != CallbackEvent::THINKING && type != CallbackEvent::CODEBLOCK) {
                                 return true;
                             }
 
-                            std::string output_delta = content;
-                            const std::string& delta = content;  // Alias for compatibility
+                            dout(2) << "API callback received: type=" << static_cast<int>(type) << " content=[" << content.substr(0, 50) << "] len=" << content.length() << std::endl;
 
-                            // Filter thinking blocks if needed
+                            // For channel-based models: backend's process_output() already filtered
+                            // the content through ChannelParser, so we receive clean content here
+                            if (has_channels) {
+                                return send_content_chunk(content);
+                            }
+
+                            // For non-channel models: use existing thinking block filter
+                            std::string output_delta = content;
+                            const std::string& delta = content;
+
                             if (filter_thinking) {
                                 pending_buffer += delta;
 
@@ -441,14 +494,12 @@ void APIServer::register_endpoints() {
                                     for (const auto& marker : thinking_start) {
                                         size_t pos = pending_buffer.find(marker);
                                         if (pos != std::string::npos) {
-                                            // Output content before the marker
                                             output_delta = pending_buffer.substr(0, pos);
                                             pending_buffer = pending_buffer.substr(pos + marker.length());
                                             in_thinking = true;
                                             break;
                                         }
                                     }
-                                    // Check if we might be in the middle of a marker
                                     if (!in_thinking) {
                                         bool could_be_partial = false;
                                         for (const auto& marker : thinking_start) {
@@ -461,7 +512,6 @@ void APIServer::register_endpoints() {
                                             if (could_be_partial) break;
                                         }
                                         if (could_be_partial) {
-                                            // Hold back potential partial marker
                                             output_delta = "";
                                         } else {
                                             output_delta = pending_buffer;
@@ -482,35 +532,51 @@ void APIServer::register_endpoints() {
                                         }
                                     }
                                     if (in_thinking) {
-                                        output_delta = "";  // Suppress content inside thinking block
+                                        output_delta = "";
                                     }
                                 }
                             }
 
-                            // Only send chunk if there's content
-                            if (!output_delta.empty()) {
-                                json delta_chunk = {
-                                    {"id", request_id},
-                                    {"object", "chat.completion.chunk"},
-                                    {"created", std::time(nullptr)},
-                                    {"model", model_name},
-                                    {"choices", json::array({{
-                                        {"index", 0},
-                                        {"delta", {{"content", sanitize_utf8(output_delta)}}},
-                                        {"logprobs", nullptr},
-                                        {"finish_reason", nullptr}
-                                    }})}
-                                };
-                                std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
-                                return sink.write(chunk_data.c_str(), chunk_data.size());
-                            }
-                            return true;  // Continue even if we didn't output anything
+                            // Send chunk
+                            dout(2) << "API stream: output_delta=[" << output_delta.substr(0, 100) << "] len=" << output_delta.length() << std::endl;
+                            return send_content_chunk(output_delta);
                         };
 
-                        // Set callback and generate tokens
-                        backend_ptr->callback = callback;
                         std::string finish_reason = "stop";
                         backend_ptr->generate_from_session(request_session, max_tokens);
+                        request_handler = nullptr;  // Clear after request
+
+                        // Check for pending tool calls (for channel-based models like GPT-OSS)
+                        // These are captured by the channel parser during streaming
+                        if (!backend_ptr->pending_tool_calls.empty()) {
+                            const auto& tc = backend_ptr->pending_tool_calls[0];
+                            json tool_chunk = {
+                                {"id", request_id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", std::time(nullptr)},
+                                {"model", model_name},
+                                {"choices", json::array({{
+                                    {"index", 0},
+                                    {"delta", {
+                                        {"tool_calls", json::array({{
+                                            {"index", 0},
+                                            {"id", tc.tool_call_id.empty() ? "call_" + std::to_string(std::time(nullptr)) : tc.tool_call_id},
+                                            {"type", "function"},
+                                            {"function", {
+                                                {"name", tc.name},
+                                                {"arguments", tc.raw_json}
+                                            }}
+                                        }})}
+                                    }},
+                                    {"logprobs", nullptr},
+                                    {"finish_reason", nullptr}
+                                }})}
+                            };
+                            std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
+                            sink.write(tool_data.c_str(), tool_data.size());
+                            finish_reason = "tool_calls";
+                            dout(1) << "Streaming: sent pending_tool_call: " << tc.name << std::endl;
+                        }
 
                         // Send final chunk with finish_reason (vLLM compatible)
                         json final_chunk = {
@@ -560,12 +626,12 @@ void APIServer::register_endpoints() {
             }
 
             // Non-streaming response
-            // Set up callback to accumulate response content
+            // Set up request handler to accumulate response content
             std::string accumulated_content;
             std::string error_message;
             std::string finish_reason = "stop";
 
-            backend->callback = [&accumulated_content, &error_message, &finish_reason](
+            request_handler = [&accumulated_content, &error_message, &finish_reason](
                 CallbackEvent event, const std::string& data,
                 const std::string& type, const std::string& id) -> bool {
                 switch (event) {
@@ -585,13 +651,16 @@ void APIServer::register_endpoints() {
             };
 
             backend->generate_from_session(request_session, max_tokens);
+            request_handler = nullptr;  // Clear after request
 
             // Build Response from accumulated content
             Response resp;
-            if (error_message.empty() && !accumulated_content.empty()) {
+            bool has_content = !accumulated_content.empty();
+            bool has_tool_calls = !backend->pending_tool_calls.empty();
+            if (error_message.empty() && (has_content || has_tool_calls)) {
                 resp.success = true;
                 resp.content = accumulated_content;
-                resp.finish_reason = finish_reason;
+                resp.finish_reason = has_tool_calls ? "tool_calls" : finish_reason;
                 // Get token counts from session (updated by backend during generate_from_session)
                 resp.prompt_tokens = request_session.last_prompt_tokens;
                 resp.completion_tokens = request_session.last_assistant_message_tokens;
@@ -638,6 +707,37 @@ void APIServer::register_endpoints() {
             Response stripped_resp = resp;
             stripped_resp.content = response_content;
             auto tool_call_opt = extract_tool_call(stripped_resp, backend.get());
+
+            // Also check backend's pending_tool_calls (for channel-based models like GPT-OSS)
+            // These are captured by the channel parser during streaming
+            if (!tool_call_opt.has_value() && !backend->pending_tool_calls.empty()) {
+                const auto& tc = backend->pending_tool_calls[0];
+                ToolParser::ToolCall parsed_tc;
+                parsed_tc.name = tc.name;
+                parsed_tc.tool_call_id = tc.tool_call_id;
+                parsed_tc.raw_json = tc.raw_json;
+                // Parse raw_json into parameters
+                try {
+                    auto args_json = nlohmann::json::parse(tc.raw_json);
+                    for (auto it = args_json.begin(); it != args_json.end(); ++it) {
+                        if (it.value().is_string()) {
+                            parsed_tc.parameters[it.key()] = it.value().get<std::string>();
+                        } else if (it.value().is_number_integer()) {
+                            parsed_tc.parameters[it.key()] = it.value().get<int>();
+                        } else if (it.value().is_number_float()) {
+                            parsed_tc.parameters[it.key()] = it.value().get<double>();
+                        } else if (it.value().is_boolean()) {
+                            parsed_tc.parameters[it.key()] = it.value().get<bool>();
+                        } else {
+                            parsed_tc.parameters[it.key()] = it.value().dump();
+                        }
+                    }
+                } catch (...) {
+                    // If parsing fails, leave parameters empty
+                }
+                tool_call_opt = parsed_tc;
+                dout(1) << "Using pending_tool_call from channel parser: " << tc.name << std::endl;
+            }
 
             // Build OpenAI-compatible response
             json choice = {

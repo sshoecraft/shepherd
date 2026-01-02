@@ -5,15 +5,61 @@
 **Required**:
 - C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.18+
+- pkg-config
+- OpenSSL
 - SQLite3
 - libcurl
-- nlohmann/json
+- ncurses
+- nlohmann/json (bundled)
 - Rust 1.65+ and Cargo (only required for TensorRT backend)
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install build-essential g++ cmake pkg-config \
+    libssl-dev libcurl4-openssl-dev libsqlite3-dev libncurses-dev
+```
+
+**For running tests (optional):**
+```bash
+sudo apt-get install libgtest-dev
+```
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install gcc-c++ cmake pkgconfig \
+    openssl-devel libcurl-devel sqlite-devel ncurses-devel
+```
+
+**macOS (Homebrew):**
+```bash
+brew install cmake pkg-config openssl curl sqlite ncurses
+```
 
 **Optional** (for local inference):
 - llama.cpp (included as submodule, requires CUDA Toolkit for GPU support)
 - TensorRT-LLM (for NVIDIA GPU optimization)
 - CUDA Toolkit 11.8+ (for GPU support in llama.cpp backend)
+
+**CUDA Toolkit** (for GPU support with llama.cpp):
+
+Ubuntu/Debian:
+```bash
+# Add NVIDIA CUDA repository (Ubuntu 24.04)
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt update
+
+# Install CUDA toolkit (nvcc + development libraries)
+sudo apt install cuda-nvcc-12-8 cuda-libraries-dev-12-8
+
+# Add to PATH (or add to ~/.bashrc)
+echo 'export PATH=/usr/local/cuda/bin:$PATH' | sudo tee /etc/profile.d/cuda.sh
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}' | sudo tee -a /etc/profile.d/cuda.sh
+source /etc/profile.d/cuda.sh
+```
+
+For other Ubuntu versions, replace `ubuntu2404` with your version (e.g., `ubuntu2204` for 22.04).
+See https://developer.nvidia.com/cuda-downloads for other distributions.
 
 ## Build Instructions
 
@@ -218,3 +264,83 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
 | RelWithDebInfo | `-g -O2 -DNDEBUG` | Production with profiling |
 
 **Note**: The Makefile always uses Debug flags (`-g -O0 -D_DEBUG`).
+
+## Building and Running Tests
+
+Shepherd includes a comprehensive test suite using Google Test. Tests are optional and excluded from the default build.
+
+### Prerequisites
+
+Install Google Test:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libgtest-dev
+```
+
+### Enabling Tests
+
+Add `TESTS=ON` to your `~/.shepherd_opts` file:
+
+```bash
+echo "TESTS=ON" >> ~/.shepherd_opts
+```
+
+Or pass it directly to cmake:
+
+```bash
+cmake -DBUILD_TESTS=ON ..
+```
+
+### Building Tests
+
+```bash
+# Configure with tests enabled
+make gconfig   # Debug build with tests (if TESTS=ON in ~/.shepherd_opts)
+
+# Build main project
+make
+
+# Build test executables
+cd build && make test_unit test_tools
+```
+
+### Running Tests
+
+```bash
+# Run all unit tests
+./build/tests/test_unit
+
+# Run tool tests
+./build/tests/test_tools
+
+# Run specific test suite
+./build/tests/test_unit --gtest_filter="ConfigTest.*"
+
+# Run with verbose output
+./build/tests/test_unit --gtest_output=xml:test_results.xml
+
+# List available tests
+./build/tests/test_unit --gtest_list_tests
+```
+
+### Test Categories
+
+| Executable | Description |
+|------------|-------------|
+| `test_unit` | Core tests (config, session, scheduler, providers, message, SSE parser) |
+| `test_tools` | Tool system tests (filesystem, command, memory, JSON) |
+
+### Provider Tests
+
+Provider tests are part of `test_unit` because providers are core Shepherd functionality. The tests automatically:
+- Load all providers from `~/.config/shepherd/providers/`
+- Test connectivity and basic generation for each configured provider
+- Skip provider types that aren't configured
+- Test provider switching if you have multiple providers
+
+### Test Documentation
+
+For detailed test cases and manual testing procedures, see:
+- `docs/testing.md` - Complete test plan
+- `docs/testing_manual_checklist.md` - Manual testing checklist

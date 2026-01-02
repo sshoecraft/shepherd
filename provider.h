@@ -48,7 +48,8 @@ public:
     int pp = 1;                     // Pipeline parallelism
     int gpu_layers = -1;            // -1=auto, 0=CPU only
     int gpu_id = 0;                 // TensorRT GPU ID
-    int n_batch = 512;
+    int n_batch = 512;              // Logical batch size
+    int ubatch = 512;               // Physical micro-batch size (must be <= n_batch)
     int n_threads = 0;              // 0=auto
     std::string cache_type = "f16"; // KV cache type: f16, f32, q8_0, q4_0
 

@@ -123,29 +123,23 @@ void TerminalIO::console_writer(const char* text, size_t len, Message::Type type
 
 ## TUI Writer
 
-Routes to NCurses windows via TUI class:
+Routes to NCurses windows via TUI class. TUI now uses `CallbackEvent` (from backend.h) directly instead of a separate LineType enum:
 
 ```cpp
-void TerminalIO::tui_writer(const char* text, size_t len, Message::Type type) {
-    if (!tio.tui) {
-        console_writer(text, len, type);
-        return;
-    }
+// TUI uses CallbackEvent for type, with centralized formatting from frontend.h
+void TUI::write_output(const char* text, size_t len, CallbackEvent type) {
+    // Color from get_color_for_event() in frontend.h
+    int color = ncurses_from_color(get_color_for_event(type));
 
-    // Map to TUI::LineType
-    TUI::LineType line_type;
-    switch (type) {
-        case Message::USER:      line_type = TUI::LineType::USER; break;
-        case Message::TOOL_REQUEST:
-        case Message::TOOL_RESPONSE: line_type = TUI::LineType::TOOL_RESULT; break;
-        case Message::ASSISTANT: line_type = TUI::LineType::ASSISTANT; break;
-        default:                 line_type = TUI::LineType::SYSTEM; break;
-    }
+    // Indent from get_indent_for_event() in frontend.h
+    int indent_spaces = get_indent_for_event(type);
 
-    tio.tui->write_output(text, len, line_type);
-    tio.tui->flush();
+    // Apply color and indent, write to ncurses pad
+    ...
 }
 ```
+
+This ensures CLI and TUI have identical formatting.
 
 ## Server Writer
 

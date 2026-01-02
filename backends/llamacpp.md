@@ -202,6 +202,58 @@ When a callback is provided:
 - The callback can return `false` to stop generation early
 - Streaming output to tio is suppressed when callback is active
 
+## Tool Call Handling
+
+Tool calls are detected during streaming via `Backend::output()` filter:
+
+1. All generated content flows through `output()` in the base Backend class
+2. `output()` detects tool call markers (JSON `{...}` or XML `<tool_call>`)
+3. `emit_tool_call()` parses the tool call (JSON or XML format) and stores in `pending_tool_calls`
+4. After generation, `add_message()` builds `tool_calls_json` from `pending_tool_calls`
+5. The assistant message is stored with `tool_calls_json` populated
+
+```cpp
+// After generate() returns:
+if (!pending_tool_calls.empty()) {
+    nlohmann::json tc_array = nlohmann::json::array();
+    for (const auto& tc : pending_tool_calls) {
+        // Build OpenAI-format tool call JSON
+        tc_array.push_back({...});
+    }
+    assistant_msg.tool_calls_json = tc_array.dump();
+}
+```
+
+This ensures proper Jinja template formatting when TOOL_RESPONSE messages are added.
+
+### Backend Session Synchronization
+
+After generation completes, the assistant message must be added to `backend_session.messages` to keep it synchronized with the KV cache:
+
+```cpp
+// After successful generation
+Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
+backend_session.messages.push_back(assistant_msg);
+backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+```
+
+This is critical for prefix caching in server mode. Without this sync, subsequent requests would match the user message prefix but the KV cache would contain extra assistant tokens, causing immediate EOS generation.
+
+## Template Rendering Fallback
+
+The `render_message()` function wraps template rendering in a try-catch to handle templates with unsupported features:
+
+```cpp
+try {
+    return chat_template->format_message_incremental(...);
+} catch (const std::exception& e) {
+    // Fall back to simple ChatML format
+    return "<|im_start|>" + role + "\n" + content + "<|im_end|>\n";
+}
+```
+
+This prevents crashes when templates use features not fully supported by minja (e.g., certain iteration patterns over tool call arguments).
+
 ## Shutdown
 
 The `shutdown()` method properly cleans up resources:
@@ -237,7 +289,8 @@ From provider config JSON:
 | `context_size` | int | 32768 | Context window size |
 | `pipeline_parallel` / `pp` | int | 1 | Pipeline parallelism (GPUs) |
 | `tensor_parallel` / `tp` | int | 1 | Tensor parallelism (GPUs) |
-| `ubatch` | int | 512 | Batch size for prompt processing |
+| `n_batch` | int | 512 | Logical batch size for prompt processing |
+| `ubatch` / `n_ubatch` | int | 512 | Physical micro-batch size (must be ≤ n_batch) |
 
 ## Key Files
 

@@ -232,6 +232,13 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
         }
     }
 
+    // GPT-OSS: Has <|channel|> markers and "Valid channels: analysis, commentary, final"
+    if (template_text.find("<|channel|>") != std::string::npos &&
+        template_text.find("Valid channels:") != std::string::npos) {
+        dout(1) << "Detected GPT-OSS model family from chat template" << std::endl;
+        return ModelConfig::create_gpt_oss();
+    }
+
     // No match - return generic
     return ModelConfig::create_generic();
 }
@@ -297,6 +304,14 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
             version = "2.5";
         }
         return ModelConfig::create_qwen_2x(version);
+    }
+
+    // GPT-OSS detection (OpenAI open source model)
+    if (model_lower.find("gpt-oss") != std::string::npos ||
+        model_lower.find("gptoss") != std::string::npos ||
+        model_lower.find("gpt_oss") != std::string::npos) {
+        dout(1) << "Detected GPT-OSS from model path" << std::endl;
+        return ModelConfig::create_gpt_oss();
     }
 
     // No match - return generic

@@ -337,17 +337,24 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
     context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(false));
 
-    // Add tools if present
+    // Add tools if present - use OpenAI format with type/function wrapper
+    // Most model templates expect this format (e.g., Mistral, GPT-OSS)
     if (!tools.empty()) {
         auto tools_array = minja::Value::array();
         for (const auto& tool : tools) {
-            auto tool_obj = minja::Value::object();
-            tool_obj.set("name", minja::Value(tool.name));
-            tool_obj.set("description", minja::Value(tool.description));
+            // Create the inner function object
+            auto func_obj = minja::Value::object();
+            func_obj.set("name", minja::Value(tool.name));
+            func_obj.set("description", minja::Value(tool.description));
 
             // Convert nlohmann::json to minja::Value by round-tripping through string
             // This avoids the ambiguous json type conflict
-            tool_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
+            func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
+
+            // Wrap in OpenAI format: {"type": "function", "function": {...}}
+            auto tool_obj = minja::Value::object();
+            tool_obj.set("type", minja::Value("function"));
+            tool_obj.set("function", func_obj);
 
             tools_array.push_back(tool_obj);
         }
@@ -381,15 +388,27 @@ std::string MinjaTemplate::get_generation_prompt() const {
     msg_obj.set("content", minja::Value("x"));
     messages.push_back(msg_obj);
 
+    // Add date/time support for templates that use strftime_now
+    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
+        std::string format = args.args.empty() ? "%Y-%m-%d" : args.args[0].get<std::string>();
+        std::time_t now = std::time(nullptr);
+        std::tm* tm_info = std::localtime(&now);
+        char buffer[128];
+        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
+        return minja::Value(std::string(buffer));
+    });
+
     context_without->set("messages", messages);
     context_without->set("bos_token", minja::Value(bos_token));
     context_without->set("eos_token", minja::Value(eos_token));
     context_without->set("add_generation_prompt", minja::Value(false));
+    context_without->set("strftime_now", strftime_now);
 
     context_with->set("messages", messages);
     context_with->set("bos_token", minja::Value(bos_token));
     context_with->set("eos_token", minja::Value(eos_token));
     context_with->set("add_generation_prompt", minja::Value(true));
+    context_with->set("strftime_now", strftime_now);
 
     std::string without_prompt = (*template_ptr)->render(context_without);
     std::string with_prompt = (*template_ptr)->render(context_with);
@@ -404,11 +423,8 @@ std::string MinjaTemplate::get_generation_prompt() const {
 }
 
 std::string MinjaTemplate::get_assistant_end_tag() const {
-    // For minja templates, the end tag is typically the eos_token
-    // If eos_token wasn't provided, use a reasonable ChatML-style default
-    if (eos_token.empty()) {
-        return "<|im_end|>";
-    }
+    // For minja templates, the end tag is the eos_token from the model
+    // If eos_token wasn't provided, return empty (don't hardcode a fallback)
     return eos_token;
 }
 
@@ -416,41 +432,446 @@ ModelFamily MinjaTemplate::get_family() const {
     return ModelFamily::GENERIC;
 }
 
+void MinjaTemplate::clear_cache() {
+    cached_prefix.clear();
+    cached_message_count = 0;
+}
+
+std::string MinjaTemplate::try_render(
+    const std::vector<Message>& messages,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) const {
+    try {
+        return render_via_minja(messages, tools, add_generation_prompt);
+    } catch (const std::exception& e) {
+        dout(1) << "MinjaTemplate::try_render exception: " + std::string(e.what()) << std::endl;
+        return "";
+    }
+}
+
+std::string MinjaTemplate::render_via_minja(
+    const std::vector<Message>& messages,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) const {
+
+    if (!template_node) {
+        throw std::runtime_error("MinjaTemplate::render_via_minja() called but template_node is null");
+    }
+
+    auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
+
+    // Create minja context with builtins
+    auto context = minja::Context::builtins();
+
+    // Add date/time support
+    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
+        std::string format = args.args.empty() ? "%Y-%m-%d" : args.args[0].get<std::string>();
+        std::time_t now = std::time(nullptr);
+        std::tm* tm_info = std::localtime(&now);
+        char buffer[128];
+        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
+        return minja::Value(std::string(buffer));
+    });
+    context->set("strftime_now", strftime_now);
+
+    time_t now = time(nullptr);
+    struct tm* tm_info = localtime(&now);
+    char date_buffer[128];
+    strftime(date_buffer, sizeof(date_buffer), "%d %b %Y", tm_info);
+    context->set("date_string", minja::Value(std::string(date_buffer)));
+
+    // Build messages array
+    int msgs_with_tool_calls = 0;
+    for (const auto& msg : messages) {
+        if (!msg.tool_calls_json.empty()) msgs_with_tool_calls++;
+    }
+    dout(2) << "render_via_minja: " << messages.size() << " messages, " << msgs_with_tool_calls << " with tool_calls" << std::endl;
+
+    auto msgs_array = minja::Value::array();
+    for (const auto& msg : messages) {
+        auto msg_obj = minja::Value::object();
+
+        // Map role
+        std::string role = msg.get_role();
+        if (msg.role == Message::TOOL_RESPONSE) {
+            role = "tool";  // Standard role for tool responses
+        }
+        msg_obj.set("role", minja::Value(role));
+        msg_obj.set("content", minja::Value(msg.content));
+
+        // Add tool metadata if present
+        if (!msg.tool_name.empty()) {
+            msg_obj.set("name", minja::Value(msg.tool_name));
+        }
+        if (!msg.tool_call_id.empty()) {
+            msg_obj.set("tool_call_id", minja::Value(msg.tool_call_id));
+        }
+
+        // Add tool_calls if present (for assistant messages with tool calls)
+        // tool_calls_json is a JSON string containing tool calls array
+        if (!msg.tool_calls_json.empty()) {
+            try {
+                auto tool_calls_parsed = nlohmann::json::parse(msg.tool_calls_json);
+                if (tool_calls_parsed.is_array()) {
+                    auto tool_calls_array = minja::Value::array();
+                    for (const auto& tc : tool_calls_parsed) {
+                        auto tc_obj = minja::Value::object();
+                        if (tc.contains("id")) {
+                            tc_obj.set("id", minja::Value(tc["id"].get<std::string>()));
+                        }
+                        tc_obj.set("type", minja::Value("function"));
+
+                        if (tc.contains("function")) {
+                            auto func_obj = minja::Value::object();
+                            std::string func_name;
+                            if (tc["function"].contains("name")) {
+                                func_name = tc["function"]["name"].get<std::string>();
+                                func_obj.set("name", minja::Value(func_name));
+                            }
+                            // Always set arguments at tool_call level for templates that expect it
+                            // (like Qwen3-Coder which uses tool_call.arguments|items)
+                            // Parse the arguments string into an actual JSON object for minja
+                            minja::Value args_obj = minja::Value::object();  // Default empty
+
+                            if (tc["function"].contains("arguments")) {
+                                std::string args_str = tc["function"]["arguments"].get<std::string>();
+                                func_obj.set("arguments", minja::Value(args_str));
+
+                                // Parse arguments string as JSON and convert to minja Value
+                                // Use ordered_json to avoid ambiguous constructor issues
+                                try {
+                                    args_obj = minja::Value(nlohmann::ordered_json::parse(args_str));
+                                } catch (...) {
+                                    // If args_str isn't valid JSON, keep empty object
+                                }
+                            }
+                            tc_obj.set("arguments", args_obj);
+                            tc_obj.set("function", func_obj);
+
+                            // Also set name at top-level for templates that use tool_call.name
+                            if (!func_name.empty()) {
+                                tc_obj.set("name", minja::Value(func_name));
+                            }
+                        }
+
+                        tool_calls_array.push_back(tc_obj);
+                    }
+                    msg_obj.set("tool_calls", tool_calls_array);
+                }
+            } catch (const std::exception& e) {
+                dout(1) << "Failed to parse tool_calls_json: " + std::string(e.what()) << std::endl;
+            }
+        }
+
+        msgs_array.push_back(msg_obj);
+    }
+
+    context->set("messages", msgs_array);
+    context->set("bos_token", minja::Value(bos_token));
+    context->set("eos_token", minja::Value(eos_token));
+    context->set("add_generation_prompt", minja::Value(add_generation_prompt));
+
+    // Add tools if present
+    if (!tools.empty()) {
+        auto tools_array = minja::Value::array();
+        for (const auto& tool : tools) {
+            auto func_obj = minja::Value::object();
+            func_obj.set("name", minja::Value(tool.name));
+            func_obj.set("description", minja::Value(tool.description));
+            func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
+
+            auto tool_obj = minja::Value::object();
+            tool_obj.set("type", minja::Value("function"));
+            tool_obj.set("function", func_obj);
+
+            tools_array.push_back(tool_obj);
+        }
+        context->set("tools", tools_array);
+    }
+
+    // Render through template
+    std::string rendered = (*template_ptr)->render(context);
+    return rendered;
+}
+
+std::vector<Message> MinjaTemplate::apply_polyfills(
+    const std::vector<Message>& messages,
+    const std::vector<Session::Tool>& tools) const {
+
+    std::vector<Message> adjusted = messages;
+
+    // Polyfill: Inject tools into system message if template doesn't support tools natively
+    if (!caps.supports_tools && !tools.empty()) {
+        std::string tool_description = "\n\nAvailable tools:\n";
+        for (const auto& tool : tools) {
+            tool_description += "- " + tool.name + ": " + tool.description + "\n";
+            if (!tool.parameters.empty()) {
+                tool_description += "  Parameters: " + tool.parameters.dump() + "\n";
+            }
+        }
+        tool_description += "\nTo use a tool, respond with JSON: {\"name\": \"tool_name\", \"parameters\": {...}}\n";
+
+        if (!adjusted.empty() && adjusted[0].role == Message::SYSTEM) {
+            adjusted[0].content += tool_description;
+        } else {
+            Message sys(Message::SYSTEM, "You are a helpful assistant." + tool_description, 0);
+            adjusted.insert(adjusted.begin(), sys);
+        }
+    }
+
+    // Polyfill: Merge system into first user message if no system role support
+    if (!caps.supports_system_role && !adjusted.empty() &&
+        adjusted[0].role == Message::SYSTEM) {
+        std::string sys_content = adjusted[0].content;
+        adjusted.erase(adjusted.begin());
+        if (!adjusted.empty() && adjusted[0].role == Message::USER) {
+            adjusted[0].content = sys_content + "\n\n" + adjusted[0].content;
+        }
+    }
+
+    // Polyfill: Convert tool responses to user messages if not supported
+    if (!caps.supports_tool_responses) {
+        for (auto& msg : adjusted) {
+            if (msg.role == Message::TOOL_RESPONSE) {
+                msg.role = Message::USER;
+                msg.content = "Tool result for " + msg.tool_name + ": " + msg.content;
+            }
+        }
+    }
+
+    return adjusted;
+}
+
+std::string MinjaTemplate::format_conversation(
+    const std::vector<Message>& messages,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) const {
+
+    // Apply polyfills if capabilities have been probed
+    std::vector<Message> adjusted_messages;
+    if (caps.probed) {
+        adjusted_messages = apply_polyfills(messages, tools);
+    } else {
+        adjusted_messages = messages;
+    }
+
+    // Pass empty tools if we applied polyfills (tools already injected into system message)
+    std::vector<Session::Tool> render_tools;
+    if (caps.probed && !caps.supports_tools) {
+        // Tools already polyfilled into system message
+        render_tools = {};
+    } else {
+        render_tools = tools;
+    }
+
+    return render_via_minja(adjusted_messages, render_tools, add_generation_prompt);
+}
+
+std::string MinjaTemplate::format_message_incremental(
+    const std::vector<Message>& all_messages,
+    size_t target_index,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) const {
+
+    // Check if we can use cached prefix
+    bool cache_valid = (target_index == cached_message_count);
+
+    std::string prefix;
+    if (cache_valid && target_index > 0) {
+        prefix = cached_prefix;
+        dout(2) << "MinjaTemplate: using cached prefix (" + std::to_string(prefix.length()) + " chars)" << std::endl;
+    } else {
+        if (target_index > 0) {
+            // Render messages[0..target_index-1]
+            std::vector<Message> prefix_msgs(all_messages.begin(), all_messages.begin() + target_index);
+            prefix = format_conversation(prefix_msgs, tools, false);
+            dout(2) << "MinjaTemplate: rendered prefix (" + std::to_string(prefix.length()) + " chars)" << std::endl;
+        } else {
+            prefix = "";
+        }
+    }
+
+    // Render messages[0..target_index] with generation prompt if needed
+    std::vector<Message> full_msgs(all_messages.begin(), all_messages.begin() + target_index + 1);
+    std::string full = format_conversation(full_msgs, tools, add_generation_prompt);
+
+    // Update cache for next call
+    cached_prefix = full;
+    cached_message_count = target_index + 1;
+
+    // Return just the new part
+    if (full.length() > prefix.length()) {
+        std::string diff = full.substr(prefix.length());
+        dout(2) << "MinjaTemplate: incremental diff (" + std::to_string(diff.length()) + " chars)" << std::endl;
+        return diff;
+    }
+
+    dout(1) << "MinjaTemplate: WARNING - full not longer than prefix, returning empty" << std::endl;
+    return "";
+}
+
+void MinjaTemplate::probe_capabilities() {
+    if (caps.probed) {
+        return;  // Already probed
+    }
+
+    dout(1) << "MinjaTemplate: probing template capabilities..." << std::endl;
+
+    const std::string user_needle = "<<USER_NEEDLE_12345>>";
+    const std::string sys_needle = "<<SYSTEM_NEEDLE_67890>>";
+    const std::string tool_needle = "test_probe_tool";
+    const std::string tool_result_needle = "<<TOOL_RESULT_NEEDLE>>";
+
+    // Test system role support
+    {
+        Message sys(Message::SYSTEM, sys_needle, 0);
+        Message user(Message::USER, user_needle, 0);
+        std::vector<Message> msgs = {sys, user};
+        std::string rendered = try_render(msgs, {}, false);
+        caps.supports_system_role = (rendered.find(sys_needle) != std::string::npos);
+        dout(1) << "  supports_system_role: " + std::string(caps.supports_system_role ? "true" : "false") << std::endl;
+    }
+
+    // Test tools support
+    {
+        Message user(Message::USER, user_needle, 0);
+        std::vector<Message> msgs = {user};
+
+        Session::Tool test_tool;
+        test_tool.name = tool_needle;
+        test_tool.description = "A test tool for probing";
+        test_tool.parameters = nlohmann::json::object();
+        test_tool.parameters["type"] = "object";
+
+        std::string rendered = try_render(msgs, {test_tool}, false);
+        caps.supports_tools = (rendered.find(tool_needle) != std::string::npos);
+        dout(1) << "  supports_tools: " + std::string(caps.supports_tools ? "true" : "false") << std::endl;
+    }
+
+    // Test tool_calls in assistant messages
+    {
+        Message user(Message::USER, user_needle, 0);
+        Message asst(Message::ASSISTANT, "", 0);
+        // Build tool_calls_json as a proper JSON array
+        nlohmann::json tc_json = nlohmann::json::array();
+        nlohmann::json tc_obj;
+        tc_obj["id"] = "call_probe_123";
+        tc_obj["type"] = "function";
+        tc_obj["function"]["name"] = tool_needle;
+        tc_obj["function"]["arguments"] = "{\"arg\": 1}";
+        tc_json.push_back(tc_obj);
+        asst.tool_calls_json = tc_json.dump();
+
+        std::vector<Message> msgs = {user, asst};
+        std::string rendered = try_render(msgs, {}, false);
+        caps.supports_tool_calls = (rendered.find(tool_needle) != std::string::npos);
+        dout(1) << "  supports_tool_calls: " + std::string(caps.supports_tool_calls ? "true" : "false") << std::endl;
+    }
+
+    // Test tool response messages
+    {
+        Message user(Message::USER, user_needle, 0);
+        Message asst(Message::ASSISTANT, "", 0);
+        // Build tool_calls_json
+        nlohmann::json tc_json = nlohmann::json::array();
+        nlohmann::json tc_obj;
+        tc_obj["id"] = "call_probe_123";
+        tc_obj["type"] = "function";
+        tc_obj["function"]["name"] = tool_needle;
+        tc_obj["function"]["arguments"] = "{}";
+        tc_json.push_back(tc_obj);
+        asst.tool_calls_json = tc_json.dump();
+
+        Message tool_resp(Message::TOOL_RESPONSE, tool_result_needle, 0);
+        tool_resp.tool_name = tool_needle;
+        tool_resp.tool_call_id = "call_probe_123";
+
+        std::vector<Message> msgs = {user, asst, tool_resp};
+        std::string rendered = try_render(msgs, {}, false);
+        caps.supports_tool_responses = (rendered.find(tool_result_needle) != std::string::npos);
+        dout(1) << "  supports_tool_responses: " + std::string(caps.supports_tool_responses ? "true" : "false") << std::endl;
+    }
+
+    // Detect channel-based output format by examining the template text
+    // Look for patterns like "<|channel|>final" and "<|channel|>analysis"
+    {
+        caps.has_channels = false;
+        caps.channel_extract_marker.clear();
+        caps.channel_end_marker.clear();
+
+        // Check if template uses channel markers
+        if (template_text.find("<|channel|>") != std::string::npos) {
+            // Template has channel markers - check for common patterns
+            if (template_text.find("<|channel|>final") != std::string::npos ||
+                template_text.find("channel|>final") != std::string::npos) {
+                caps.has_channels = true;
+                caps.channel_extract_marker = "<|channel|>final<|message|>";
+
+                // Detect end marker from template
+                if (template_text.find("<|end|>") != std::string::npos) {
+                    caps.channel_end_marker = "<|end|>";
+                } else if (template_text.find("<|return|>") != std::string::npos) {
+                    caps.channel_end_marker = "<|return|>";
+                }
+
+                dout(1) << "  has_channels: true (detected channel-based output format)" << std::endl;
+                dout(1) << "  channel_extract_marker: " + caps.channel_extract_marker << std::endl;
+                dout(1) << "  channel_end_marker: " + caps.channel_end_marker << std::endl;
+            }
+        }
+
+        if (!caps.has_channels) {
+            dout(1) << "  has_channels: false" << std::endl;
+        }
+    }
+
+    caps.probed = true;
+    dout(1) << "MinjaTemplate: capability probing complete" << std::endl;
+}
+
 // ==================== ChatTemplateFactory Implementation ====================
 
 std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& template_text, const ModelConfig& config, void* template_node_ptr, const std::string& eos_token, const std::string& bos_token) {
     dout(2) << "ChatTemplateFactory creating template for family: " + std::to_string(static_cast<int>(config.family)) << std::endl;
 
+    // NEW: Prioritize MinjaTemplate when model has embedded Jinja template
+    // This ensures proper full-conversation rendering for any model
+    if (!template_text.empty() && template_node_ptr) {
+        // Special case: Qwen 3.x thinking models need special generation prompt handling
+        // that MinjaTemplate doesn't provide, so use hardcoded template
+        if (config.family == ModelFamily::QWEN_3_X && config.supports_thinking_mode) {
+            dout(1) << "Creating Qwen3ThinkingTemplate for thinking model (special handling required)" << std::endl;
+            return std::make_unique<Qwen3ThinkingTemplate>();
+        }
+
+        dout(1) << "Creating MinjaTemplate with model's embedded Jinja template" << std::endl;
+        return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
+    }
+
+    // FALLBACK: Use hardcoded templates only when no embedded template available
     switch (config.family) {
         case ModelFamily::QWEN_2_X:
-            dout(1) << "Creating ChatMLTemplate for Qwen 2.x" << std::endl;
+            dout(1) << "Creating ChatMLTemplate for Qwen 2.x (no embedded template)" << std::endl;
             return std::make_unique<ChatMLTemplate>();
 
         case ModelFamily::QWEN_3_X:
-            // Use thinking template for Qwen 3.x models that support thinking
             if (config.supports_thinking_mode) {
-                dout(1) << "Creating Qwen3ThinkingTemplate for thinking model" << std::endl;
+                dout(1) << "Creating Qwen3ThinkingTemplate for thinking model (no embedded template)" << std::endl;
                 return std::make_unique<Qwen3ThinkingTemplate>();
             }
-            dout(1) << "Creating ChatMLTemplate for Qwen 3.x (non-thinking)" << std::endl;
+            dout(1) << "Creating ChatMLTemplate for Qwen 3.x (no embedded template)" << std::endl;
             return std::make_unique<ChatMLTemplate>();
 
         case ModelFamily::LLAMA_2_X:
-            // If model has a jinja template, use MinjaTemplate with tokens
-            // Otherwise use hardcoded Llama2Template
-            if (!template_text.empty() && template_node_ptr) {
-                dout(1) << "Creating MinjaTemplate for Llama 2.x with custom template" << std::endl;
-                return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
-            }
-            dout(1) << "Creating Llama2Template for Llama 2.x" << std::endl;
+            dout(1) << "Creating Llama2Template (no embedded template)" << std::endl;
             return std::make_unique<Llama2Template>();
 
         case ModelFamily::LLAMA_3_X:
-            dout(1) << "Creating Llama3Template" << std::endl;
+            dout(1) << "Creating Llama3Template (no embedded template)" << std::endl;
             return std::make_unique<Llama3Template>();
 
         case ModelFamily::GLM_4:
-            dout(1) << "Creating GLM4Template" << std::endl;
+            dout(1) << "Creating GLM4Template (no embedded template)" << std::endl;
             return std::make_unique<GLM4Template>();
 
         case ModelFamily::MISTRAL:
@@ -461,7 +882,9 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& tem
         case ModelFamily::FUNCTIONARY:
         case ModelFamily::GENERIC:
         default:
-            dout(1) << "Creating MinjaTemplate for unknown/generic family" << std::endl;
+            // No template and unknown family - create MinjaTemplate anyway
+            // It will fail gracefully if template_node is null
+            dout(1) << "Creating MinjaTemplate for unknown/generic family (no embedded template)" << std::endl;
             return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
     }
 }

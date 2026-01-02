@@ -62,10 +62,10 @@ void get_global_args(int& argc, char**& argv) {
 #include <readline/history.h>
 #endif
 
+#ifdef _DEBUG
 // Global debug level (0=off, 1-9=increasing verbosity)
-// Used by dprintf() macro for fine-grained debug control
+// Used by dout() macro for fine-grained debug control
 int g_debug_level = 0;
-bool g_show_thinking = false;
 
 // Null stream for discarding debug output when level not met
 static std::ofstream null_stream("/dev/null");
@@ -74,6 +74,9 @@ static std::ofstream null_stream("/dev/null");
 std::ostream& dout(int level) {
     return (g_debug_level >= level) ? std::cerr : null_stream;
 }
+#endif
+
+bool g_show_thinking = false;
 
 // Global config instance
 std::unique_ptr<Config> config;
@@ -101,7 +104,9 @@ static void print_usage(int, char** argv) {
 	printf("	%s ctl <status|shutdown> [--socket PATH]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
+#ifdef _DEBUG
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
+#endif
 	printf("	-m, --model		   Model name or file (overrides config)\n");
 	printf("	-p, --provider	   Provider name to use (from provider list)\n");
 	printf("	--model_path	   Model directory path (overrides config, e.g., ~/models)\n");
@@ -112,7 +117,8 @@ static void print_usage(int, char** argv) {
 	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
 	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
 	printf("	--pp N			   Pipeline parallelism size (llamacpp only, default: 1)\n");
-	printf("	--ubatch N		   Micro-batch size for prompt processing (llamacpp only, default: auto)\n");
+	printf("	--n_batch N		   Logical batch size for prompt processing (llamacpp only, default: auto)\n");
+	printf("	--ubatch N		   Physical micro-batch size (llamacpp only, default: 512)\n");
 	printf("	--cache-type TYPE  KV cache data type: f16, f32, q8_0, q4_0 (llamacpp only, default: f16)\n");
 	printf("	--models-file FILE Path to models database JSON file (default: ~/.config/shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
@@ -120,6 +126,7 @@ static void print_usage(int, char** argv) {
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
 	printf("	--nosched		   Disable scheduler (no scheduled tasks run)\n");
 	printf("	--nostream		   Disable streaming (wait for complete response)\n");
+	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
@@ -134,6 +141,7 @@ static void print_usage(int, char** argv) {
 	printf("	--no-colors		   Force disable colored output (overrides environment)\n");
 	printf("	--tui			   Force enable TUI mode (boxed input, status line)\n");
 	printf("	--no-tui		   Force disable TUI mode (classic scrolling terminal)\n");
+	printf("	--stats			   Show performance stats (prefill/decode speed, KV cache)\n");
 	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
 	printf("\nMCP Management:\n");
@@ -426,12 +434,15 @@ int main(int argc, char** argv) {
 		bool warmup = false;
 		bool calibration = false;
 		bool thinking = false;
+		bool stats = false;
+		bool raw_output = false;
 		bool system_prompt_set = false;
 		int truncate_limit = 0;
 		int context_size = -1;      // -1 = not specified
 		int gpu_layers = -999;      // -999 = not specified
 		int tp = -1;                // -1 = not specified
 		int pp = -1;                // -1 = not specified
+		int n_batch = -1;           // -1 = not specified
 		int ubatch = -1;            // -1 = not specified
 		std::string provider;
 		std::string model;
@@ -448,7 +459,9 @@ int main(int argc, char** argv) {
 
 	static struct option long_options[] = {
 		{"config", required_argument, 0, 'c'},
+#ifdef _DEBUG
 		{"debug", optional_argument, 0, 'd'},
+#endif
 		{"model", required_argument, 0, 'm'},
 		{"provider", required_argument, 0, 'p'},
 		{"model_path", required_argument, 0, 1018},
@@ -462,6 +475,7 @@ int main(int argc, char** argv) {
 		{"nomcp", no_argument, 0, 1005},
 		{"nosched", no_argument, 0, 1037},
 		{"nostream", no_argument, 0, 1041},
+		{"raw", no_argument, 0, 1043},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
 		{"template", required_argument, 0, 1006},
@@ -474,9 +488,11 @@ int main(int argc, char** argv) {
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
 		{"pp", required_argument, 0, 1030},
+		{"n_batch", required_argument, 0, 1044},
 		{"ubatch", required_argument, 0, 1035},
 		{"cache-type", required_argument, 0, 1040},
 		{"thinking", no_argument, 0, 1031},
+		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
 		{"tui", no_argument, 0, 1038},
@@ -489,11 +505,16 @@ int main(int argc, char** argv) {
 
 	int opt;
 	int option_index = 0;
-	while ((opt = getopt_long(argc, argv, "c:dm:p:vh", long_options, &option_index)) != -1) {
+#ifdef _DEBUG
+	while ((opt = getopt_long(argc, argv, "c:d::m:p:vh", long_options, &option_index)) != -1) {
+#else
+	while ((opt = getopt_long(argc, argv, "c:m:p:vh", long_options, &option_index)) != -1) {
+#endif
 		switch (opt) {
 			case 'c':
 				config_file_path = optarg;
 				break;
+#ifdef _DEBUG
 			case 'd':
 				override.debug = true;
 				// Parse optional debug level (default to 1 if not specified)
@@ -503,6 +524,7 @@ int main(int argc, char** argv) {
 					g_debug_level = 1;
 				}
 				break;
+#endif
 			case 'm':
 				override.model = optarg;
 				break;
@@ -539,6 +561,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1041: // --nostream
 				no_stream = true;
+				break;
+			case 1043: // --raw
+				override.raw_output = true;
 				break;
 			case 1027: // --notools
 				no_tools = true;
@@ -593,6 +618,13 @@ int main(int argc, char** argv) {
 					return 1;
 				}
 				break;
+			case 1044: // --n_batch
+				override.n_batch = std::atoi(optarg);
+				if (override.n_batch < 1) {
+					printf("Error: n_batch must be at least 1\n");
+					return 1;
+				}
+				break;
 			case 1035: // --ubatch
 				override.ubatch = std::atoi(optarg);
 				if (override.ubatch < 1) {
@@ -610,6 +642,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1031: // --thinking
 				override.thinking = true;
+				break;
+			case 1042: // --stats
+				override.stats = true;
 				break;
 			case 1032: // --colors
 				color_override = 1;
@@ -672,6 +707,7 @@ int main(int argc, char** argv) {
 		dout(1) << "TUI mode enabled, frontend_mode=tui" << std::endl;
 	}
 
+#ifdef _DEBUG
 	// Debug mode initialization
 	if (g_debug_level) {
 		std::cout << "Debug mode enabled (level " << g_debug_level << ")" << std::endl;
@@ -681,6 +717,7 @@ int main(int argc, char** argv) {
 		std::string debug_msg = "SHEPHERD_INTERACTIVE=" + std::string(interactive_env ? interactive_env : "not set");
 		dout(1) << debug_msg << std::endl;
 	}
+#endif
 
 	// Apply command-line overrides to config
 	if (!override.backend.empty()) {
@@ -728,6 +765,12 @@ int main(int argc, char** argv) {
 		config->thinking = true;
 	}
 	g_show_thinking = config->thinking;
+	if (override.stats) {
+		config->stats = true;
+	}
+	if (override.raw_output) {
+		config->raw_output = true;
+	}
 	if (no_stream) {
 		config->streaming = false;
 		dout(1) << "Streaming disabled via --nostream flag" << std::endl;
@@ -740,6 +783,9 @@ int main(int argc, char** argv) {
 	}
 	if (override.pp != -1) {
 		config->json["pp"] = override.pp;
+	}
+	if (override.n_batch != -1) {
+		config->json["n_batch"] = override.n_batch;
 	}
 	if (override.ubatch != -1) {
 		config->json["ubatch"] = override.ubatch;
@@ -819,7 +865,25 @@ int main(int argc, char** argv) {
 		Provider cmdline_provider;
 		if (has_cmdline_override) {
 			cmdline_provider = Provider::from_config();
-			cmdline_provider.name = "_cmdline";
+			// Build descriptive name from backend type and model
+			std::string cmdline_name = "cmdline";
+			if (!cmdline_provider.type.empty()) {
+				cmdline_name += ":" + cmdline_provider.type;
+			}
+			if (!cmdline_provider.model.empty()) {
+				// Extract just the filename from path, without extension
+				std::string model_name = cmdline_provider.model;
+				size_t last_slash = model_name.find_last_of("/\\");
+				if (last_slash != std::string::npos) {
+					model_name = model_name.substr(last_slash + 1);
+				}
+				size_t last_dot = model_name.rfind('.');
+				if (last_dot != std::string::npos) {
+					model_name = model_name.substr(0, last_dot);
+				}
+				cmdline_name += "/" + model_name;
+			}
+			cmdline_provider.name = cmdline_name;
 			cmdline_provider.priority = 0;  // Highest priority (reserved for ephemeral)
 			cmdline_provider_ptr = &cmdline_provider;
 		}
@@ -829,35 +893,21 @@ int main(int argc, char** argv) {
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, no_mcp, no_tools);
 
-		// Connect to provider (stores backend in frontend)
-		bool connected = false;
+		// Determine which provider to pass to run()
+		// Provider connection now happens inside run() for proper UI sequencing
+		Provider* provider_for_run = nullptr;
 		if (!override.provider.empty()) {
 			// Specific provider requested via --provider
-			connected = frontend->connect_provider(override.provider);
-		} else if (has_cmdline_override) {
-			// Command-line overrides → use ephemeral _cmdline provider
-			connected = frontend->connect_provider("_cmdline");
-		} else {
-			// No overrides → try providers in priority order
-			connected = frontend->connect_next_provider();
-		}
-
-		if (!connected) {
-			fprintf(stderr, "Failed to connect to provider. Use 'shepherd provider add' to configure providers.\n");
-			return 1;
-		}
-
-		// Register non-active providers as tools (ask_<provider_name>)
-		if (!g_server_mode && !no_tools) {
-			std::string active_provider = frontend->current_provider;
-			if (!active_provider.empty()) {
-				CLI* cli = dynamic_cast<CLI*>(frontend.get());
-				if (cli) {
-					register_provider_tools(cli->tools, active_provider);
-					cli->tools.populate_session_tools(frontend->session);
-				}
+			provider_for_run = frontend->get_provider(override.provider);
+			if (!provider_for_run) {
+				fprintf(stderr, "Provider '%s' not found. Use 'shepherd provider list' to see available providers.\n", override.provider.c_str());
+				return 1;
 			}
+		} else if (has_cmdline_override) {
+			// Command-line overrides → use ephemeral cmdline provider
+			provider_for_run = frontend->get_provider(cmdline_provider.name);
 		}
+		// If provider_for_run is nullptr, run() will use first available provider
 
 		dout(1) << "Shepherd initialization complete" << std::endl;
 
@@ -865,8 +915,6 @@ int main(int argc, char** argv) {
 		// Server Mode - HTTP API via FastAPI
 		// ============================================================================
 		if (g_server_mode) {
-			// Backend already initialized above via connect_provider or legacy init
-
 			// MPI rank check: Only rank 0 should run the server
 			// (backend->initialize() may have re-exec'd with mpirun for multi-GPU models)
 			dout(1) << "MPI rank check: mpi_rank=" + std::to_string(mpi_rank) + ", is_mpi_leader=" + std::string(is_mpi_leader ? "true" : "false") << std::endl;
@@ -879,27 +927,8 @@ int main(int argc, char** argv) {
 			}
 
 			// Only rank 0 continues to run server
-			return frontend->run();
-		}
-
-		// Session tools already populated during frontend->init() above
-		dout(1) << "Session has " + std::to_string(frontend->session.tools.size()) + " tools" << std::endl;
-
-		// Calculate desired completion tokens once (used throughout session lifetime)
-		// Must be calculated AFTER backend initialization when context_size is finalized
-		frontend->session.desired_completion_tokens = calculate_desired_completion_tokens(
-			frontend->backend->context_size,
-			frontend->backend->max_output_tokens
-		);
-
-		// Enable auto-eviction ONLY for API backends in CLI mode
-		// In server mode, never auto-evict - return 400 error and let client handle cleanup
-		// Local backends (llamacpp) handle eviction through reactive callbacks
-		// Must be set AFTER initialization when backend->context_size is finalized
-		frontend->session.auto_evict = (!g_server_mode && frontend->backend->context_size > 0 && !frontend->backend->is_local);
-		if (frontend->session.auto_evict) {
-			dout(1) << "Auto-eviction enabled (context_size=" << frontend->backend->context_size
-			        << ", desired_completion=" << frontend->session.desired_completion_tokens << ")" << std::endl;
+			// Provider connection happens inside run()
+			return frontend->run(provider_for_run);
 		}
 
 		// ============================================================================
@@ -922,9 +951,9 @@ int main(int argc, char** argv) {
 
 
 	// ============================================================================
-	// Run Frontend (created earlier during tool initialization)
+	// Run Frontend - provider connection happens inside run()
 	// ============================================================================
-	int result = frontend->run();
+	int result = frontend->run(provider_for_run);
 
 	// Clean shutdown for MPI
 	// Signal workers to exit via barrier, then all ranks exit together

@@ -63,8 +63,10 @@ public:
     int truncate_limit;
     bool streaming;
     bool thinking;        // Show thinking/reasoning blocks in output
+    bool stats;           // Show performance stats (prefill/decode speed, KV cache)
     bool auto_provider;   // Auto-switch to next provider on connection failure
     bool tui;             // Enable TUI mode (boxed input, status line)
+    bool raw_output;      // Disable channel parsing, return raw model output (like vLLM)
     int tui_history;      // TUI scrollback buffer size (lines)
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 

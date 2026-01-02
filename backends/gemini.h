@@ -39,6 +39,9 @@ public:
                     const std::string& tool_name = "", const std::string& tool_id = "",
                     int max_tokens = 0) override;
 
+    // Override generate_from_session for API server mode
+    void generate_from_session(Session& session, int max_tokens = 0) override;
+
 protected:
     std::vector<std::string> fetch_models() override;
 

@@ -66,18 +66,18 @@ void shutdown();  // Cleanup ncurses
 
 ### Output
 
-```cpp
-enum class LineType {
-    USER,        // Green "> " prefix
-    TOOL_CALL,   // Yellow "* " prefix
-    TOOL_RESULT, // Cyan
-    ASSISTANT,   // Default color
-    SYSTEM       // Red/gray
-};
+TUI uses `CallbackEvent` (from backend.h) with centralized color/indent from frontend.h:
 
-void write_output(const std::string& text, LineType type);
-void write_output(const char* text, size_t len, LineType type);
+```cpp
+// Uses CallbackEvent instead of a TUI-specific enum
+void write_output(const std::string& text, CallbackEvent type);
+void write_output(const char* text, size_t len, CallbackEvent type);
+
+// Color determined by get_color_for_event() in frontend.h
+// Indent determined by get_indent_for_event() in frontend.h
 ```
+
+This ensures CLI and TUI have identical formatting behavior.
 
 ### Input Display (called by TerminalIO)
 

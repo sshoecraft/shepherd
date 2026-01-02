@@ -25,7 +25,11 @@ def quantize_int8_smoothquant(model_path, output_dir, calibration_samples):
         from llmcompressor.modifiers.quantization import GPTQModifier
     except ImportError as e:
         print(f"Error: Failed to import llm-compressor: {e}")
+        print()
         print("Install with: pip install llmcompressor")
+        print()
+        print("Note: Requires vllm installed from source (~/src/vllm) for compatible")
+        print("compressed-tensors version. PyPI vllm packages may have conflicts.")
         sys.exit(1)
 
     print("Creating SmoothQuant + W8A8 recipe (best INT8 method)...")

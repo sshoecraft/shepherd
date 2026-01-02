@@ -17,6 +17,7 @@ enum class ModelFamily {
     COMMAND_R,      // Cohere Command-R - Uses tool_results role
     PHI_3,          // Microsoft Phi-3.x - Uses <|system|>, tool role
     FUNCTIONARY,    // Meetkai Functionary series - Uses ipython, python_tag
+    GPT_OSS,        // OpenAI GPT-OSS - Uses <|channel|> markers (analysis, commentary, final)
     GENERIC         // Unknown/generic models - Uses tool role
 };
 
@@ -45,6 +46,11 @@ struct ModelConfig {
     std::vector<std::string> tool_call_end_markers;      // e.g., {"</tool_call>"}
     std::vector<std::string> thinking_start_markers;     // e.g., {"<think>", "<thinking>"}
     std::vector<std::string> thinking_end_markers;       // e.g., {"</think>", "</thinking>"}
+
+    // Content extraction markers (for models like GPT-OSS that use channels)
+    // When set, output before content_extract_marker is hidden, content after is shown
+    std::string content_extract_marker;  // e.g., "<|channel|>final<|message|>" - extract content after this
+    std::string content_end_marker;      // e.g., "<|end|>" - stop extraction at this marker
 
     // Message format tags (populated by Models from chat template)
     std::string assistant_start_tag;  // e.g., "<|im_start|>assistant\n" or "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -92,6 +98,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "assistant: ",
             .assistant_end_tag = "\n",
             .provider = "",
@@ -133,6 +141,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "[/INST] ",
             .assistant_end_tag = "</s>",
             .provider = "local",
@@ -174,6 +184,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "<|start_header_id|>assistant<|end_header_id|>\n\n",
             .assistant_end_tag = "<|eot_id|>",
             .provider = "local",
@@ -216,6 +228,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "<|assistant|>\n",
             .assistant_end_tag = "",
             .provider = "local",
@@ -257,6 +271,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "<|im_start|>assistant\n",
             .assistant_end_tag = "<|im_end|>\n",
             .provider = "local",
@@ -298,6 +314,8 @@ struct ModelConfig {
             .tool_call_end_markers = {},
             .thinking_start_markers = {},
             .thinking_end_markers = {},
+            .content_extract_marker = "",
+            .content_end_marker = "",
             .assistant_start_tag = "<|im_start|>assistant\n",
             .assistant_end_tag = "<|im_end|>\n",
             .provider = "local",
@@ -329,6 +347,50 @@ struct ModelConfig {
         }
 
         return config;
+    }
+
+    /// @brief Create config for OpenAI GPT-OSS family
+    /// Channel-based output format detected dynamically from template
+    static ModelConfig create_gpt_oss() {
+        return ModelConfig{
+            .family = ModelFamily::GPT_OSS,
+            .version = "",
+            .tool_result_role = "tool",
+            .uses_eom_token = false,
+            .uses_python_tag = false,
+            .uses_builtin_tools_array = false,
+            .supports_thinking_mode = true,  // Has analysis channel for reasoning
+            .uses_observation_role = false,
+            .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {},
+            .thinking_end_markers = {},
+            .content_extract_marker = "",  // Detected dynamically from template
+            .content_end_marker = "",      // Detected dynamically from template
+            .assistant_start_tag = "<|start|>assistant",
+            .assistant_end_tag = "<|end|>",
+            .provider = "local",
+            .model_name = "",
+            .context_window = 131072,
+            .max_output_tokens = 0,
+            .max_cot_tokens = 0,
+            .max_tokens_param_name = "max_tokens",
+            .supported_endpoints = {},
+            .special_headers = {},
+            .aliases = {},
+            .supports_temperature = true,
+            .supports_streaming = true,
+            .vision_support = false,
+            .audio_support = false,
+            .function_calling_support = true,
+            .realtime_capable = false,
+            .fine_tunable = false,
+            .training_cutoff_date = "2024-06",
+            .deprecated = false,
+            .replacement_model = "",
+            .notes = "OpenAI GPT-OSS with channel-based output format"
+        };
     }
 };
 

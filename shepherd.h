@@ -43,8 +43,10 @@ void get_global_args(int& argc, char**& argv);
 // ============================================================================
 // These are defined in main.cpp and accessible throughout the entire system
 
-// Debug level (0=off, 1-9=increasing verbosity) - used by dprintf() macro
+#ifdef _DEBUG
+// Debug level (0=off, 1-9=increasing verbosity) - used by dout() macro
 extern int g_debug_level;
+#endif
 
 // Verbose mode flag - enables verbose logging
 extern bool g_verbose_mode;
@@ -70,5 +72,10 @@ namespace shepherd {
     }
 }
 
+#ifdef _DEBUG
 // Debug output stream - returns cerr if level <= g_debug_level, else null stream
 std::ostream& dout(int level);
+#else
+// No-op macro that discards all stream operations in non-debug builds
+#define dout(level) if(false) std::cerr
+#endif

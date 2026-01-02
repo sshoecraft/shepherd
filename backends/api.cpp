@@ -215,9 +215,31 @@ void ApiBackend::add_message(Session& session, Message::Role role, const std::st
                      ", session total: " + std::to_string(session.total_tokens) << std::endl;
 
             // Route content through unified output filter (handles tool call detection)
+            // For structured API responses (like Anthropic), extract text blocks only
             if (!resp.content.empty()) {
-                output(resp.content);
-                flush_output();
+                std::string display_content = resp.content;
+
+                // Check if content is a JSON array (structured response with content blocks)
+                try {
+                    auto content_json = nlohmann::json::parse(resp.content);
+                    if (content_json.is_array()) {
+                        // Extract text from content blocks, skip tool_use blocks
+                        std::string text_only;
+                        for (const auto& block : content_json) {
+                            if (block.contains("type") && block["type"] == "text" && block.contains("text")) {
+                                text_only += block["text"].get<std::string>();
+                            }
+                        }
+                        display_content = text_only;
+                    }
+                } catch (...) {
+                    // Not JSON, use as-is
+                }
+
+                if (!display_content.empty()) {
+                    output(display_content);
+                    flush_output();
+                }
             }
 
             // Send any structured tool calls from API (in addition to content-detected ones)
@@ -258,7 +280,10 @@ void ApiBackend::add_message(Session& session, Message::Role role, const std::st
 
 
         } else {
-            // Not a context error - signal error via callback
+            // Not a context error - add TOOL_RESPONSE for session consistency, then signal error
+            if (role == Message::TOOL_RESPONSE) {
+                add_tool_response(session, content, tool_name, tool_id);
+            }
             callback(CallbackEvent::ERROR, resp.error, "api_error", "");
             callback(CallbackEvent::STOP, "error", "", "");
             return;
@@ -291,17 +316,60 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
     }
 
     if (resp.success) {
-        // Route content through unified output filter (handles tool call detection)
-        if (!resp.content.empty()) {
-            output(resp.content);
-            flush_output();
-        }
-        // Send any structured tool calls from API (in addition to content-detected ones)
+        // If we have structured tool calls from API, use those exclusively
+        // (don't let output() also detect them from content, which causes duplicates)
         if (!resp.tool_calls.empty()) {
+            // Output any text content that's NOT the tool call JSON
+            // For Anthropic, resp.content is JSON array - extract text portions only
+            try {
+                auto content_json = nlohmann::json::parse(resp.content);
+                if (content_json.is_array()) {
+                    for (const auto& block : content_json) {
+                        if (block.contains("type") && block["type"] == "text" && block.contains("text")) {
+                            output(block["text"].get<std::string>());
+                        }
+                    }
+                    flush_output();
+                }
+            } catch (...) {
+                // Not JSON array, output as-is (but this shouldn't happen with tool calls)
+                output(resp.content);
+                flush_output();
+            }
+
+            // Send structured tool calls
             for (const auto& tc : resp.tool_calls) {
                 callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
             }
+        } else if (!resp.content.empty()) {
+            // No structured tool calls - route through unified output filter
+            // (which may detect tool calls from content)
+            output(resp.content);
+            flush_output();
         }
+
+        // Store assistant message in session (critical for tool call flows)
+        int assistant_tokens = resp.completion_tokens > 0 ? resp.completion_tokens : estimate_message_tokens(resp.content);
+        Message assistant_msg(Message::ASSISTANT, resp.content, assistant_tokens);
+
+        // Build tool_calls_json if we have tool calls
+        if (!resp.tool_calls.empty()) {
+            nlohmann::json tool_calls_array = nlohmann::json::array();
+            for (const auto& tc : resp.tool_calls) {
+                nlohmann::json tc_json;
+                tc_json["id"] = tc.tool_call_id;
+                tc_json["type"] = "function";
+                tc_json["function"]["name"] = tc.name;
+                tc_json["function"]["arguments"] = tc.raw_json;
+                tool_calls_array.push_back(tc_json);
+            }
+            assistant_msg.tool_calls_json = tool_calls_array.dump();
+        }
+
+        session.messages.push_back(assistant_msg);
+        session.last_assistant_message_index = session.messages.size() - 1;
+        session.last_assistant_message_tokens = assistant_tokens;
+
         callback(CallbackEvent::STOP, resp.finish_reason, "", "");
     } else {
         callback(CallbackEvent::ERROR, resp.error, "api_error", "");
@@ -580,4 +648,16 @@ bool ApiBackend::ensure_valid_oauth_token() {
 
     std::cerr << "Failed to acquire OAuth token" << std::endl;
     return false;
+}
+
+void ApiBackend::add_tool_response(Session& session,
+                                   const std::string& content,
+                                   const std::string& tool_name,
+                                   const std::string& tool_id) {
+    int tokens = estimate_message_tokens(content);
+    Message tool_msg(Message::TOOL_RESPONSE, content, tokens);
+    tool_msg.tool_name = tool_name;
+    tool_msg.tool_call_id = tool_id;
+    session.messages.push_back(tool_msg);
+    dout(1) << "Added TOOL_RESPONSE to session: " + tool_name << std::endl;
 }

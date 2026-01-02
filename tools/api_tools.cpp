@@ -2,10 +2,7 @@
 #include "api_tools.h"
 #include "tools.h"
 #include "../shepherd.h"
-#include "backend.h"
-#include "../backends/factory.h"
 #include "../message.h"
-#include "../session.h"
 
 #include <sstream>
 
@@ -13,29 +10,29 @@
 // APIToolAdapter implementation
 // ============================================================================
 
-APIToolAdapter::APIToolAdapter(const APIToolEntry& entry, Tools* tools)
-    : config(entry), tools_ptr(tools) {
+APIToolAdapter::APIToolAdapter(const Provider& p, Tools* tools)
+    : provider(p), tools_ptr(tools), connected(false) {
+    tool_session.system_message = "You are a helpful AI assistant.";
 }
 
 std::string APIToolAdapter::unsanitized_name() const {
-    return config.name;
+    return "ask_" + provider.name;
 }
 
 std::string APIToolAdapter::description() const {
     std::ostringstream desc;
 
-    // Make the description more explicit about what this tool does
-    if (config.backend == "anthropic") {
-        desc << "Call Claude AI (" << config.model << ") to get a second opinion or different perspective. ";
+    if (provider.type == "anthropic") {
+        desc << "Call Claude AI (" << provider.model << ") to get a second opinion or different perspective. ";
         desc << "Use this when you need Claude's analysis, expertise, or viewpoint on a question or problem.";
-    } else if (config.backend == "openai") {
-        desc << "Call ChatGPT/GPT (" << config.model << ") to get a second opinion or different perspective. ";
+    } else if (provider.type == "openai") {
+        desc << "Call ChatGPT/GPT (" << provider.model << ") to get a second opinion or different perspective. ";
         desc << "Use this when you need GPT's analysis, expertise, or viewpoint on a question or problem.";
-    } else if (config.backend == "gemini") {
-        desc << "Call Google Gemini (" << config.model << ") to get a second opinion or different perspective. ";
+    } else if (provider.type == "gemini") {
+        desc << "Call Google Gemini (" << provider.model << ") to get a second opinion or different perspective. ";
         desc << "Use this when you need Gemini's analysis, expertise, or viewpoint on a question or problem.";
     } else {
-        desc << "Call another AI model (" << config.backend << "/" << config.model << ") to get a second opinion. ";
+        desc << "Call another AI model (" << provider.type << "/" << provider.model << ") to get a second opinion. ";
         desc << "Use this to get a different AI's perspective on a question or problem.";
     }
 
@@ -52,7 +49,7 @@ std::vector<ParameterDef> APIToolAdapter::get_parameters_schema() const {
     ParameterDef prompt_param;
     prompt_param.name = "prompt";
     prompt_param.type = "string";
-    prompt_param.description = "The question or task to ask " + config.backend;
+    prompt_param.description = "The question or task to ask " + provider.type;
     prompt_param.required = true;
     params.push_back(prompt_param);
 
@@ -61,7 +58,7 @@ std::vector<ParameterDef> APIToolAdapter::get_parameters_schema() const {
     model_param.type = "string";
     model_param.description = "Override model for this call (optional)";
     model_param.required = false;
-    model_param.default_value = config.model;
+    model_param.default_value = provider.model;
     params.push_back(model_param);
 
     ParameterDef max_tokens_param;
@@ -69,24 +66,162 @@ std::vector<ParameterDef> APIToolAdapter::get_parameters_schema() const {
     max_tokens_param.type = "number";
     max_tokens_param.description = "Maximum tokens to generate (optional)";
     max_tokens_param.required = false;
-    if (config.max_tokens > 0) {
-        max_tokens_param.default_value = std::to_string(config.max_tokens);
+    int default_max = provider.max_tokens;
+    if (provider.type == "ollama" && provider.num_predict > 0) {
+        default_max = provider.num_predict;
+    }
+    if (default_max > 0) {
+        max_tokens_param.default_value = std::to_string(default_max);
     }
     params.push_back(max_tokens_param);
 
     return params;
 }
 
+void APIToolAdapter::populate_session_tools() {
+    if (!tools_ptr) return;
+
+    tool_session.tools.clear();
+
+    for (Tool* tool : tools_ptr->all_tools) {
+        // Skip this tool to prevent infinite self-recursion
+        if (tool->name() == this->name()) {
+            continue;
+        }
+        // Skip disabled tools
+        if (!tools_ptr->is_enabled(tool->name())) {
+            continue;
+        }
+
+        Session::Tool session_tool;
+        session_tool.name = tool->name();
+        session_tool.description = tool->description();
+
+        // Build JSON schema from parameter definitions
+        auto params = tool->get_parameters_schema();
+        nlohmann::json schema;
+        schema["type"] = "object";
+        schema["properties"] = nlohmann::json::object();
+        nlohmann::json required = nlohmann::json::array();
+
+        for (const auto& param : params) {
+            nlohmann::json prop;
+            prop["type"] = param.type;
+            prop["description"] = param.description;
+            schema["properties"][param.name] = prop;
+            if (param.required) {
+                required.push_back(param.name);
+            }
+        }
+
+        schema["required"] = required;
+        session_tool.parameters = schema;
+        tool_session.tools.push_back(session_tool);
+    }
+
+    dout(1) << "APIToolAdapter: sub-session has " + std::to_string(tool_session.tools.size()) + " tools" << std::endl;
+}
+
+void APIToolAdapter::ensure_connected() {
+    if (connected) return;
+
+    // Create callback that captures all events
+    Backend::EventCallback cb = [this](CallbackEvent event, const std::string& content,
+                                        const std::string& name, const std::string& id) {
+        dout(2) << "APIToolAdapter callback: event=" + std::to_string(static_cast<int>(event)) +
+                   " content.len=" + std::to_string(content.length()) << std::endl;
+        switch (event) {
+            case CallbackEvent::CONTENT:
+                accumulated_content += content;
+                break;
+
+            case CallbackEvent::TOOL_CALL: {
+                ToolParser::ToolCall tc;
+                tc.name = name;
+                tc.tool_call_id = id;
+                tc.raw_json = content;
+
+                // Parse the JSON content for parameters
+                try {
+                    nlohmann::json params = nlohmann::json::parse(content);
+                    for (auto it = params.begin(); it != params.end(); ++it) {
+                        if (it.value().is_string()) {
+                            tc.parameters[it.key()] = it.value().get<std::string>();
+                        } else if (it.value().is_number_integer()) {
+                            tc.parameters[it.key()] = it.value().get<int>();
+                        } else if (it.value().is_number_float()) {
+                            tc.parameters[it.key()] = it.value().get<double>();
+                        } else if (it.value().is_boolean()) {
+                            tc.parameters[it.key()] = it.value().get<bool>();
+                        } else {
+                            tc.parameters[it.key()] = it.value().dump();
+                        }
+                    }
+                } catch (...) {}
+
+                // Validate tool exists
+                if (tools_ptr) {
+                    bool valid = false;
+                    for (Tool* tool : tools_ptr->all_tools) {
+                        if (tool->name() == tc.name && tools_ptr->is_enabled(tool->name())) {
+                            valid = true;
+                            break;
+                        }
+                    }
+                    if (!valid) {
+                        dout(1) << "APIToolAdapter: tool '" + tc.name + "' not found, skipping" << std::endl;
+                        break;
+                    }
+                }
+
+                pending_tool_calls.push_back(tc);
+                break;
+            }
+
+            case CallbackEvent::ERROR:
+                cb_success = false;
+                cb_error = content;
+                break;
+
+            default:
+                break;
+        }
+        return true;
+    };
+
+    // Disable streaming for sub-backends (they need to complete before we can return result)
+    extern std::unique_ptr<Config> config;
+    bool orig_streaming = config->streaming;
+    config->streaming = false;
+
+    // Use Provider.connect() - the standard flow (uses provider's sampling params)
+    backend = provider.connect(tool_session, cb);
+
+    // Restore streaming setting
+    config->streaming = orig_streaming;
+
+    if (backend) {
+        connected = true;
+        dout(1) << "APIToolAdapter: connected to " + provider.name + " (" + provider.type + ")" << std::endl;
+    } else {
+        dout(1) << "APIToolAdapter: failed to connect to " + provider.name << std::endl;
+    }
+}
+
 std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
-    // Extract parameters - accept both "prompt" and "query" since models use both
+    // Extract parameters
     std::string prompt = tool_utils::get_string(args, "prompt");
     if (prompt.empty()) {
         prompt = tool_utils::get_string(args, "query");
     }
-    std::string model = tool_utils::get_string(args, "model", config.model);
-    int max_tokens = tool_utils::get_int(args, "max_tokens", config.max_tokens);
+    int default_max = provider.max_tokens;
+    if (provider.type == "ollama" && provider.num_predict > 0) {
+        default_max = provider.num_predict;
+    }
+    int max_tokens = tool_utils::get_int(args, "max_tokens", default_max);
+    if (max_tokens <= 0) max_tokens = 1024;
 
     if (prompt.empty()) {
         result["error"] = "prompt parameter is required";
@@ -94,263 +229,143 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
         return result;
     }
 
-    // Save the current global config (outside try block so catch can access it)
-    std::unique_ptr<Config> original_config = std::move(::config);
+    // Ensure backend is connected (lazy init on first use)
+    ensure_connected();
 
-    try {
+    if (!backend) {
+        result["error"] = "Failed to connect to provider: " + provider.name;
+        result["success"] = false;
+        return result;
+    }
 
-        // Create temporary config for this tool
-        auto temp_config = std::make_unique<Config>();
-        temp_config->backend = this->config.backend;
-        temp_config->model = model;
-        temp_config->key = this->config.api_key;
-        temp_config->api_base = this->config.api_base;
-        temp_config->context_size = this->config.context_size;
-        temp_config->streaming = false;  // Disable streaming for sub-backends
+    dout(1) << "APIToolAdapter::execute(" + provider.name + "): prompt=\"" +
+               prompt.substr(0, 50) + "...\" max_tokens=" + std::to_string(max_tokens) << std::endl;
 
-        // Swap in temporary config
-        ::config = std::move(temp_config);
+    // Reset state for this call
+    accumulated_content.clear();
+    pending_tool_calls.clear();
+    cb_success = true;
+    cb_error.clear();
 
-        // Use configured context size (0 = auto-detect from models database)
-        size_t context_size = this->config.context_size;
+    // Populate tools in session (may have changed since last call)
+    populate_session_tools();
 
-        // Create a simple session with just the user prompt
-        Session temp_session;
-        temp_session.system_message = "You are a helpful AI assistant.";
+    // Add user message to session
+    Message user_msg(Message::USER, prompt);
+    tool_session.messages.push_back(user_msg);
 
-        // Create backend instance with accumulating callback
-        std::string backend_name = this->config.backend;
-        std::string accumulated_content;
-        Backend::EventCallback stub_callback = [&accumulated_content](CallbackEvent event, const std::string& content,
-                                                   const std::string&, const std::string&) {
-            if (event == CallbackEvent::CONTENT) {
-                accumulated_content += content;
-            }
-            return true;
-        };
-        auto backend = BackendFactory::create_backend(backend_name, context_size, temp_session, stub_callback);
+    // Tool execution loop
+    const int MAX_TOOL_ITERATIONS = 10;
 
-        if (!backend) {
-            // Restore original config
-            ::config = std::move(original_config);
+    for (int iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+        // Clear tool calls for this iteration
+        pending_tool_calls.clear();
 
-            result["error"] = "Failed to create backend: " + this->config.backend;
-            result["success"] = false;
-            return result;
+        // Generate response
+        backend->generate_from_session(tool_session, max_tokens);
+
+        dout(1) << "APIToolAdapter iteration " + std::to_string(iteration) + ": success=" + (cb_success ? "true" : "false") +
+                 ", content.length=" + std::to_string(accumulated_content.length()) +
+                 ", tool_calls=" + std::to_string(pending_tool_calls.size()) +
+                 ", error=" + cb_error << std::endl;
+
+        if (!cb_success) {
+            break;
         }
 
-        // Add user message to session
-        Message user_msg(Message::USER, prompt);
-        temp_session.messages.push_back(user_msg);
-
-        // Populate tools (excluding this tool to prevent self-recursion)
-        if (tools_ptr) {
-            for (Tool* tool : tools_ptr->all_tools) {
-                // Skip this tool to prevent infinite self-recursion
-                // (e.g., ask_localhost calling ask_localhost)
-                // But allow other ask_* tools (e.g., ask_localhost can call ask_sonnet)
-                if (tool->name() == this->name()) {
-                    continue;
-                }
-                // Skip disabled tools
-                if (!tools_ptr->is_enabled(tool->name())) {
-                    continue;
-                }
-
-                Session::Tool session_tool;
-                session_tool.name = tool->name();
-                session_tool.description = tool->description();
-
-                // Build JSON schema from parameter definitions
-                auto params = tool->get_parameters_schema();
-                nlohmann::json schema;
-                schema["type"] = "object";
-                schema["properties"] = nlohmann::json::object();
-                nlohmann::json required = nlohmann::json::array();
-
-                for (const auto& param : params) {
-                    nlohmann::json param_schema;
-                    param_schema["type"] = param.type;
-                    if (!param.description.empty()) {
-                        param_schema["description"] = param.description;
-                    }
-                    schema["properties"][param.name] = param_schema;
-
-                    if (param.required) {
-                        required.push_back(param.name);
-                    }
-                }
-
-                if (!required.empty()) {
-                    schema["required"] = required;
-                }
-
-                session_tool.parameters = schema;
-                temp_session.tools.push_back(session_tool);
-            }
+        // If no tool calls, we're done
+        if (pending_tool_calls.empty()) {
+            break;
         }
 
-        dout(1) << "APIToolAdapter: sub-session has " + std::to_string(temp_session.tools.size()) + " tools" << std::endl;
+        // Execute each tool call
+        for (const auto& tool_call : pending_tool_calls) {
+            // Show nested tool call to user
+            printf("    %s(%s)\n", tool_call.name.c_str(),
+                   tool_call.raw_json.length() > 60
+                   ? (tool_call.raw_json.substr(0, 57) + "...").c_str()
+                   : tool_call.raw_json.c_str());
+            fflush(stdout);
 
-        // Backend initialization happens in constructor - no separate initialize() call needed
+            dout(1) << "APIToolAdapter executing tool: " + tool_call.name << std::endl;
 
-        // Use configured max_tokens (0 = auto-calculate from available space)
-        int generation_max_tokens = max_tokens;
+            // Find the tool
+            Tool* tool = nullptr;
+            if (tools_ptr) {
+                for (Tool* t : tools_ptr->all_tools) {
+                    if (t->name() == tool_call.name) {
+                        tool = t;
+                        break;
+                    }
+                }
+            }
 
-        // Tool execution loop - handle tool calls from sub-model
-        const int MAX_TOOL_ITERATIONS = 10;
-        int tool_iteration = 0;
+            std::string tool_result;
+            if (tool) {
+                auto tool_result_map = tool->execute(tool_call.parameters);
 
-        // Callback state for accumulating responses
-        struct CallbackState {
-            std::string content;
-            std::vector<ToolParser::ToolCall> tool_calls;
-            std::string finish_reason;
-            std::string error;
-            bool success = true;
-        };
-        CallbackState cb_state;
-
-        // Set up callback to capture output
-        Backend::EventCallback capture_callback = [&cb_state](CallbackEvent event, const std::string& content,
-                                                               const std::string& name, const std::string& id) {
-            switch (event) {
-                case CallbackEvent::CONTENT:
-                    cb_state.content += content;
-                    break;
-                case CallbackEvent::TOOL_CALL: {
-                    ToolParser::ToolCall tc;
-                    tc.name = name;
-                    tc.tool_call_id = id;
-                    tc.raw_json = content;
-                    // Parse parameters from JSON
+                nlohmann::json result_json;
+                for (const auto& [key, value] : tool_result_map) {
                     try {
-                        auto params = nlohmann::json::parse(content);
-                        for (auto it = params.begin(); it != params.end(); ++it) {
-                            if (it.value().is_string()) {
-                                tc.parameters[it.key()] = it.value().get<std::string>();
-                            } else if (it.value().is_number_integer()) {
-                                tc.parameters[it.key()] = it.value().get<int>();
-                            } else if (it.value().is_number_float()) {
-                                tc.parameters[it.key()] = it.value().get<double>();
-                            } else if (it.value().is_boolean()) {
-                                tc.parameters[it.key()] = it.value().get<bool>();
-                            } else {
-                                tc.parameters[it.key()] = it.value().dump();
-                            }
+                        if (value.type() == typeid(std::string)) {
+                            result_json[key] = std::any_cast<std::string>(value);
+                        } else if (value.type() == typeid(int)) {
+                            result_json[key] = std::any_cast<int>(value);
+                        } else if (value.type() == typeid(double)) {
+                            result_json[key] = std::any_cast<double>(value);
+                        } else if (value.type() == typeid(bool)) {
+                            result_json[key] = std::any_cast<bool>(value);
                         }
-                    } catch (...) {}
-                    cb_state.tool_calls.push_back(tc);
-                    break;
-                }
-                case CallbackEvent::ERROR:
-                    cb_state.error = content;
-                    cb_state.success = false;
-                    break;
-                case CallbackEvent::STOP:
-                    cb_state.finish_reason = content;
-                    break;
-                default:
-                    break;
-            }
-            return true;
-        };
-
-        // Replace stub callback with capture callback to get TOOL_CALL events
-        backend->callback = capture_callback;
-
-        while (tool_iteration < MAX_TOOL_ITERATIONS) {
-            // Reset callback state
-            cb_state = CallbackState{};
-
-            // Generate response (output flows through callback)
-            backend->generate_from_session(temp_session, generation_max_tokens);
-
-            dout(1) << "APIToolAdapter iteration " + std::to_string(tool_iteration) +
-                      ": success=" + std::string(cb_state.success ? "true" : "false") +
-                      ", content.length=" + std::to_string(cb_state.content.length()) +
-                      ", tool_calls=" + std::to_string(cb_state.tool_calls.size()) +
-                      ", error=" + cb_state.error << std::endl;
-
-            // Check for errors
-            if (!cb_state.success) {
-                break;
-            }
-
-            // If no tool calls, we're done
-            if (cb_state.tool_calls.empty()) {
-                break;
-            }
-
-            // Add assistant message with tool calls to session
-            Message asst_msg(Message::ASSISTANT, cb_state.content);
-            temp_session.messages.push_back(asst_msg);
-
-            // Execute each tool call
-            for (const auto& tool_call : cb_state.tool_calls) {
-                dout(1) << "APIToolAdapter executing tool: " + tool_call.name << std::endl;
-
-                // Find the tool
-                Tool* tool = nullptr;
-                if (tools_ptr) {
-                    for (Tool* t : tools_ptr->all_tools) {
-                        if (t->name() == tool_call.name) {
-                            tool = t;
-                            break;
-                        }
+                    } catch (...) {
+                        result_json[key] = "[conversion error]";
                     }
                 }
+                tool_result = result_json.dump();
+            } else {
+                tool_result = "{\"error\": \"Tool not found: " + tool_call.name + "\"}";
+            }
 
-                std::string tool_result;
-                if (tool) {
-                    // Execute the tool
-                    auto result_map = tool->execute(tool_call.parameters);
-                    // Convert result map to JSON
-                    nlohmann::json result_json;
-                    for (const auto& [key, value] : result_map) {
-                        if (auto* str = std::any_cast<std::string>(&value)) {
-                            result_json[key] = *str;
-                        } else if (auto* i = std::any_cast<int>(&value)) {
-                            result_json[key] = *i;
-                        } else if (auto* d = std::any_cast<double>(&value)) {
-                            result_json[key] = *d;
-                        } else if (auto* b = std::any_cast<bool>(&value)) {
-                            result_json[key] = *b;
-                        } else {
-                            result_json[key] = "<unknown type>";
-                        }
-                    }
-                    tool_result = result_json.dump();
+            // Show tool result to user - extract content or summary from JSON
+            std::string display_result;
+            try {
+                nlohmann::json result_j = nlohmann::json::parse(tool_result);
+                if (result_j.contains("summary") && result_j["summary"].is_string()) {
+                    display_result = result_j["summary"].get<std::string>();
+                } else if (result_j.contains("content") && result_j["content"].is_string()) {
+                    display_result = result_j["content"].get<std::string>();
                 } else {
-                    tool_result = "{\"error\": \"Tool not found: " + tool_call.name + "\"}";
+                    display_result = tool_result;
                 }
-
-                // Add tool result to session
-                Message tool_msg(Message::TOOL_RESPONSE, tool_result);
-                tool_msg.tool_call_id = tool_call.tool_call_id;
-                tool_msg.tool_name = tool_call.name;
-                temp_session.messages.push_back(tool_msg);
+            } catch (...) {
+                display_result = tool_result;
             }
+            if (display_result.length() > 60) {
+                display_result = display_result.substr(0, 57) + "...";
+            }
+            printf("      %s\n", display_result.c_str());
+            fflush(stdout);
 
-            tool_iteration++;
+            // Add tool result to session
+            Message tool_msg(Message::TOOL_RESPONSE, tool_result);
+            tool_msg.tool_call_id = tool_call.tool_call_id;
+            tool_msg.tool_name = tool_call.name;
+            tool_session.messages.push_back(tool_msg);
         }
+    }
 
-        // Build result
-        if (cb_state.success) {
-            result["content"] = cb_state.content;
-            result["success"] = true;
-        } else {
-            result["error"] = cb_state.error.empty() ? "API call failed" : cb_state.error;
-            result["success"] = false;
-        }
-
-    } catch (const std::exception& e) {
-        result["error"] = std::string("Exception: ") + e.what();
+    // Build result
+    if (cb_success) {
+        result["content"] = accumulated_content;
+        result["success"] = true;
+        result["summary"] = accumulated_content.substr(0, std::min(size_t(100), accumulated_content.size()));
+    } else {
+        result["error"] = cb_error.empty() ? "Unknown error" : cb_error;
         result["success"] = false;
     }
 
-    // Restore original config (always execute this, whether success or exception)
-    ::config = std::move(original_config);
+    // Clear session for next call (stateless)
+    tool_session.messages.clear();
+    tool_session.total_tokens = 0;
 
     return result;
 }
@@ -359,26 +374,7 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
 // Provider tool registration functions
 // ============================================================================
 
-APIToolEntry provider_to_tool_entry(const Provider& provider) {
-    APIToolEntry entry;
-    entry.name = "ask_" + provider.name;
-    entry.backend = provider.type;
-    entry.model = provider.model;
-    entry.context_size = provider.context_size;
-    entry.api_key = provider.api_key;
-    entry.api_base = provider.base_url;
-    entry.max_tokens = provider.max_tokens;
-
-    // Ollama uses num_predict instead of max_tokens
-    if (provider.type == "ollama" && provider.num_predict > 0) {
-        entry.max_tokens = provider.num_predict;
-    }
-
-    return entry;
-}
-
 void register_provider_tools(Tools& tools, const std::string& active_provider) {
-    // Clear existing API tools first
     tools.api_tools.clear();
 
     auto providers = Provider::load_providers();
@@ -399,11 +395,7 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
             continue;
         }
 
-        // Create APIToolEntry from provider
-        APIToolEntry entry = provider_to_tool_entry(p);
-
-        // Create adapter and register directly (pass tools pointer for sub-session population)
-        auto adapter = std::make_unique<APIToolAdapter>(entry, &tools);
+        auto adapter = std::make_unique<APIToolAdapter>(p, &tools);
         tools.register_tool(std::move(adapter), "api");
     }
 
@@ -414,7 +406,6 @@ void register_provider_tools(Tools& tools, const std::string& active_provider) {
 void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
     auto providers = Provider::load_providers();
 
-    // Find the provider by name
     const Provider* found = nullptr;
     for (const auto& p : providers) {
         if (p.name == provider_name) {
@@ -433,11 +424,7 @@ void register_provider_as_tool(Tools& tools, const std::string& provider_name) {
         return;
     }
 
-    // Create APIToolEntry from provider
-    APIToolEntry entry = provider_to_tool_entry(*found);
-
-    // Create adapter and register directly (pass tools pointer for sub-session population)
-    auto adapter = std::make_unique<APIToolAdapter>(entry, &tools);
+    auto adapter = std::make_unique<APIToolAdapter>(*found, &tools);
     std::string tool_name = adapter->name();
     tools.register_tool(std::move(adapter), "api");
 

@@ -197,9 +197,7 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
             result["error"] = response.error;
         }
 
-        if (g_debug_level) {
-            std::cout << "HTTPGet: " << url << " -> " << response.status_code << std::endl;
-        }
+        dout(1) << "HTTPGet: " << url << " -> " << response.status_code << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error making HTTP GET request: ") + e.what();
@@ -251,9 +249,7 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
             result["error"] = response.error;
         }
 
-        if (g_debug_level) {
-            std::cout << "HTTPPost: " << url << " -> " << response.status_code << std::endl;
-        }
+        dout(1) << "HTTPPost: " << url << " -> " << response.status_code << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error making HTTP POST request: ") + e.what();

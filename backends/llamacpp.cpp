@@ -72,7 +72,10 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
     model_name = full_model_path;  // Set public variable
 
     // Suppress llama.cpp logging unless in debug mode (but always show errors)
-    if (!g_debug_level) {
+#ifdef _DEBUG
+    if (!g_debug_level)
+#endif
+    {
         llama_log_set([](enum ggml_log_level level, const char * text, void * user_data) {
             // Only show ERROR messages (suppress INFO and WARN unless debug enabled)
             if (level == GGML_LOG_LEVEL_ERROR) {
@@ -264,14 +267,17 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         }
         dout(1) << "Using n_batch = " + std::to_string(n_batch) + " (auto, GPU: " + (has_gpu ? "yes" : "no") + ")" << std::endl;
     } else {
-        dout(1) << "Using n_batch = " + std::to_string(n_batch) + " (from --ubatch)" << std::endl;
+        dout(1) << "Using n_batch = " + std::to_string(n_batch) + " (from config)" << std::endl;
     }
 
     // Create llama context with KV space callback
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = static_cast<uint32_t>(context_size);
     ctx_params.n_batch = static_cast<uint32_t>(n_batch);
+    // n_ubatch must be <= n_batch
+    ctx_params.n_ubatch = static_cast<uint32_t>(std::min(n_ubatch, n_batch));
     ctx_params.offload_kqv = has_gpu;
+    dout(1) << "Using n_ubatch = " + std::to_string(ctx_params.n_ubatch) << std::endl;
 
     // Set KV cache type (both K and V use same type)
     // Valid values: f16, f32, q8_0, q4_0
@@ -385,9 +391,49 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
              ", uses_eom_token=" + (model_config.uses_eom_token ? "true" : "false") +
              ", uses_python_tag=" + (model_config.uses_python_tag ? "true" : "false") << std::endl;
 
-    // Create chat template instance
-    chat_template = ChatTemplates::ChatTemplateFactory::create(chat_template_text, model_config, template_node);
+    // Get EOS/BOS tokens from model vocabulary for ChatTemplate
+    std::string eos_token_str, bos_token_str;
+    {
+        llama_model* mdl = static_cast<llama_model*>(model);
+        const llama_vocab* vocab = llama_model_get_vocab(mdl);
+
+        // Get EOS token
+        llama_token eos_id = llama_vocab_eos(vocab);
+        if (eos_id != LLAMA_TOKEN_NULL) {
+            char buf[64];
+            int len = llama_token_to_piece(vocab, eos_id, buf, sizeof(buf), 0, false);
+            if (len > 0) {
+                eos_token_str = std::string(buf, len);
+                dout(1) << "EOS token: id=" << eos_id << " text=[" << eos_token_str << "]" << std::endl;
+            }
+        }
+
+        // Get BOS token
+        llama_token bos_id = llama_vocab_bos(vocab);
+        if (bos_id != LLAMA_TOKEN_NULL) {
+            char buf[64];
+            int len = llama_token_to_piece(vocab, bos_id, buf, sizeof(buf), 0, false);
+            if (len > 0) {
+                bos_token_str = std::string(buf, len);
+                dout(1) << "BOS token: id=" << bos_id << " text=[" << bos_token_str << "]" << std::endl;
+            }
+        }
+    }
+
+    // Create chat template instance with EOS/BOS tokens
+    chat_template = ChatTemplates::ChatTemplateFactory::create(chat_template_text, model_config, template_node, eos_token_str, bos_token_str);
     dout(1) << "Created chat template for family: " + std::to_string(static_cast<int>(model_config.family)) << std::endl;
+
+    // Probe template capabilities (discovers what features the template supports)
+    if (chat_template) {
+        chat_template->probe_capabilities();
+        const auto& caps = chat_template->get_capabilities();
+        dout(1) << "Template capabilities: system=" + std::string(caps.supports_system_role ? "yes" : "no") +
+                   ", tools=" + std::string(caps.supports_tools ? "yes" : "no") +
+                   ", tool_calls=" + std::string(caps.supports_tool_calls ? "yes" : "no") +
+                   ", tool_responses=" + std::string(caps.supports_tool_responses ? "yes" : "no") +
+                   ", channels=" + std::string(caps.has_channels ? "yes" : "no") << std::endl;
+    }
 
     // Try to load sampling parameters from generation_config.json
     // Priority: config file values > generation_config.json > hardcoded defaults
@@ -460,7 +506,10 @@ void LlamaCppBackend::parse_backend_config() {
         if (config->json.contains("pipeline_parallel")) pipeline_parallel = config->json["pipeline_parallel"].get<int>();
         else if (config->json.contains("pp")) pipeline_parallel = config->json["pp"].get<int>();
 
-        if (config->json.contains("ubatch")) n_batch = config->json["ubatch"].get<int>();
+        // Batch sizes: n_batch = logical, ubatch/n_ubatch = physical micro-batch
+        if (config->json.contains("n_batch")) n_batch = config->json["n_batch"].get<int>();
+        if (config->json.contains("ubatch")) n_ubatch = config->json["ubatch"].get<int>();
+        else if (config->json.contains("n_ubatch")) n_ubatch = config->json["n_ubatch"].get<int>();
 
         // KV cache type
         if (config->json.contains("cache_type")) cache_type = config->json["cache_type"].get<std::string>();
@@ -500,9 +549,26 @@ int LlamaCppBackend::count_message_tokens(Message::Role role, const std::string&
         return count_tokens_in_text(content);
     }
 
+    // Tool responses require conversation context to render through template
+    // (template needs preceding assistant's tool_calls). Use simple tokenization.
+    if (role == Message::TOOL_RESPONSE || role == Message::FUNCTION) {
+        return count_tokens_in_text(content);
+    }
+
     // Format message through minja template to get exact token count
     auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
     auto context = minja::Context::builtins();
+
+    // Add strftime_now for templates that use it (e.g., GPT-OSS)
+    auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
+        std::string format = args.args.empty() ? "%Y-%m-%d" : args.args[0].get<std::string>();
+        std::time_t now = std::time(nullptr);
+        std::tm* tm_info = std::localtime(&now);
+        char buffer[128];
+        strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
+        return minja::Value(std::string(buffer));
+    });
+    context->set("strftime_now", strftime_now);
 
     // Build messages array with just this message
     auto messages = minja::Value::array();
@@ -610,6 +676,13 @@ std::vector<std::string> LlamaCppBackend::get_thinking_end_markers() const {
     return model_config.thinking_end_markers;
 }
 
+const ChatTemplates::ChatTemplateCaps* LlamaCppBackend::get_chat_template_caps() const {
+    if (chat_template) {
+        return &chat_template->get_capabilities();
+    }
+    return nullptr;
+}
+
 bool LlamaCppBackend::is_ready() const {
 #ifdef ENABLE_LLAMACPP
     return initialized; // && model && model_ctx;
@@ -623,7 +696,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     dout(1) << "KV cache full - need to free " + std::to_string(tokens_needed) + " tokens" << std::endl;
 
     if (!current_session) {
-        std::cerr << "No current session - cannot evict" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "No current session - cannot evict", "", "");
         return UINT32_MAX;
     }
 
@@ -644,7 +717,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     // NOTE: We cannot throw exceptions here - this callback is called from llama.cpp's C code
     // and C++ exceptions cannot propagate through C stack frames (undefined behavior)
     if (g_server_mode) {
-        std::cerr << "KV cache full in server mode - signaling abort (context_full)" << std::endl;
+        dout(1) << "KV cache full in server mode - signaling abort (context_full)" << std::endl;
         // Return 0 to signal abort - llama_decode will fail and we handle it at the C++ level
         context_full_in_server_mode = true;
         context_full_tokens_needed = kv_used + tokens_needed;
@@ -663,7 +736,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     auto ranges = mutable_session->calculate_messages_to_evict(tokens_needed);
 
     if (ranges.empty()) {
-        std::cerr << "Cannot calculate messages to evict - no space can be freed" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Cannot evict - no space can be freed", "", "");
         return 0;  // Signal failure: eviction cannot proceed
     }
 
@@ -698,8 +771,8 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         total_tokens_removed += tokens_in_range;
         total_messages_evicted += (end_msg - start_msg + 1);
 
-        dprintf(3, "EVICT range: messages[%d,%d] = KV positions[%d,%d]\n",
-                start_msg, end_msg, start_pos, end_pos);
+        dout(3) << "EVICT range: messages[" << start_msg << "," << end_msg
+                << "] = KV positions[" << start_pos << "," << end_pos << "]" << std::endl;
 
         dout(1) << "Evicting messages [" + std::to_string(start_msg) + ", " + std::to_string(end_msg) +
                  "] = tokens [" + std::to_string(start_pos) + ", " + std::to_string(end_pos) + "]" << std::endl;
@@ -721,7 +794,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
 
     // Step 4: Archive to RAG and remove messages from session (all ranges at once)
     if (!mutable_session->evict_messages(ranges)) {
-        std::cerr << "Failed to evict messages from session" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Failed to evict messages from session", "", "");
         return UINT32_MAX;
     }
 
@@ -730,7 +803,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
              std::to_string(total_tokens_removed) + " tokens) from KV cache" << std::endl;
 
     // KV cache is the source of truth - query actual state
-    dprintf(2, "KV cache after eviction: %d tokens\n", get_context_token_count());
+    dout(2) << "KV cache after eviction: " << get_context_token_count() << " tokens" << std::endl;
     log_token_state("After eviction");
 
 #ifdef TEST_EVICTION_VALIDATION
@@ -742,8 +815,9 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     }
     int actual_kv_tokens = get_context_token_count();
     if (expected_kv_tokens != actual_kv_tokens) {
-        std::cerr << "Eviction validation FAILED: expected " + std::to_string(expected_kv_tokens) +
-                  " tokens in KV cache but found " + std::to_string(actual_kv_tokens));
+        if (callback) callback(CallbackEvent::ERROR, "Eviction validation FAILED: expected " +
+                  std::to_string(expected_kv_tokens) + " tokens in KV cache but found " +
+                  std::to_string(actual_kv_tokens), "", "");
     } else {
         dout(1) << "Eviction validation PASSED: " + std::to_string(actual_kv_tokens) + " tokens match" << std::endl;
     }
@@ -917,6 +991,7 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
     // All messages are already decoded in KV cache from add_*_message() calls
     // We just need to run the generation loop now
 
+#ifdef _DEBUG
     // In debug mode, show what's in the KV cache
     if (g_debug_level && current_session) {
         dout(1) << "=== MESSAGES IN KV CACHE ===" << std::endl;
@@ -952,6 +1027,7 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
         }
         dout(1) << "=== END KV CACHE ===" << std::endl;
     }
+#endif
 
     dout(1) << "Running generation (messages already cached)" << std::endl;
 
@@ -981,7 +1057,7 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
                 llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
                 if (llama_decode(ctx, batch) != 0) {
-                    std::cerr << "Failed to decode generation prompt at position " + std::to_string(i) << std::endl;
+                    if (callback) callback(CallbackEvent::ERROR, "Failed to decode generation prompt at position " + std::to_string(i), "", "");
                 }
             }
         }
@@ -1003,6 +1079,17 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
         debug_file << raw_response << "\n";
         debug_file << "=== End (length: " << raw_response.length() << ") ===\n\n";
         debug_file.close();
+    }
+
+    // Content extraction (for channel-based models like GPT-OSS)
+    // Uses ChatTemplate's extract_content() which detects format from template
+    if (chat_template) {
+        std::string extracted = chat_template->extract_content(raw_response);
+        if (extracted.length() != raw_response.length()) {
+            dout(1) << "Content extraction: " + std::to_string(raw_response.length()) +
+                      " -> " + std::to_string(extracted.length()) + " chars" << std::endl;
+            raw_response = extracted;
+        }
     }
 
     // CRITICAL FIX: After generation, add the closing tag to KV cache
@@ -1051,7 +1138,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     // Note: TerminalIO reset removed
 
     if (!model || !model_ctx) {
-        std::cerr << "llama.cpp model or context not initialized" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "llama.cpp model or context not initialized", "", "");
         return "Error: Model not initialized";
     }
 
@@ -1059,30 +1146,39 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     llama_model* mdl = static_cast<llama_model*>(this->model);
     const llama_vocab* vocab = llama_model_get_vocab(mdl);
 
-    // Initialize sampler chain with configured sampling parameters
+    // Compute effective sampling parameters - use session overrides if set, otherwise backend defaults
+    // This mirrors TensorRT's approach for per-request parameter support
+    float use_temperature = (current_session && current_session->temperature >= 0.0f) ? current_session->temperature : temperature;
+    float use_top_p = (current_session && current_session->top_p >= 0.0f) ? current_session->top_p : top_p;
+    int use_top_k = (current_session && current_session->top_k >= 0) ? current_session->top_k : top_k;
+    float use_penalty_repeat = (current_session && current_session->repetition_penalty >= 0.0f) ? current_session->repetition_penalty : penalty_repeat;
+    float use_penalty_freq = (current_session && current_session->frequency_penalty > -999.0f) ? current_session->frequency_penalty : penalty_freq;
+    float use_penalty_present = (current_session && current_session->presence_penalty > -999.0f) ? current_session->presence_penalty : penalty_present;
+
+    // Initialize sampler chain with effective sampling parameters
     llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
 
     // Add samplers in the recommended order (from llama.cpp examples)
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(top_k));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(top_p, min_keep));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(use_top_k));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(use_top_p, min_keep));
 
     // Add repetition penalties BEFORE temperature to discourage repetitive patterns
     llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-        penalty_last_n,      // last n tokens to penalize
-        penalty_repeat,      // repetition penalty (1.0 = disabled)
-        penalty_freq,        // frequency penalty (0.0 = disabled)
-        penalty_present));   // presence penalty (0.0 = disabled)
+        penalty_last_n,        // last n tokens to penalize
+        use_penalty_repeat,    // repetition penalty (1.0 = disabled)
+        use_penalty_freq,      // frequency penalty (0.0 = disabled)
+        use_penalty_present)); // presence penalty (0.0 = disabled)
 
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(sampler, llama_sampler_init_temp(use_temperature));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));           // greedy sampling from dist
 
-    dout(1) << "Sampling params: temperature=" + std::to_string(temperature) +
-              ", top_p=" + std::to_string(top_p) +
-              ", top_k=" + std::to_string(top_k) +
+    dout(1) << "Sampling params: temperature=" + std::to_string(use_temperature) +
+              ", top_p=" + std::to_string(use_top_p) +
+              ", top_k=" + std::to_string(use_top_k) +
               ", min_keep=" + std::to_string(min_keep) +
-              ", penalty_repeat=" + std::to_string(penalty_repeat) +
-              ", penalty_freq=" + std::to_string(penalty_freq) +
-              ", penalty_present=" + std::to_string(penalty_present) +
+              ", penalty_repeat=" + std::to_string(use_penalty_repeat) +
+              ", penalty_freq=" + std::to_string(use_penalty_freq) +
+              ", penalty_present=" + std::to_string(use_penalty_present) +
               ", penalty_last_n=" + std::to_string(penalty_last_n) << std::endl;
 
     // If prompt_text is empty, everything is already in KV cache
@@ -1097,7 +1193,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                                              prompt_tokens.data(), prompt_tokens.size(), false, true);
 
         if (n_prompt_tokens < 0) {
-            std::cerr << "Failed to tokenize input text" << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize input text", "", "");
             llama_sampler_free(sampler);
             return "Error: Tokenization failed";
         }
@@ -1107,8 +1203,8 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
         // Check if prompt alone is larger than entire context window
         if (n_prompt_tokens > static_cast<int>(context_size)) {
-            std::cerr << "Prompt too large for context: " + std::to_string(n_prompt_tokens) + " tokens exceeds max context size " +
-                      std::to_string(context_size) << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Prompt too large for context: " +
+                      std::to_string(n_prompt_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
             llama_sampler_free(sampler);
             if (g_server_mode) {
                 throw ContextFullException("This model's maximum context length is " +
@@ -1132,7 +1228,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
             llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
             if (llama_decode(ctx, batch) != 0) {
-                std::cerr << "Failed to evaluate prompt tokens at position " + std::to_string(i) << std::endl;
+                if (callback) callback(CallbackEvent::ERROR, "Failed to evaluate prompt tokens at position " + std::to_string(i), "", "");
                 llama_sampler_free(sampler);
                 return "Error: Evaluation failed";
             }
@@ -1177,9 +1273,9 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
 
         int32_t n_vocab = llama_vocab_n_tokens(vocab);
-        dprintf(3, "Sampled token: %d (vocab size: %d)", next_token, n_vocab);
+        dout(3) << "Sampled token: " << next_token << " (vocab size: " << n_vocab << ")" << std::endl;
         if (next_token < 0 || next_token >= n_vocab) {
-            std::cerr << "Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")" << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")", "", "");
             break;
         }
 
@@ -1196,16 +1292,16 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Convert token to text (filter special tokens with false parameter)
         char token_str[256];
         int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, false);
-        dprintf(3, "Token %d -> len=%d", next_token, token_len);
+        dout(3) << "Token " << next_token << " -> len=" << token_len << std::endl;
 
         if (token_len > 0) {
             // Accumulate for final response
             response.append(token_str, token_len);
 
-            // Route through unified output filter
+            // Route through unified output filter (includes channel parsing for GPT-OSS)
             std::string delta(token_str, token_len);
-            if (!output(delta)) {
-                // Callback returned false - stop generation
+            if (!process_output(delta)) {
+                // Callback returned false or channel parser signaled stop
                 break;
             }
         }
@@ -1225,7 +1321,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         }
 
         if (!decode_ok) {
-            std::cerr << "Failed to evaluate generated token after retries" << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Failed to evaluate generated token after retries", "", "");
             break;
         }
 
@@ -1240,15 +1336,16 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
     llama_sampler_free(sampler);
 
-    // Always show performance metrics to stderr (visible even without debug mode)
-    if (n_generated > 0) {
+    // Send performance stats via callback (frontend decides whether to display)
+    if (n_generated > 0 && callback) {
         int context_used = get_context_token_count();
         int context_max = context_size;
 
-        // Performance stats
-        std::cerr << "\n\033[90m[Decode: " << n_generated << " tokens, "
-                  << std::fixed << std::setprecision(1) << tokens_per_second << " t/s, "
-                  << "context: " << context_used << "/" << context_max << "]\033[0m\n";
+        std::ostringstream stats;
+        stats << "\n[Decode: " << n_generated << " tokens, "
+              << std::fixed << std::setprecision(1) << tokens_per_second << " t/s, "
+              << "context: " << context_used << "/" << context_max << "]\n";
+        callback(CallbackEvent::STATS, stats.str(), "", "");
     }
 
     dout(1) << "Generation (decode): " + std::to_string(n_generated) + " tokens in " +
@@ -1341,46 +1438,74 @@ std::map<std::string, std::any> LlamaCppBackend::parse_json_to_args(const std::s
     return args;
 }
 
-std::string LlamaCppBackend::render_message(const Message& msg, bool add_generation_prompt) {
+std::string LlamaCppBackend::render_message(
+    const std::vector<Message>& all_messages,
+    size_t target_index,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) {
 #ifdef ENABLE_LLAMACPP
     if (!chat_template) {
-        std::cerr << "No chat template available, falling back to simple format" << std::endl;
-        return msg.get_role() + ": " + msg.content + "\n\n";
+        dout(1) << "No chat template available, falling back to simple format" << std::endl;
+        if (target_index < all_messages.size()) {
+            return all_messages[target_index].get_role() + ": " + all_messages[target_index].content + "\n\n";
+        }
+        return "";
     }
 
-    // Use the chat template to format the message
-    std::string formatted = chat_template->format_message(msg);
+    // Use incremental rendering with full conversation context
+    try {
+        std::string formatted = chat_template->format_message_incremental(
+            all_messages, target_index, tools, add_generation_prompt);
 
-    // Add generation prompt if requested
-    if (add_generation_prompt && msg.get_role() == "user") {
-        formatted += chat_template->get_generation_prompt();
+        dout(1) << "Rendered message with context (index=" + std::to_string(target_index) +
+                   ", " + std::to_string(formatted.length()) + " chars)" << std::endl;
+        return formatted;
+    } catch (const std::exception& e) {
+        // Template rendering failed - fall back to simple format
+        // This can happen with templates that have unsupported features
+        dout(1) << "Template rendering failed: " + std::string(e.what()) + ", using fallback" << std::endl;
+        if (target_index < all_messages.size()) {
+            const auto& msg = all_messages[target_index];
+            return "<|im_start|>" + msg.get_role() + "\n" + msg.content + "<|im_end|>\n";
+        }
+        return "";
     }
-
-    dout(1) << "Rendered message (" + std::to_string(formatted.length()) + " chars, role=" + msg.get_role() + ")" << std::endl;
-    return formatted;
 #else
-    // Fallback when llama.cpp not available
-    return msg.get_role() + ": " + msg.content + "\n\n";
+    if (target_index < all_messages.size()) {
+        return all_messages[target_index].get_role() + ": " + all_messages[target_index].content + "\n\n";
+    }
+    return "";
 #endif
 }
 
-bool LlamaCppBackend::format_and_decode_message(Message& msg) {
+bool LlamaCppBackend::format_and_decode_message(
+    std::vector<Message>& all_messages,
+    size_t target_index,
+    const std::vector<Session::Tool>& tools,
+    bool add_generation_prompt) {
 #ifdef ENABLE_LLAMACPP
     if (!model || !model_ctx) {
-        std::cerr << "Model or context not initialized" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Model or context not initialized", "", "");
         return false;
     }
 
-    // IMPORTANT: Do NOT run chat template on ASSISTANT messages
-    // Templates are for formatting prompts, not parsing model outputs
-    // Running template on assistant messages causes think tag stripping
+    if (target_index >= all_messages.size()) {
+        if (callback) callback(CallbackEvent::ERROR, "Target index " + std::to_string(target_index) + " out of bounds (size=" + std::to_string(all_messages.size()) + ")", "", "");
+        return false;
+    }
+
+    const Message& msg = all_messages[target_index];
+
+    // Render message through template with full conversation context
+    // Exception: assistant messages without tool_calls use raw content to avoid think tag stripping
     std::string rendered_msg;
-    if (msg.get_role() == "assistant") {
-        // Use raw content for assistant messages - no template processing
+    if (msg.get_role() == "assistant" && msg.tool_calls_json.empty()) {
+        // Use raw content for regular assistant messages - no template processing
         rendered_msg = msg.content;
     } else {
-        // Render user/system messages through the template
-        rendered_msg = render_message(msg, false);
+        // Render through the template with full conversation context
+        // This is needed for: user messages, tool responses, and assistant messages with tool_calls
+        rendered_msg = render_message(all_messages, target_index, tools, add_generation_prompt);
     }
 
     llama_context* ctx = static_cast<llama_context*>(model_ctx);
@@ -1393,21 +1518,21 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
                                    msg_tokens.data(), msg_tokens.size(), false, true);
 
     if (n_tokens < 0) {
-        std::cerr << "Failed to tokenize message" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
         return false;
     }
     msg_tokens.resize(n_tokens);
 
-    // CRITICAL: Update message token count to the FORMATTED count (includes all template overhead)
-    // This is the actual number of tokens in KV cache, not just the raw content
-    msg.tokens = n_tokens;
+    // Update the message's token count - avoids redundant count_message_tokens() call
+    all_messages[target_index].tokens = n_tokens;
 
-    dout(1) << "Decoding " + std::to_string(n_tokens) + " tokens for new message (updated msg.tokens)" << std::endl;
+    dout(1) << "Decoding " + std::to_string(n_tokens) + " tokens for message at index " +
+               std::to_string(target_index) << std::endl;
 
     // Check if message alone is larger than entire context window
     if (n_tokens > static_cast<int>(context_size)) {
-        std::cerr << "Message too large for context: " + std::to_string(n_tokens) + " tokens exceeds max context size " +
-                  std::to_string(context_size) << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Message too large for context: " +
+                  std::to_string(n_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
         if (g_server_mode) {
             throw ContextFullException("This model's maximum context length is " +
                 std::to_string(context_size) + " tokens. However, your messages resulted in " +
@@ -1420,11 +1545,9 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
     auto prefill_start_time = std::chrono::high_resolution_clock::now();
 
     // Decode the message tokens in batches
-    // Retry once if decode fails (likely due to KV cache eviction mid-operation)
     const int MAX_DECODE_RETRIES = 1;
     int retry_count = 0;
 
-    // Reset server-mode context-full flag before decode
     context_full_in_server_mode = false;
     context_full_tokens_needed = 0;
 
@@ -1437,64 +1560,54 @@ bool LlamaCppBackend::format_and_decode_message(Message& msg) {
             llama_batch batch = llama_batch_get_one(msg_tokens.data() + i, batch_size);
 
             if (llama_decode(ctx, batch) != 0) {
-                // Check if this was a server-mode context-full abort
                 if (context_full_in_server_mode) {
-                    // Throw exception at C++ level (safe - we're back in C++ code)
                     throw ContextFullException("This model's maximum context length is " +
                         std::to_string(context_size) + " tokens. However, your messages resulted in " +
                         std::to_string(context_full_tokens_needed) + " tokens.");
                 }
 
                 if (retry_count < MAX_DECODE_RETRIES) {
-                    dout(1) << std::string("WARNING: ") +"Decode failed at position " + std::to_string(i) + ", retrying (attempt " +
-                            std::to_string(retry_count + 1) + "/" + std::to_string(MAX_DECODE_RETRIES + 1) + "" << std::endl;
-
+                    dout(1) << "WARNING: Decode failed at position " + std::to_string(i) + ", retrying" << std::endl;
                     decode_failed = true;
                     break;
                 } else {
-                    std::cerr << "Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts" << std::endl;
+                    if (callback) callback(CallbackEvent::ERROR, "Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts", "", "");
                     return false;
                 }
             }
         }
 
         if (!decode_failed) {
-            break; // Success!
+            break;
         }
 
         retry_count++;
     }
 
-    // End timing and calculate prompt processing (prefill) speed
+    // End timing
     auto prefill_end_time = std::chrono::high_resolution_clock::now();
     auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end_time - prefill_start_time);
     double prefill_seconds = prefill_duration.count() / 1000.0;
     double prefill_tokens_per_second = (n_tokens > 0 && prefill_seconds > 0) ? (n_tokens / prefill_seconds) : 0.0;
 
-    // KV cache is the source of truth - use get_context_token_count() to query actual state
-    dprintf(2, "KV cache after decode: %d tokens\n", get_context_token_count());
-    log_token_state("After decode to KV cache");
+    dout(2) << "KV cache after decode: " << get_context_token_count() << " tokens" << std::endl;
 
-    // Always show performance metrics to stderr (visible even without debug mode)
-    // Include context window utilization
-    int context_used = get_context_token_count();
-    int context_max = context_size;
-    std::cerr << "\033[90m[Prefill: " << n_tokens << " tokens, "
+    // Send performance stats via callback (frontend decides whether to display)
+    if (callback) {
+        int context_used = get_context_token_count();
+        int context_max = context_size;
+        std::ostringstream stats;
+        stats << "[Prefill: " << n_tokens << " tokens, "
               << std::fixed << std::setprecision(1) << prefill_tokens_per_second << " t/s, "
-              << "context: " << context_used << "/" << context_max << "]\033[0m" << std::endl;
-
-    dout(1) << "Prompt processing: " + std::to_string(n_tokens) + " tokens in " +
-             std::to_string(prefill_seconds) + "s (" + std::to_string(prefill_tokens_per_second) + " t/s" << std::endl;
-
+              << "context: " << context_used << "/" << context_max << "]\n";
+        callback(CallbackEvent::STATS, stats.str(), "", "");
+    }
 
     return true;
 #else
     return false;
 #endif
 }
-
-
-
 
 void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 #ifdef ENABLE_LLAMACPP
@@ -1508,6 +1621,33 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     }
 
     dout(1) << "LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
+
+    // GPT-OSS HARMONY FIX: Drop analysis content from completed assistant turns
+    // vLLM's auto_drop_analysis_messages() does this - we need to match that behavior
+    // For channel-based models, assistant messages contain <|channel|>analysis<|message|>...
+    // followed by <|channel|>final<|message|>content<|end|>
+    // We only want to keep the final content for completed turns (any assistant message
+    // that's followed by another message)
+    if (chat_template && chat_template->get_capabilities().has_channels) {
+        for (size_t i = 0; i < session.messages.size(); i++) {
+            auto& msg = session.messages[i];
+
+            // Only process assistant messages that are followed by another message (completed turns)
+            if (msg.role == Message::ASSISTANT && i + 1 < session.messages.size()) {
+                // Check if this message contains analysis channel content
+                if (msg.content.find("<|channel|>analysis") != std::string::npos) {
+                    // Extract only the final channel content
+                    std::string filtered = chat_template->extract_content(msg.content);
+
+                    if (filtered != msg.content) {
+                        dout(1) << "GPT-OSS: Filtered analysis from completed turn " << i
+                                << " (" << msg.content.length() << " -> " << filtered.length() << " chars)" << std::endl;
+                        msg.content = filtered;
+                    }
+                }
+            }
+        }
+    }
 
     // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
     size_t cached_count = backend_session.messages.size();
@@ -1590,15 +1730,12 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
         std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
         dout(1) << "Formatted system prompt with " + std::to_string(session.tools.size()) + " tools" << std::endl;
 
-        // Create system message
+        // Create system message (token count will be set by format_and_decode_message)
         Message sys_msg(Message::SYSTEM, formatted_system, 0);
 
-        // Count tokens
-        sys_msg.tokens = count_message_tokens(Message::SYSTEM, formatted_system, "", "");
-
-        // Decode to KV cache
-        if (!format_and_decode_message(sys_msg)) {
-            std::cerr << "Failed to decode system message to KV cache" << std::endl;
+        // Decode to KV cache using full-conversation rendering
+        std::vector<Message> sys_messages = {sys_msg};
+        if (!format_and_decode_message(sys_messages, 0, session.tools, false)) {
             Response err_resp;
             err_resp.success = false;
             err_resp.code = Response::ERROR;
@@ -1607,10 +1744,10 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
             callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
         }
 
-        // Add to backend_session
-        backend_session.messages.push_back(sys_msg);
+        // Add to backend_session (token count was set by format_and_decode_message)
+        backend_session.messages.push_back(sys_messages[0]);
         backend_session.system_message = session.system_message;
-        dout(1) << "System message added to KV cache (" + std::to_string(sys_msg.tokens) + " tokens)" << std::endl;
+        dout(1) << "System message added to KV cache (" + std::to_string(sys_messages[0].tokens) + " tokens)" << std::endl;
     }
 
     // Add NEW messages (from matching_prefix onward)
@@ -1620,17 +1757,16 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 
         for (size_t i = matching_prefix; i < session.messages.size(); i++) {
             const auto& msg = session.messages[i];
-            Message msg_copy = msg;
 
-            // Set token count if not already set
-            if (msg_copy.tokens == 0) {
-                msg_copy.tokens = count_message_tokens(msg_copy.role, msg_copy.content,
-                                                        msg_copy.tool_name, msg_copy.tool_call_id);
+            // Decode to KV cache - always use full-conversation rendering
+            // Build all_messages from backend_session + messages up to current
+            std::vector<Message> all_messages(backend_session.messages.begin(), backend_session.messages.end());
+            for (size_t j = matching_prefix; j <= i; j++) {
+                all_messages.push_back(session.messages[j]);
             }
-
-            // Decode to KV cache
-            if (!format_and_decode_message(msg_copy)) {
-                std::cerr << "Failed to decode message to KV cache" << std::endl;
+            size_t target_idx = all_messages.size() - 1;
+            bool decode_ok = format_and_decode_message(all_messages, target_idx, session.tools, false);
+            if (!decode_ok) {
                 Response err_resp;
                 err_resp.success = false;
                 err_resp.code = Response::ERROR;
@@ -1640,6 +1776,8 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
             }
 
             // Successfully decoded - add to backend_session
+            // Token count was set by format_and_decode_message
+            Message msg_copy = all_messages[target_idx];
             backend_session.messages.push_back(msg_copy);
 
             // Update last_user/last_assistant for eviction protection
@@ -1663,6 +1801,15 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     // Copy tools to backend_session
     backend_session.tools = session.tools;
     backend_session.system_message = session.system_message;
+
+    // Copy sampling parameters from request (like TensorRT does)
+    backend_session.temperature = session.temperature;
+    backend_session.top_p = session.top_p;
+    backend_session.top_k = session.top_k;
+    backend_session.min_p = session.min_p;
+    backend_session.repetition_penalty = session.repetition_penalty;
+    backend_session.presence_penalty = session.presence_penalty;
+    backend_session.frequency_penalty = session.frequency_penalty;
 
     // Update member variables used by generate() for token calculations
     // System message tokens
@@ -1695,6 +1842,17 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
             << ", last_assistant_kv_tokens=" << last_assistant_kv_tokens
             << ", session.total_tokens=" << session.total_tokens
             << ", session.last_prompt_tokens=" << session.last_prompt_tokens << std::endl;
+
+    // Add assistant response to backend_session to keep it in sync with KV cache
+    // Without this, next request's prefix matching fails because backend_session
+    // only has the user message but KV cache has user + assistant tokens
+    if (!result.empty()) {
+        Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
+        backend_session.messages.push_back(assistant_msg);
+        backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+        backend_session.last_assistant_message_tokens = last_assistant_kv_tokens;
+        dout(1) << "Added assistant message to backend_session (" << last_assistant_kv_tokens << " tokens)" << std::endl;
+    }
 
     // Content already delivered via callback during generate()
     // Signal completion
@@ -1744,9 +1902,18 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
     msg.tool_name = tool_name;
     msg.tool_call_id = tool_id;
 
-    // TRY to decode to KV cache FIRST
-    if (!format_and_decode_message(msg)) {
-        std::cerr << "Failed to decode message to KV cache" << std::endl;
+    // TRY to decode to KV cache FIRST - always use full-conversation rendering
+    // Build messages array with context: session messages + new message
+    std::vector<Message> all_messages(session.messages.begin(), session.messages.end());
+    all_messages.push_back(msg);
+    size_t target_index = all_messages.size() - 1;
+    bool decode_success = format_and_decode_message(all_messages, target_index, session.tools, false);
+    // Update msg.tokens from the formatted message
+    if (decode_success) {
+        msg.tokens = all_messages[target_index].tokens;
+    }
+
+    if (!decode_success) {
         // Session is unchanged - no rollback needed
         Response err_resp;
         err_resp.success = false;
@@ -1807,6 +1974,22 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
 
         // Add assistant message to session (generation was successful)
         Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
+
+        // Populate tool_calls_json from tool calls detected during streaming
+        if (!pending_tool_calls.empty()) {
+            nlohmann::json tc_array = nlohmann::json::array();
+            for (const auto& tc : pending_tool_calls) {
+                nlohmann::json tc_obj;
+                tc_obj["id"] = tc.tool_call_id;
+                tc_obj["type"] = "function";
+                tc_obj["function"]["name"] = tc.name;
+                tc_obj["function"]["arguments"] = tc.raw_json;
+                tc_array.push_back(tc_obj);
+            }
+            assistant_msg.tool_calls_json = tc_array.dump();
+            dout(1) << "Populated tool_calls_json: " << assistant_msg.tool_calls_json << std::endl;
+        }
+
         session.messages.push_back(assistant_msg);
 
         // Update session total tokens with assistant response
@@ -1815,31 +1998,6 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
         // Update tracking
         session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
         session.last_assistant_message_tokens = last_assistant_kv_tokens;
-
-        // Tool call detection now handled by unified output() filter during streaming
-        // Keeping this code disabled for reference
-#if 0
-        // Parse tool calls from response if present
-        std::vector<ToolParser::ToolCall> tool_calls;
-        if (!response_text.empty()) {
-            // Check for tool call markers
-            bool has_marker = false;
-            for (const auto& marker : tool_call_markers) {
-                if (response_text.find(marker) != std::string::npos) {
-                    has_marker = true;
-                    break;
-                }
-            }
-
-            // Parse tool calls if markers present or response looks like JSON
-            if (has_marker || (response_text[0] == '{' && response_text.find("\"name\"") != std::string::npos)) {
-                auto tool_call = ToolParser::parse_tool_call(response_text, tool_call_markers);
-                if (tool_call.has_value()) {
-                    tool_calls.push_back(tool_call.value());
-                }
-            }
-        }
-#endif
 
         // Determine finish reason
         std::string finish_reason = "stop";

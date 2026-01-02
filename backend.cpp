@@ -1,6 +1,8 @@
 
 #include "shepherd.h"
 #include "backend.h"
+#include "backends/channel_parser.h"
+#include "backends/chat_template.h"
 #include "tools/tool_parser.h"
 #include <nlohmann/json.hpp>
 
@@ -12,6 +14,9 @@ Backend::Backend(size_t ctx_size, Session& session, EventCallback cb)
         throw std::invalid_argument("Internal error: callback not passed to backend constructor");
     }
 }
+
+// Destructor defined here where ChannelParser is complete (for unique_ptr)
+Backend::~Backend() = default;
 
 // Initialize marker vectors from virtual methods (called once on first use)
 void Backend::ensure_markers_initialized() {
@@ -47,6 +52,27 @@ void Backend::reset_output_state() {
     buffered_tool_call.clear();
     buffered_thinking.clear();
     output_buffer.clear();
+    pending_tool_calls.clear();
+
+    // Initialize channel parser for GPT-OSS harmony format
+    // This enables unified channel parsing across CLI, TUI, and API modes
+    // Disabled when raw_output is set (to match vLLM behavior)
+    const auto* caps = get_chat_template_caps();
+    channel_parsing_enabled_ = caps && caps->has_channels && !config->raw_output;
+
+    if (channel_parsing_enabled_) {
+        ChannelParsing::ChannelParser::Config cfg;
+        cfg.has_channels = true;
+        cfg.include_reasoning = show_thinking;
+        cfg.channel_start = "<|channel|>";
+        cfg.message_start = "<|message|>";
+        cfg.channel_end = "<|end|>";
+        cfg.turn_start = "<|start|>";
+
+        channel_parser_ = std::make_unique<ChannelParsing::ChannelParser>(cfg);
+    } else {
+        channel_parser_.reset();
+    }
 }
 
 // Flush output buffer to callback
@@ -64,6 +90,32 @@ bool Backend::flush_output_buffer() {
 
 // Flush any pending output at end of response
 void Backend::flush_output() {
+    // Flush channel parser first if active
+    if (channel_parsing_enabled_ && channel_parser_) {
+        channel_parser_->flush([this](ChannelParsing::EventType evt,
+                                       const std::string& content,
+                                       const std::string& tool_name,
+                                       const std::string& args) -> bool {
+            switch (evt) {
+                case ChannelParsing::EventType::CONTENT:
+                case ChannelParsing::EventType::PREAMBLE:
+                    // Route through existing output filter
+                    return output(content.c_str(), content.length());
+                case ChannelParsing::EventType::THINKING:
+                    if (show_thinking && callback) {
+                        return callback(CallbackEvent::THINKING, content, "", "");
+                    }
+                    return true;
+                case ChannelParsing::EventType::TOOL_CALL:
+                    if (callback) {
+                        return callback(CallbackEvent::TOOL_CALL, args, tool_name, "");
+                    }
+                    return true;
+            }
+            return true;
+        });
+    }
+
     // Flush any buffered regular output
     flush_output_buffer();
 
@@ -165,6 +217,35 @@ void Backend::emit_tool_call() {
         }
     }
 
+    // Check for XML format: <function=name>args</function> (Qwen3-Coder style)
+    if (tool_name.empty()) {
+        size_t func_start = buffered_tool_call.find("<function=");
+        if (func_start != std::string::npos) {
+            size_t name_start = func_start + 10;  // length of "<function="
+            size_t name_end = buffered_tool_call.find('>', name_start);
+            if (name_end != std::string::npos) {
+                tool_name = buffered_tool_call.substr(name_start, name_end - name_start);
+                // Extract arguments between > and </function>
+                size_t args_start = name_end + 1;
+                size_t args_end = buffered_tool_call.find("</function>", args_start);
+                if (args_end != std::string::npos) {
+                    tool_args = buffered_tool_call.substr(args_start, args_end - args_start);
+                    // Trim whitespace from args
+                    size_t first = tool_args.find_first_not_of(" \t\n\r");
+                    size_t last = tool_args.find_last_not_of(" \t\n\r");
+                    if (first != std::string::npos && last != std::string::npos) {
+                        tool_args = tool_args.substr(first, last - first + 1);
+                    } else {
+                        tool_args = "{}";  // Empty args
+                    }
+                } else {
+                    tool_args = "{}";  // No closing tag, assume empty args
+                }
+                dout(2) << "Parsed XML tool call: name=" << tool_name << ", args=" << tool_args << std::endl;
+            }
+        }
+    }
+
     // Generate tool_id if not provided
     if (tool_id.empty()) {
         static int tool_call_counter = 0;
@@ -174,10 +255,18 @@ void Backend::emit_tool_call() {
     // Check if tool name is valid - if not, output as content instead
     if (tool_name.empty() || (!valid_tool_names.empty() && valid_tool_names.find(tool_name) == valid_tool_names.end())) {
         // Not a valid tool - output the raw content
+        dout(2) << "emit_tool_call: tool '" << tool_name << "' not in valid_tool_names, outputting as content" << std::endl;
         callback(CallbackEvent::CONTENT, buffered_tool_call, "", "");
         buffered_tool_call.clear();
         return;
     }
+
+    // Store parsed tool call for later use in assistant message's tool_calls_json
+    ToolParser::ToolCall tc;
+    tc.name = tool_name;
+    tc.tool_call_id = tool_id;
+    tc.raw_json = tool_args;
+    pending_tool_calls.push_back(tc);
 
     // Emit the tool request
     callback(CallbackEvent::TOOL_CALL, tool_args, tool_name, tool_id);
@@ -185,13 +274,82 @@ void Backend::emit_tool_call() {
     buffered_tool_call.clear();
 }
 
+// Process output through channel parser (for GPT-OSS harmony format)
+// If model has channels: routes through ChannelParser first, then output()
+// If no channels: falls back to output() directly
+// Returns true to continue, false if cancelled or stop requested
+bool Backend::process_output(const char* text, size_t len) {
+    // In server mode, skip all filtering - client expects raw markdown
+    if (g_server_mode) {
+        return callback(CallbackEvent::CONTENT, std::string(text, len), "", "");
+    }
+
+    if (!channel_parsing_enabled_ || !channel_parser_) {
+        // No channel parsing - use existing output filter directly
+        return output(text, len);
+    }
+
+    // Route through channel parser first
+    std::string delta(text, len);
+    bool continue_generation = channel_parser_->process(delta,
+        [this](ChannelParsing::EventType evt, const std::string& content,
+               const std::string& tool_name, const std::string& args) -> bool {
+
+            switch (evt) {
+                case ChannelParsing::EventType::CONTENT:
+                case ChannelParsing::EventType::PREAMBLE:
+                    // Pass final channel content through existing output filter
+                    // (handles any nested tool calls or thinking markers)
+                    return output(content.c_str(), content.length());
+
+                case ChannelParsing::EventType::THINKING:
+                    // Analysis channel - emit as thinking if enabled
+                    if (show_thinking && callback) {
+                        return callback(CallbackEvent::THINKING, content, "", "");
+                    }
+                    return true;  // Suppress if not showing thinking
+
+                case ChannelParsing::EventType::TOOL_CALL: {
+                    // Commentary channel tool call - already extracted
+                    // Generate tool call ID and store for later use
+                    static int channel_tool_call_counter = 0;
+                    std::string tool_id = "call_" + std::to_string(++channel_tool_call_counter);
+
+                    // Store in pending_tool_calls for assistant message
+                    ToolParser::ToolCall tc;
+                    tc.name = tool_name;
+                    tc.tool_call_id = tool_id;
+                    tc.raw_json = args;
+                    pending_tool_calls.push_back(tc);
+
+                    if (callback) {
+                        return callback(CallbackEvent::TOOL_CALL, args, tool_name, tool_id);
+                    }
+                    return true;
+                }
+            }
+            return true;
+        });
+
+    return continue_generation;
+}
+
 // Unified output function - filters tool calls and thinking blocks
 // Returns true to continue, false if callback requested cancellation
 bool Backend::output(const char* text, size_t len) {
+    // Fast path for raw mode - skip all filtering
+    if (config->raw_output) {
+        if (callback) {
+            return callback(CallbackEvent::CONTENT, std::string(text, len), "", "");
+        }
+        return true;
+    }
+
     ensure_markers_initialized();
     bool cancelled = false;
 
-    dout(2) << "output() called: len=" << len << " filter_state=" << filter_state << " text=[" << std::string(text, std::min(len, (size_t)50)) << "]" << std::endl;
+    dout(2) << "output() called: len=" << len << " filter_state=" << filter_state
+            << " text=[" << std::string(text, std::min(len, (size_t)50)) << "]" << std::endl;
 
     for (size_t i = 0; i < len; i++) {
         char c = text[i];
@@ -233,9 +391,14 @@ bool Backend::output(const char* text, size_t len) {
                     tag_buffer = "<";
                     filter_state = FILTER_DETECTING_TAG;
                 } else if (c == '{' && !in_code_block) {
+                    // JSON tool call - enter tool call mode directly
+                    // (single-char marker, no need for FILTER_DETECTING_TAG)
                     if (!flush_output_buffer()) { cancelled = true; break; }
-                    tag_buffer = "{";
-                    filter_state = FILTER_DETECTING_TAG;
+                    in_tool_call = true;
+                    current_tag = "{";
+                    filter_state = FILTER_IN_TOOL_CALL;
+                    buffered_tool_call = "{";
+                    json_brace_depth = 1;
                 } else {
                     // Buffer regular output for batching
                     output_buffer += c;

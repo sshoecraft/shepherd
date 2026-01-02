@@ -242,30 +242,93 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
             jmsg["content"] = msg.content;
         } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
-            // Check if content is JSON array (from tool_use blocks)
-            try {
-                json content_json = json::parse(msg.content);
-                if (content_json.is_array()) {
-                    // Use the parsed JSON array directly
-                    jmsg["content"] = content_json;
-                } else {
-                    // Regular text content
+
+            // Check if this message has tool_calls (from OpenAI format)
+            if (!msg.tool_calls_json.empty()) {
+                try {
+                    json tool_calls = json::parse(msg.tool_calls_json);
+                    json content_array = json::array();
+
+                    // Add text content first if present
+                    // But skip if content is a JSON array (native Anthropic format with tool_use blocks)
+                    if (!msg.content.empty()) {
+                        bool is_json_array = false;
+                        try {
+                            json content_test = json::parse(msg.content);
+                            is_json_array = content_test.is_array();
+                        } catch (...) {}
+
+                        if (!is_json_array) {
+                            content_array.push_back({{"type", "text"}, {"text", msg.content}});
+                        }
+                    }
+
+                    // Convert OpenAI tool_calls to Anthropic tool_use blocks
+                    if (tool_calls.is_array()) {
+                        for (const auto& tc : tool_calls) {
+                            if (tc.contains("function")) {
+                                json tool_use;
+                                tool_use["type"] = "tool_use";
+                                tool_use["id"] = tc.value("id", "");
+                                tool_use["name"] = tc["function"].value("name", "");
+
+                                // Parse arguments string to JSON object
+                                if (tc["function"].contains("arguments")) {
+                                    std::string args_str = tc["function"]["arguments"].get<std::string>();
+                                    try {
+                                        tool_use["input"] = json::parse(args_str);
+                                    } catch (...) {
+                                        tool_use["input"] = json::object();
+                                    }
+                                } else {
+                                    tool_use["input"] = json::object();
+                                }
+                                content_array.push_back(tool_use);
+                            }
+                        }
+                    }
+
+                    jmsg["content"] = content_array;
+                } catch (const std::exception& e) {
+                    dout(1) << "Failed to parse tool_calls_json: " << e.what() << std::endl;
                     jmsg["content"] = msg.content;
                 }
-            } catch (...) {
-                // Not JSON, treat as regular text
-                jmsg["content"] = msg.content;
+            } else {
+                // Check if content is JSON array (from native tool_use blocks)
+                try {
+                    json content_json = json::parse(msg.content);
+                    if (content_json.is_array()) {
+                        jmsg["content"] = content_json;
+                    } else {
+                        jmsg["content"] = msg.content;
+                    }
+                } catch (...) {
+                    jmsg["content"] = msg.content;
+                }
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
             // Tool results are user messages with tool_result content blocks
+            // Anthropic requires all tool_results to be in a single user message
+            json tool_result_block = {
+                {"type", "tool_result"},
+                {"tool_use_id", msg.tool_call_id},
+                {"content", msg.content}
+            };
+
+            // Check if last message is already a user message with tool_result content
+            // If so, append to it instead of creating a new message
+            if (!messages.empty() && messages.back()["role"] == "user" &&
+                messages.back()["content"].is_array() &&
+                !messages.back()["content"].empty() &&
+                messages.back()["content"][0].contains("type") &&
+                messages.back()["content"][0]["type"] == "tool_result") {
+                // Append to existing tool_result message
+                messages.back()["content"].push_back(tool_result_block);
+                continue;  // Skip adding jmsg below
+            }
+
             jmsg["role"] = "user";
-            jmsg["content"] = json::array({
-                {
-                    {"type", "tool_result"},
-                    {"tool_use_id", msg.tool_call_id},
-                    {"content", msg.content}
-                }
-            });
+            jmsg["content"] = json::array({tool_result_block});
         }
 
         if (!jmsg.empty()) {
@@ -356,29 +419,98 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
             jmsg["content"] = msg.content;
         } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
-            // Check if content is JSON array (from tool_use blocks)
-            try {
-                json content_json = json::parse(msg.content);
-                if (content_json.is_array()) {
-                    // Use the parsed JSON array directly
-                    jmsg["content"] = content_json;
-                } else {
-                    // Regular text content
+
+            dout(1) << "Processing assistant message, tool_calls_json.empty()=" << (msg.tool_calls_json.empty() ? "true" : "false") << std::endl;
+            if (!msg.tool_calls_json.empty()) {
+                dout(1) << "tool_calls_json=" << msg.tool_calls_json << std::endl;
+            }
+
+            // Check if this message has tool_calls (from OpenAI format)
+            if (!msg.tool_calls_json.empty()) {
+                try {
+                    json tool_calls = json::parse(msg.tool_calls_json);
+                    json content_array = json::array();
+
+                    // Add text content first if present
+                    // But skip if content is a JSON array (native Anthropic format with tool_use blocks)
+                    if (!msg.content.empty()) {
+                        bool is_json_array = false;
+                        try {
+                            json content_test = json::parse(msg.content);
+                            is_json_array = content_test.is_array();
+                        } catch (...) {}
+
+                        if (!is_json_array) {
+                            content_array.push_back({{"type", "text"}, {"text", msg.content}});
+                        }
+                    }
+
+                    // Convert OpenAI tool_calls to Anthropic tool_use blocks
+                    if (tool_calls.is_array()) {
+                        for (const auto& tc : tool_calls) {
+                            if (tc.contains("function")) {
+                                json tool_use;
+                                tool_use["type"] = "tool_use";
+                                tool_use["id"] = tc.value("id", "");
+                                tool_use["name"] = tc["function"].value("name", "");
+
+                                // Parse arguments string to JSON object
+                                if (tc["function"].contains("arguments")) {
+                                    std::string args_str = tc["function"]["arguments"].get<std::string>();
+                                    try {
+                                        tool_use["input"] = json::parse(args_str);
+                                    } catch (...) {
+                                        tool_use["input"] = json::object();
+                                    }
+                                } else {
+                                    tool_use["input"] = json::object();
+                                }
+                                content_array.push_back(tool_use);
+                            }
+                        }
+                    }
+
+                    jmsg["content"] = content_array;
+                } catch (const std::exception& e) {
+                    dout(1) << "Failed to parse tool_calls_json: " << e.what() << std::endl;
                     jmsg["content"] = msg.content;
                 }
-            } catch (...) {
-                // Not JSON, treat as regular text
-                jmsg["content"] = msg.content;
+            } else {
+                // Check if content is JSON array (from native tool_use blocks)
+                try {
+                    json content_json = json::parse(msg.content);
+                    if (content_json.is_array()) {
+                        jmsg["content"] = content_json;
+                    } else {
+                        jmsg["content"] = msg.content;
+                    }
+                } catch (...) {
+                    jmsg["content"] = msg.content;
+                }
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
+            // Tool results are user messages with tool_result content blocks
+            // Anthropic requires all tool_results to be in a single user message
+            json tool_result_block = {
+                {"type", "tool_result"},
+                {"tool_use_id", msg.tool_call_id},
+                {"content", msg.content}
+            };
+
+            // Check if last message is already a user message with tool_result content
+            // If so, append to it instead of creating a new message
+            if (!messages.empty() && messages.back()["role"] == "user" &&
+                messages.back()["content"].is_array() &&
+                !messages.back()["content"].empty() &&
+                messages.back()["content"][0].contains("type") &&
+                messages.back()["content"][0]["type"] == "tool_result") {
+                // Append to existing tool_result message
+                messages.back()["content"].push_back(tool_result_block);
+                continue;  // Skip adding jmsg below
+            }
+
             jmsg["role"] = "user";
-            jmsg["content"] = json::array({
-                {
-                    {"type", "tool_result"},
-                    {"tool_use_id", msg.tool_call_id},
-                    {"content", msg.content}
-                }
-            });
+            jmsg["content"] = json::array({tool_result_block});
         }
 
         if (!jmsg.empty()) {
@@ -386,20 +518,30 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
         }
     }
 
-    // Add the new message
+    // Add the new message (the one being added via add_message)
     json new_msg;
     if (role == Message::USER) {
         new_msg["role"] = "user";
         new_msg["content"] = content;
     } else if (role == Message::TOOL_RESPONSE) {
-        new_msg["role"] = "user";
-        new_msg["content"] = json::array({
-            {
-                {"type", "tool_result"},
-                {"tool_use_id", tool_id},
-                {"content", content}
-            }
-        });
+        // Tool result - check if we should merge with previous tool_result message
+        json tool_result_block = {
+            {"type", "tool_result"},
+            {"tool_use_id", tool_id},
+            {"content", content}
+        };
+
+        if (!messages.empty() && messages.back()["role"] == "user" &&
+            messages.back()["content"].is_array() &&
+            !messages.back()["content"].empty() &&
+            messages.back()["content"][0].contains("type") &&
+            messages.back()["content"][0]["type"] == "tool_result") {
+            // Append to existing tool_result message
+            messages.back()["content"].push_back(tool_result_block);
+        } else {
+            new_msg["role"] = "user";
+            new_msg["content"] = json::array({tool_result_block});
+        }
     }
 
     if (!new_msg.empty()) {
@@ -577,6 +719,7 @@ void AnthropicBackend::add_message(Session& session,
         accumulated_resp.success = true;
         accumulated_resp.code = Response::SUCCESS;
         std::string accumulated_content;
+        std::string raw_response_data;  // Accumulate raw response for error parsing
         SSEParser sse_parser;
         bool stream_complete = false;
         bool message_started = false;
@@ -592,6 +735,11 @@ void AnthropicBackend::add_message(Session& session,
 
         // Streaming callback to process SSE chunks
         auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+            // Accumulate raw response for error parsing (limit to 4KB)
+            if (raw_response_data.length() < 4096) {
+                raw_response_data += chunk;
+            }
+
             // Process SSE events from chunk
             // We ignore the return value - always return true to curl to avoid "Failed writing" error
             // We track completion via stream_complete flag instead
@@ -639,9 +787,9 @@ void AnthropicBackend::add_message(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Route through unified output filter
-                                    if (!output(delta_text)) {
-                                        // User requested cancellation
+                                    // Route through unified output filter (includes channel parsing)
+                                    if (!process_output(delta_text)) {
+                                        // User requested cancellation or channel parser signaled stop
                                         return false;
                                     }
                                 }
@@ -761,7 +909,24 @@ void AnthropicBackend::add_message(Session& session,
             accumulated_resp.success = false;
             accumulated_resp.code = Response::ERROR;
             accumulated_resp.finish_reason = "error";
-            accumulated_resp.error = http_response.error_message;
+
+            // Try to extract error message from raw response data (API errors come as JSON)
+            std::string error_msg = http_response.error_message;
+            if (!raw_response_data.empty()) {
+                try {
+                    auto error_json = json::parse(raw_response_data);
+                    if (error_json.contains("error") && error_json["error"].contains("message")) {
+                        error_msg = error_json["error"]["message"].get<std::string>();
+                    }
+                } catch (...) {
+                    // Not JSON, use raw data if we don't have an error message
+                    if (error_msg.empty()) {
+                        error_msg = raw_response_data.substr(0, 200);
+                    }
+                }
+            }
+            accumulated_resp.error = error_msg;
+            callback(CallbackEvent::ERROR, error_msg, "api_error", "");
 
             // Check if context length error
             int tokens_to_evict = extract_tokens_to_evict(http_response);
@@ -773,12 +938,18 @@ void AnthropicBackend::add_message(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 // Evict messages
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
@@ -789,6 +960,10 @@ void AnthropicBackend::add_message(Session& session,
                 continue; // Retry
             }
 
+            // Non-context error - add TOOL_RESPONSE for session consistency
+            if (role == Message::TOOL_RESPONSE) {
+                add_tool_response(session, content, tool_name, tool_id);
+            }
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
 
@@ -917,4 +1092,193 @@ std::vector<std::string> AnthropicBackend::fetch_models() {
     }
 
     return result;
+}
+
+void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::generate_from_session(session, max_tokens);
+        return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "AnthropicBackend::generate_from_session (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
+
+    // Build request from session
+    nlohmann::json request = build_request_from_session(session, max_tokens);
+
+    // Add streaming flag
+    request["stream"] = true;
+
+    dout(1) << "Sending streaming request to Anthropic API (generate_from_session)" << std::endl;
+    dout(1) << "Request messages: " << request["messages"].dump() << std::endl;
+
+    // Get headers and endpoint
+    auto headers = get_api_headers();
+    std::string endpoint = get_api_endpoint();
+
+    // Streaming state
+    std::string accumulated_content;
+    SSEParser sse_parser;
+    bool stream_complete = false;
+    std::string finish_reason = "stop";
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+
+    // Tool use streaming state
+    struct ToolUseBlock {
+        std::string id;
+        std::string name;
+        std::string partial_json;
+    };
+    std::optional<ToolUseBlock> current_tool_block;
+    pending_tool_calls.clear();  // Clear any previous tool calls
+
+    // Streaming callback to process SSE chunks
+    auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+        sse_parser.process_chunk(chunk,
+            [&](const std::string& event_type, const std::string& data, const std::string& id) -> bool {
+                try {
+                    json event_json = json::parse(data);
+
+                    if (event_type == "message_start") {
+                        if (event_json.contains("message")) {
+                            const auto& message = event_json["message"];
+                            if (message.contains("usage")) {
+                                prompt_tokens = message["usage"].value("input_tokens", 0);
+                            }
+                        }
+                    }
+                    else if (event_type == "content_block_start") {
+                        if (event_json.contains("content_block")) {
+                            const auto& block = event_json["content_block"];
+                            std::string block_type = block.value("type", "");
+
+                            if (block_type == "tool_use") {
+                                current_tool_block = ToolUseBlock{
+                                    block.value("id", ""),
+                                    block.value("name", ""),
+                                    ""
+                                };
+                                dout(1) << "Tool use block starting: " + current_tool_block->name << std::endl;
+                            }
+                        }
+                    }
+                    else if (event_type == "content_block_delta") {
+                        if (event_json.contains("delta")) {
+                            const auto& delta = event_json["delta"];
+
+                            if (delta.contains("text")) {
+                                std::string delta_text = delta["text"].get<std::string>();
+                                accumulated_content += delta_text;
+
+                                // Route through unified output filter
+                                if (!process_output(delta_text)) {
+                                    return false;
+                                }
+                            }
+                            else if (delta.contains("partial_json")) {
+                                if (current_tool_block) {
+                                    current_tool_block->partial_json += delta["partial_json"].get<std::string>();
+                                }
+                            }
+                        }
+                    }
+                    else if (event_type == "content_block_stop") {
+                        if (current_tool_block) {
+                            try {
+                                nlohmann::json input = current_tool_block->partial_json.empty() ?
+                                    nlohmann::json::object() :
+                                    nlohmann::json::parse(current_tool_block->partial_json);
+
+                                ToolParser::ToolCall tool_call;
+                                tool_call.name = current_tool_block->name;
+                                tool_call.tool_call_id = current_tool_block->id;
+                                tool_call.raw_json = input.dump();
+
+                                for (auto it = input.begin(); it != input.end(); ++it) {
+                                    if (it.value().is_string()) {
+                                        tool_call.parameters[it.key()] = it.value().get<std::string>();
+                                    } else if (it.value().is_number_integer()) {
+                                        tool_call.parameters[it.key()] = it.value().get<int>();
+                                    } else if (it.value().is_number_float()) {
+                                        tool_call.parameters[it.key()] = it.value().get<double>();
+                                    } else if (it.value().is_boolean()) {
+                                        tool_call.parameters[it.key()] = it.value().get<bool>();
+                                    } else {
+                                        tool_call.parameters[it.key()] = it.value().dump();
+                                    }
+                                }
+
+                                pending_tool_calls.push_back(tool_call);
+                                dout(1) << "Tool use block complete: " + current_tool_block->name << std::endl;
+                            } catch (const std::exception& e) {
+                                dout(1) << std::string("WARNING: ") + "Failed to parse tool use JSON: " + std::string(e.what()) << std::endl;
+                            }
+                            current_tool_block.reset();
+                        }
+                    }
+                    else if (event_type == "message_delta") {
+                        if (event_json.contains("delta")) {
+                            const auto& delta = event_json["delta"];
+                            if (delta.contains("stop_reason")) {
+                                finish_reason = delta["stop_reason"].get<std::string>();
+                            }
+                        }
+                        if (event_json.contains("usage")) {
+                            completion_tokens = event_json["usage"].value("output_tokens", 0);
+                        }
+                    }
+                    else if (event_type == "message_stop") {
+                        stream_complete = true;
+                        return false;
+                    }
+                    else if (event_type == "error") {
+                        if (event_json.contains("error")) {
+                            const auto& error = event_json["error"];
+                            std::string error_msg = error.value("message", "Unknown error");
+                            callback(CallbackEvent::ERROR, error_msg, "error", "");
+                        }
+                        return false;
+                    }
+
+                } catch (const std::exception& e) {
+                    dout(1) << std::string("WARNING: ") + "Failed to parse Anthropic SSE data: " + std::string(e.what()) << std::endl;
+                }
+
+                return true;
+            });
+
+        return true;
+    };
+
+    // Make streaming HTTP call
+    HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                       stream_handler, nullptr);
+
+    // Check for HTTP errors
+    if (!http_response.is_success() && !stream_complete) {
+        std::string error_msg = http_response.error_message.empty() ? "API request failed" : http_response.error_message;
+        callback(CallbackEvent::ERROR, error_msg, "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+
+    // Flush any remaining output from the filter
+    flush_output();
+
+    // Update session token counts (session is source of truth)
+    if (prompt_tokens > 0 || completion_tokens > 0) {
+        session.total_tokens = prompt_tokens + completion_tokens;
+        session.last_prompt_tokens = prompt_tokens;
+        session.last_assistant_message_tokens = completion_tokens;
+    }
+
+    // Adjust finish reason for tool calls (pending_tool_calls is checked by API server)
+    if (!pending_tool_calls.empty()) {
+        finish_reason = "tool_calls";
+    }
+
+    callback(CallbackEvent::STOP, finish_reason, "", "");
 }

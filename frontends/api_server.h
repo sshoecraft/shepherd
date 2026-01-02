@@ -5,6 +5,7 @@
 #include "../session.h"
 #include <string>
 #include <mutex>
+#include <functional>
 
 /// @brief API Server - OpenAI-compatible HTTP API server
 class APIServer : public Server {
@@ -19,4 +20,8 @@ protected:
 private:
     // Mutex to serialize backend requests (single-threaded processing)
     std::mutex backend_mutex;
+
+    // Per-request output routing - set before generate, cleared after
+    // The callback routes events through this function when set
+    std::function<bool(CallbackEvent, const std::string&, const std::string&, const std::string&)> request_handler;
 };

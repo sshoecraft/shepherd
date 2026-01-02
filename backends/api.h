@@ -222,6 +222,16 @@ protected:
     /// Updates message token counts based on estimation, then calls eviction
     /// @param estimated_tokens Total estimated tokens in context
     void evict_with_estimation(int estimated_tokens);
+
+    /// @brief Add a tool response message to the session
+    /// @param session Session to add to
+    /// @param content Tool result content
+    /// @param tool_name Name of the tool
+    /// @param tool_id Tool call ID for correlation
+    void add_tool_response(Session& session,
+                           const std::string& content,
+                           const std::string& tool_name,
+                           const std::string& tool_id);
 };
 
 #if 0

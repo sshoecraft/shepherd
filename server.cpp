@@ -181,9 +181,8 @@ Server::Server(const std::string& host, int port, const std::string& server_type
         control_socket_path = "/tmp/shepherd.sock";
     }
 
-    // Stub callback for backend construction
-    // Servers handle streaming via per-request HTTP response writers rather than
-    // this callback. Each request creates its own streaming context.
+    // Default no-op callback - subclasses should set their own callback
+    // in their constructor to properly handle events
     callback = [](CallbackEvent event, const std::string& content,
                   const std::string& name, const std::string& id) -> bool {
         return true;
@@ -348,7 +347,35 @@ void Server::cleanup_control_socket() {
     }
 }
 
-int Server::run() {
+int Server::run(Provider* cmdline_provider) {
+
+    // Determine which provider to connect
+    Provider* provider_to_use = nullptr;
+    if (cmdline_provider) {
+        provider_to_use = cmdline_provider;
+    } else if (!providers.empty()) {
+        provider_to_use = &providers[0];  // Highest priority
+    }
+
+    if (!provider_to_use) {
+        std::cerr << "No providers configured. Use 'shepherd provider add' to configure." << std::endl;
+        return 1;
+    }
+
+    // Log loading message
+    dout(1) << "Loading Provider: " << provider_to_use->name << std::endl;
+
+    // Connect to provider
+    if (!connect_provider(provider_to_use->name)) {
+        std::cerr << "Failed to connect to provider '" << provider_to_use->name << "'" << std::endl;
+        return 1;
+    }
+
+    // Configure session based on backend capabilities
+    session.desired_completion_tokens = calculate_desired_completion_tokens(
+        backend->context_size, backend->max_output_tokens);
+    // Server mode: never auto-evict - return error to client instead
+    session.auto_evict = false;
 
     // Record start time
     start_time = std::chrono::steady_clock::now();

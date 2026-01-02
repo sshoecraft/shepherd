@@ -35,7 +35,7 @@ public:
 
     // Frontend interface
     void init(bool no_mcp = false, bool no_tools = false) override;
-    int run() override;
+    int run(Provider* cmdline_provider = nullptr) override;
 
     // Tool management (owned by this frontend)
     Tools tools;
@@ -44,19 +44,10 @@ public:
     bool init_ncurses();
     void shutdown();
 
-    // Output line types for formatting
-    enum class LineType {
-        USER,       // User input ("> " prefix, green)
-        TOOL_CALL,  // Tool call ("* " prefix, yellow)
-        TOOL_RESULT,// Tool result ("> " prefix, cyan)
-        ASSISTANT,  // Model output (default color, indented)
-        SYSTEM,     // System messages (red/gray)
-        THINKING    // Thinking content (gray)
-    };
-
     // Output area management (thread-safe)
-    void write_output(const std::string& text, LineType type);
-    void write_output(const char* text, size_t len, LineType type);
+    // Uses CallbackEvent for color/formatting (centralized in frontend.h)
+    void write_output(const std::string& text, CallbackEvent type);
+    void write_output(const char* text, size_t len, CallbackEvent type);
 
     // Input display (called by TerminalIO)
     void set_input_content(const std::string& content);
@@ -158,7 +149,6 @@ private:
     std::chrono::steady_clock::time_point last_escape_time;
 
     // Current output state
-    LineType current_line_type{LineType::ASSISTANT};
     bool in_escape_sequence = false;
     bool at_line_start{true};  // Track if we're at start of line for indentation
 

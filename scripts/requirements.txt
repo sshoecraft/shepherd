@@ -1,0 +1,21 @@
+# Requirements for shepherd scripts
+#
+# Core dependencies
+torch
+safetensors
+tqdm
+transformers
+
+# TensorRT-LLM engine building (build_engine.py)
+# Note: tensorrt_llm requires specific installation - see NVIDIA docs
+# Install in separate venv: ~/venvs/tensorrt
+
+# INT4 AWQ quantization (hfquant.py --bits 4)
+autoawq
+
+# INT8 SmoothQuant quantization (hfquant.py --bits 8)
+# Note: Requires vllm installed from source (~/src/vllm) for compatible compressed-tensors
+llmcompressor
+
+# Benchmarking (test_model.py) - optional
+datasets

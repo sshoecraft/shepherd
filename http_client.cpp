@@ -279,20 +279,13 @@ HttpResponse HttpClient::post(const std::string& url,
     dout(1) << "HTTP POST: " + url << std::endl;
     dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
+#ifdef _DEBUG
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
         dout(1) << "POST body:\n" + body << std::endl;
-#if 0
-        // Also write to file for easy inspection
-        std::ofstream dump_file("/tmp/shepherd_request.json");
-        if (dump_file.is_open()) {
-            dump_file << body;
-            dump_file.close();
-            dout(1) << "Request saved to /tmp/shepherd_request.json" << std::endl;
-        }
-#endif
     }
+#endif
 
     configure_curl();
 
@@ -334,9 +327,12 @@ HttpResponse HttpClient::post(const std::string& url,
         dout(1) << "HTTP POST completed with status: " + std::to_string(response.status_code) << std::endl;
         if (response.body.length() > 100) {
             dout(1) << "Response body (first 100 chars): " + response.body.substr(0, 100) << std::endl;
+#ifdef _DEBUG
+            extern int g_debug_level;
             if (g_debug_level >= 5) {
                 dout(1) << "Full response body:\n" + response.body << std::endl;
             }
+#endif
         } else {
             dout(1) << "Response body: " + response.body << std::endl;
         }
@@ -365,11 +361,13 @@ HttpResponse HttpClient::post_stream(const std::string& url,
     dout(1) << "HTTP POST (streaming): " + url << std::endl;
     dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
+#ifdef _DEBUG
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
         dout(1) << "POST body:\n" + body << std::endl;
     }
+#endif
 
     configure_curl();
 
@@ -438,11 +436,13 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
     dout(1) << "HTTP POST (streaming cancellable): " + url << std::endl;
     dout(1) << "POST body length: " + std::to_string(body.length()) << std::endl;
 
+#ifdef _DEBUG
     // Dump full request body at high debug level
     extern int g_debug_level;
     if (g_debug_level >= 5 && body.length() < 50000) {
         dout(1) << "POST body:\n" + body << std::endl;
     }
+#endif
 
     configure_curl();
 

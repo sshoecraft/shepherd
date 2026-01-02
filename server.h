@@ -47,8 +47,9 @@ public:
     virtual ~Server();
 
     /// @brief Run the server - starts TCP and control socket listeners
+    /// @param cmdline_provider Optional provider from command-line override
     /// @return 0 on success, non-zero on error
-    int run() override;
+    int run(Provider* cmdline_provider = nullptr) override;
 
     /// @brief Initiate graceful shutdown
     void shutdown();

@@ -106,6 +106,7 @@ Provider Provider::from_json(const json& j) {
     p.gpu_layers = j.value("gpu_layers", -1);
     p.gpu_id = j.value("gpu_id", 0);
     p.n_batch = j.value("n_batch", 512);
+    p.ubatch = j.value("ubatch", 512);
     p.n_threads = j.value("n_threads", 0);
     p.cache_type = j.value("cache_type", "f16");
 
@@ -194,6 +195,7 @@ json Provider::to_json() const {
         if (type == "tensorrt") j["gpu_id"] = gpu_id;
         if (type == "llamacpp") {
             j["n_batch"] = n_batch;
+            j["ubatch"] = ubatch;
             if (n_threads > 0) j["n_threads"] = n_threads;
             j["cache_type"] = cache_type;
         }
@@ -257,6 +259,7 @@ Provider Provider::from_config() {
     if (config->json.contains("gpu_layers")) p.gpu_layers = config->json["gpu_layers"];
     if (config->json.contains("gpu_id")) p.gpu_id = config->json["gpu_id"];
     if (config->json.contains("n_batch")) p.n_batch = config->json["n_batch"];
+    if (config->json.contains("ubatch")) p.ubatch = config->json["ubatch"];
     if (config->json.contains("n_threads")) p.n_threads = config->json["n_threads"];
     if (config->json.contains("cache_type")) p.cache_type = config->json["cache_type"];
     if (config->json.contains("num_ctx")) p.num_ctx = config->json["num_ctx"];
@@ -307,8 +310,9 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         config->json["temperature"] = temperature;
         config->json["top_p"] = top_p;
         if (top_k > 0) config->json["top_k"] = top_k;
-        if (frequency_penalty != 0.0f) config->json["frequency_penalty"] = frequency_penalty;
-        if (presence_penalty != 0.0f) config->json["presence_penalty"] = presence_penalty;
+        config->json["repeat_penalty"] = repeat_penalty;
+        config->json["frequency_penalty"] = frequency_penalty;
+        config->json["presence_penalty"] = presence_penalty;
         if (max_tokens > 0) config->json["max_tokens"] = max_tokens;
         config->json["ssl_verify"] = ssl_verify;
         if (!ca_bundle_path.empty()) config->json["ca_bundle_path"] = ca_bundle_path;
@@ -549,6 +553,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			}
 			if (prov->type == "llamacpp") {
 				callback("n_batch = " + std::to_string(prov->n_batch) + "\n");
+				callback("ubatch = " + std::to_string(prov->ubatch) + "\n");
 				if (prov->n_threads > 0) {
 					callback("n_threads = " + std::to_string(prov->n_threads) + "\n");
 				}
@@ -572,12 +577,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("top_p = " + std::to_string(prov->top_p) + "\n");
 			callback("top_k = " + std::to_string(prov->top_k) + "\n");
 			callback("repeat_penalty = " + std::to_string(prov->repeat_penalty) + "\n");
-			if (prov->frequency_penalty != 0.0f) {
-				callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
-			}
-			if (prov->presence_penalty != 0.0f) {
-				callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
-			}
+			callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
+			callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
 			if (prov->max_tokens > 0) {
 				callback("max_tokens = " + std::to_string(prov->max_tokens) + "\n");
 			}
@@ -687,15 +688,17 @@ int handle_provider_args(const std::vector<std::string>& args,
 			if (new_key != masked_key && !new_key.empty()) {
 				prov->api_key = new_key;
 			}
-			if (!prov->base_url.empty() || prov->type == "ollama") {
-				prov->base_url = prompt("base_url", prov->base_url);
-			}
+			// Always show base_url for API backends - needed for OpenAI-compatible APIs
+			prov->base_url = prompt("base_url", prov->base_url);
 
 			// Sampling parameters for API backends
 			callback("\n--- Sampling Parameters ---\n");
 			prov->temperature = prompt_float("temperature", prov->temperature);
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
+			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
+			prov->frequency_penalty = prompt_float("frequency_penalty", prov->frequency_penalty);
+			prov->presence_penalty = prompt_float("presence_penalty", prov->presence_penalty);
 		} else if (prov->type == "llamacpp" || prov->type == "tensorrt") {
 			callback("\n--- Local Backend Settings ---\n");
 			prov->model = prompt("model", prov->model);
@@ -706,6 +709,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 			if (prov->type == "llamacpp") {
 				prov->n_batch = prompt_int("n_batch", prov->n_batch);
+				prov->ubatch = prompt_int("ubatch", prov->ubatch);
 				prov->n_threads = prompt_int("n_threads", prov->n_threads);
 				prov->cache_type = prompt("cache_type", prov->cache_type);
 			} else if (prov->type == "tensorrt") {
@@ -718,6 +722,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
 			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
+			prov->frequency_penalty = prompt_float("frequency_penalty", prov->frequency_penalty);
+			prov->presence_penalty = prompt_float("presence_penalty", prov->presence_penalty);
 		} else if (prov->type == "ollama") {
 			callback("\n--- Ollama Settings ---\n");
 			prov->model = prompt("model", prov->model);
@@ -731,6 +737,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			prov->top_p = prompt_float("top_p", prov->top_p);
 			prov->top_k = prompt_int("top_k", prov->top_k);
 			prov->repeat_penalty = prompt_float("repeat_penalty", prov->repeat_penalty);
+			prov->frequency_penalty = prompt_float("frequency_penalty", prov->frequency_penalty);
+			prov->presence_penalty = prompt_float("presence_penalty", prov->presence_penalty);
 		}
 
 		// Confirm save
@@ -755,7 +763,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			         "  api_key, base_url, client_id, client_secret, token_url, token_scope\n"
 			         "  deployment_name, api_version, ssl_verify, ca_bundle_path\n"
 			         "\nLocal backends (llamacpp, tensorrt):\n"
-			         "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, n_threads, cache_type\n"
+			         "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, ubatch, n_threads, cache_type\n"
 			         "\nOllama:\n"
 			         "  num_ctx, num_predict\n"
 			         "\nSampling:\n"
@@ -827,6 +835,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->gpu_id = std::stoi(value);
 			} else if (field == "n_batch") {
 				prov->n_batch = std::stoi(value);
+			} else if (field == "ubatch") {
+				prov->ubatch = std::stoi(value);
 			} else if (field == "n_threads") {
 				prov->n_threads = std::stoi(value);
 			} else if (field == "cache_type") {
@@ -934,6 +944,9 @@ int handle_provider_args(const std::vector<std::string>& args,
 			// Get event callback from current backend
 			auto event_cb = (*backend)->callback;
 
+			// Output loading message before attempting connection
+			callback("Loading Provider: " + name + "\n");
+
 			// Try to connect to new provider BEFORE shutting down old one
 			std::unique_ptr<Backend> new_backend;
 			try {
@@ -957,6 +970,25 @@ int handle_provider_args(const std::vector<std::string>& args,
 			(*backend)->shutdown();
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
+
+			// Check if session needs context adjustment for new provider
+			size_t new_ctx = (*backend)->context_size;
+			if (new_ctx > 0 && session->total_tokens > 0) {
+				// Reserve space for at least one response
+				int reserved = session->desired_completion_tokens > 0 ? session->desired_completion_tokens : 2048;
+				int available = static_cast<int>(new_ctx) - reserved;
+
+				if (session->total_tokens > available) {
+					int tokens_over = session->total_tokens - available;
+					callback("Context adjustment: evicting " + std::to_string(tokens_over) +
+					         " tokens to fit new provider's " + std::to_string(new_ctx) + " context\n");
+
+					auto ranges = session->calculate_messages_to_evict(tokens_over);
+					if (!ranges.empty()) {
+						session->evict_messages(ranges);
+					}
+				}
+			}
 
 			if (current_provider) {
 				*current_provider = name;
@@ -1000,6 +1032,9 @@ int handle_provider_args(const std::vector<std::string>& args,
 			// Get event callback from current backend
 			auto event_cb = (*backend)->callback;
 
+			// Output loading message before attempting connection
+			callback("Loading Provider: " + next_prov->name + "\n");
+
 			// Try to connect to new provider BEFORE shutting down old one
 			std::unique_ptr<Backend> new_backend;
 			try {
@@ -1022,6 +1057,25 @@ int handle_provider_args(const std::vector<std::string>& args,
 			(*backend)->shutdown();
 			*backend = std::move(new_backend);
 			session->backend = (*backend).get();
+
+			// Check if session needs context adjustment for new provider
+			size_t new_ctx = (*backend)->context_size;
+			if (new_ctx > 0 && session->total_tokens > 0) {
+				// Reserve space for at least one response
+				int reserved = session->desired_completion_tokens > 0 ? session->desired_completion_tokens : 2048;
+				int available = static_cast<int>(new_ctx) - reserved;
+
+				if (session->total_tokens > available) {
+					int tokens_over = session->total_tokens - available;
+					callback("Context adjustment: evicting " + std::to_string(tokens_over) +
+					         " tokens to fit new provider's " + std::to_string(new_ctx) + " context\n");
+
+					auto ranges = session->calculate_messages_to_evict(tokens_over);
+					if (!ranges.empty()) {
+						session->evict_messages(ranges);
+					}
+				}
+			}
 
 			if (current_provider) {
 				*current_provider = next_prov->name;

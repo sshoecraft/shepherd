@@ -32,6 +32,7 @@ public:
     std::vector<std::string> get_tool_call_end_markers() const override;
     std::vector<std::string> get_thinking_start_markers() const override;
     std::vector<std::string> get_thinking_end_markers() const override;
+    const ChatTemplates::ChatTemplateCaps* get_chat_template_caps() const override;
 
     // Helper methods
     bool is_ready() const;
@@ -84,16 +85,30 @@ private:
     /// @brief Parse JSON arguments from tool call
     std::map<std::string, std::any> parse_json_to_args(const std::string& json);
 
-    /// @brief Render a single message through the chat template
-    /// @param msg Message to render
+    /// @brief Render a message using full conversation context
+    /// Uses format_message_incremental which renders full conversation and extracts diff
+    /// @param all_messages All messages in conversation so far
+    /// @param target_index Index of message to render
+    /// @param tools Available tools for template
     /// @param add_generation_prompt Whether to add generation prompt
-    /// @return Rendered message text ready for tokenization
-    std::string render_message(const Message& msg, bool add_generation_prompt = false);
+    /// @return Rendered message text for the target message only
+    std::string render_message(
+        const std::vector<Message>& all_messages,
+        size_t target_index,
+        const std::vector<Session::Tool>& tools,
+        bool add_generation_prompt = false);
 
-    /// @brief Format a single message and decode it into KV cache
-    /// @param msg Message to format and decode
+    /// @brief Format a message with full conversation context and decode into KV cache
+    /// @param all_messages All messages in conversation (including the one to decode)
+    /// @param target_index Index of message to decode
+    /// @param tools Available tools
+    /// @param add_generation_prompt Whether to add generation prompt
     /// @return True if successful, false otherwise
-    bool format_and_decode_message(Message& msg);
+    bool format_and_decode_message(
+        std::vector<Message>& all_messages,
+        size_t target_index,
+        const std::vector<Session::Tool>& tools,
+        bool add_generation_prompt = false);
 
     /// @brief Log token state comparison (messages vs KV cache) at debug level 3+
     /// @param context Description of where this is being called from
@@ -120,7 +135,8 @@ private:
     void* model = nullptr;     // llama_model*
     std::string model_path;
     std::string chat_template_text; // Cached chat template from model
-    int n_batch = 512; // Batch size for prompt processing (set during init)
+    int n_batch = 512;  // Logical batch size for prompt processing
+    int n_ubatch = 512; // Physical micro-batch size (must be <= n_batch)
 
     // State tracking
     // For server mode: backend maintains its own session tracking what's in KV cache

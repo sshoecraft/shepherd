@@ -30,7 +30,7 @@ public:
 
     // Frontend interface
     void init(bool no_mcp = false, bool no_tools = false) override;
-    int run() override;
+    int run(Provider* cmdline_provider = nullptr) override;
 
     // Tool management
     Tools tools;

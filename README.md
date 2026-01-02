@@ -1449,6 +1449,38 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ---
 
+## Testing
+
+Shepherd includes a comprehensive test suite for regression testing and validation.
+
+### Running Tests
+
+```bash
+# Install Google Test (Ubuntu/Debian)
+sudo apt-get install libgtest-dev
+
+# Enable tests in build
+echo "TESTS=ON" >> ~/.shepherd_opts
+
+# Configure and build
+make gconfig
+make
+cd build && make test_unit test_tools
+
+# Run tests
+./tests/test_unit
+./tests/test_tools
+```
+
+### Test Documentation
+
+- **[docs/testing.md](docs/testing.md)** - Complete test plan with unit and server tests
+- **[docs/testing_manual_checklist.md](docs/testing_manual_checklist.md)** - Manual testing procedures for UI and interactive features
+
+Provider tests are included in `test_unit` since providers are core functionality. Tests automatically run against your configured providers from `~/.config/shepherd/providers/` and skip unconfigured provider types.
+
+---
+
 ## License
 
 **PolyForm Shield License 1.0.0**

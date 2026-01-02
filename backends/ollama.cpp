@@ -657,8 +657,8 @@ void OllamaBackend::add_message(Session& session,
                             accumulated_content += delta_text;
                             accumulated_resp.content = accumulated_content;
 
-                            // Route through unified output filter
-                            if (!output(delta_text)) {
+                            // Route through unified output filter (includes channel parsing)
+                            if (!process_output(delta_text)) {
                                 stream_complete = true;
                                 return true;
                             }
@@ -734,11 +734,17 @@ void OllamaBackend::add_message(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
@@ -749,6 +755,10 @@ void OllamaBackend::add_message(Session& session,
                 continue;
             }
 
+            // Non-context error - add TOOL_RESPONSE for session consistency
+            if (role == Message::TOOL_RESPONSE) {
+                add_tool_response(session, content, tool_name, tool_id);
+            }
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
 

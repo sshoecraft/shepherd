@@ -11,6 +11,7 @@
 #include "tools/memory_tools.h"
 #include "tools/mcp_resource_tools.h"
 #include "tools/core_tools.h"
+#include "tools/api_tools.h"
 #include "config.h"
 #include "provider.h"
 #include "scheduler.h"
@@ -22,11 +23,12 @@
 #include <chrono>
 
 // External globals
-extern int g_debug_level;
 extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
 extern bool g_disable_scheduler;
 
+#ifdef _DEBUG
+extern int g_debug_level;
 // Debug helper
 static void tui_debug(int level, const std::string& text) {
     if (g_debug_level >= level) {
@@ -43,6 +45,9 @@ static void tui_debug(int level, const std::string& text) {
         }
     }
 }
+#else
+static void tui_debug(int, const std::string&) {}
+#endif
 
 // Global TUI instance
 TUI* g_tui = nullptr;
@@ -245,17 +250,22 @@ void TUI::destroy_windows() {
     if (status_win) { delwin(status_win); status_win = nullptr; }
 }
 
-// Helper to get ncurses color pair for line type
-static int get_color_for_type(TUI::LineType type) {
-    switch (type) {
-        case TUI::LineType::USER:       return PAIR_GREEN;
-        case TUI::LineType::TOOL_CALL:  return PAIR_YELLOW;
-        case TUI::LineType::TOOL_RESULT: return PAIR_GREEN;
-        case TUI::LineType::SYSTEM:     return PAIR_RED;
-        case TUI::LineType::THINKING:   return PAIR_GRAY;
-        case TUI::LineType::ASSISTANT:  return PAIR_DEFAULT;
-        default: return PAIR_DEFAULT;
+// Map FrontendColor (from frontend.h) to ncurses color pair
+static int ncurses_from_color(FrontendColor color) {
+    switch (color) {
+        case FrontendColor::GREEN:   return PAIR_GREEN;
+        case FrontendColor::YELLOW:  return PAIR_YELLOW;
+        case FrontendColor::RED:     return PAIR_RED;
+        case FrontendColor::CYAN:    return PAIR_CYAN;
+        case FrontendColor::GRAY:    return PAIR_GRAY;
+        case FrontendColor::DEFAULT: return PAIR_DEFAULT;
     }
+    return PAIR_DEFAULT;
+}
+
+// Helper to get ncurses color pair for callback event type
+static int get_color_for_event_ncurses(CallbackEvent event) {
+    return ncurses_from_color(get_color_for_event(event));
 }
 
 void TUI::draw_output() {
@@ -798,19 +808,22 @@ int TUI::count_input_lines() const {
     return lines;
 }
 
-void TUI::write_output(const std::string& text, LineType type) {
+void TUI::write_output(const std::string& text, CallbackEvent type) {
     write_output(text.c_str(), text.length(), type);
 }
 
-void TUI::write_output(const char* text_data, size_t len, LineType type) {
-    // Set color for this output type
-    int color = get_color_for_type(type);
+void TUI::write_output(const char* text_data, size_t len, CallbackEvent type) {
+    // Set color for this output type (uses centralized mapping from frontend.h)
+    int color = get_color_for_event_ncurses(type);
     if (color != PAIR_DEFAULT) {
         wattron(output_pad, COLOR_PAIR(color));
     }
-    if (type == LineType::THINKING) {
+    if (type == CallbackEvent::THINKING) {
         wattron(output_pad, A_DIM);
     }
+
+    // Get indent from centralized config (frontend.h)
+    int indent_spaces = get_indent_for_event(type);
 
     // Write to pad, stripping ANSI escapes
     for (size_t i = 0; i < len; i++) {
@@ -830,6 +843,14 @@ void TUI::write_output(const char* text_data, size_t len, LineType type) {
 
         if (c == '\r') continue;  // Skip carriage returns
 
+        // Add indentation at line starts
+        if (at_line_start && c != '\n' && indent_spaces > 0) {
+            for (int j = 0; j < indent_spaces; j++) {
+                waddch(output_pad, ' ');
+            }
+            at_line_start = false;
+        }
+
         // Write character to pad
         waddch(output_pad, c);
 
@@ -841,7 +862,7 @@ void TUI::write_output(const char* text_data, size_t len, LineType type) {
     }
 
     // Turn off attributes
-    if (type == LineType::THINKING) {
+    if (type == CallbackEvent::THINKING) {
         wattroff(output_pad, A_DIM);
     }
     if (color != PAIR_DEFAULT) {
@@ -975,23 +996,23 @@ bool TUI::wait_for_input(int timeout_ms) {
 // ============================================================================
 
 void TUI::show_tool_call(const std::string& name, const std::string& params) {
-    std::string msg = name + "(" + params + ")";
-    write_output(msg + "\n", LineType::TOOL_CALL);
+    // Indentation handled by write_output via get_indent_for_event()
+    std::string msg = name + "(" + params + ")\n";
+    write_output(msg, CallbackEvent::TOOL_CALL);
 }
 
 void TUI::show_tool_result(const std::string& summary, bool success) {
-    // Display one-line summary with 4-space indent
-    // Green for success (TOOL_RESULT), red for error (SYSTEM)
-    std::string msg = "    " + summary + "\n";
-    write_output(msg, success ? LineType::TOOL_RESULT : LineType::SYSTEM);
+    // Indentation handled by write_output via get_indent_for_event()
+    std::string msg = summary + "\n";
+    write_output(msg, success ? CallbackEvent::TOOL_RESULT : CallbackEvent::SYSTEM);
 }
 
 void TUI::show_error(const std::string& error) {
-    write_output("Error: " + error + "\n", LineType::SYSTEM);
+    write_output("Error: " + error + "\n", CallbackEvent::SYSTEM);
 }
 
 void TUI::show_cancelled() {
-    write_output("[Cancelled]\n", LineType::SYSTEM);
+    write_output("[Cancelled]\n", CallbackEvent::SYSTEM);
 }
 
 // ============================================================================
@@ -1020,65 +1041,47 @@ bool TUI::output_callback(CallbackEvent type, const std::string& content,
             }
         }
         formatted += "\n";
-        write_output(formatted, LineType::USER);
+        write_output(formatted, CallbackEvent::USER_PROMPT);
         return true;
     }
 
-    // Handle CONTENT (assistant) messages with indentation
+    // Handle CONTENT (assistant) messages
     if (type == CallbackEvent::CONTENT) {
         // Debug: log what we receive
         dout(2) << "CONTENT callback: len=" << content.length() << " content=[" << content << "]" << std::endl;
-
-        // Indent each line of assistant output
-        // Use at_line_start to track across streaming callbacks
-        std::string formatted;
-        for (char c : content) {
-            if (at_line_start && c != '\n') {
-                formatted += "  ";  // 2-space indent
-                at_line_start = false;
-            }
-            formatted += c;
-            if (c == '\n') {
-                at_line_start = true;
-            }
-        }
-        write_output(formatted, LineType::ASSISTANT);
+        // Indentation handled by write_output via get_indent_for_event()
+        write_output(content, CallbackEvent::CONTENT);
         return true;
     }
 
-    // Handle CODEBLOCK with different formatting (cyan, 4-space indent)
+    // Handle CODEBLOCK - indentation handled by write_output
     if (type == CallbackEvent::CODEBLOCK) {
-        std::string formatted;
-        for (char c : content) {
-            if (at_line_start && c != '\n') {
-                formatted += "    ";  // 4 spaces for code blocks
-                at_line_start = false;
-            }
-            formatted += c;
-            if (c == '\n') {
-                at_line_start = true;
-            }
-        }
-        write_output(formatted, LineType::TOOL_RESULT);  // Cyan color
+        write_output(content, CallbackEvent::CODEBLOCK);
         return true;
     }
 
     // Handle remaining event types
     switch (type) {
         case CallbackEvent::SYSTEM:
-            write_output(content, LineType::SYSTEM);
+            write_output(content, CallbackEvent::SYSTEM);
             break;
         case CallbackEvent::THINKING:
-            write_output(content, LineType::THINKING);
+            write_output(content, CallbackEvent::THINKING);
+            break;
+        case CallbackEvent::STATS:
+            // Only show stats if enabled via --stats flag
+            if (config->stats) {
+                write_output(content, CallbackEvent::THINKING);  // Gray/dim like thinking
+            }
             break;
         case CallbackEvent::ERROR:
-            write_output("Error: " + content + "\n", LineType::SYSTEM);
+            write_output("Error: " + content + "\n", CallbackEvent::SYSTEM);
             break;
         case CallbackEvent::STOP:
             // STOP signals completion - content is finish_reason, not for display
             // Ensure we're at a new line for next prompt
             if (!at_line_start) {
-                write_output("\n", LineType::ASSISTANT);
+                write_output("\n", CallbackEvent::CONTENT);
                 at_line_start = true;
             }
             break;
@@ -1099,15 +1102,45 @@ static std::optional<ToolParser::ToolCall> tui_extract_tool_call(const Response&
     return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
 }
 
-int TUI::run() {
+int TUI::run(Provider* cmdline_provider) {
     tui_debug(1, "Starting TUI mode");
 
+    // Determine which provider to connect
+    Provider* provider_to_use = nullptr;
+    if (cmdline_provider) {
+        provider_to_use = cmdline_provider;
+    } else if (!providers.empty()) {
+        provider_to_use = &providers[0];  // Highest priority
+    }
+
+    if (!provider_to_use) {
+        callback(CallbackEvent::SYSTEM, "No providers configured. Use 'shepherd provider add' to configure.\n", "", "");
+        return 1;
+    }
+
+    // Output loading message (no newline - we'll add completion indicator)
+    callback(CallbackEvent::SYSTEM, "Loading Provider: " + provider_to_use->name, "", "");
+
+    // Connect to provider
+    if (!connect_provider(provider_to_use->name)) {
+        callback(CallbackEvent::SYSTEM, " - FAILED\n", "", "");
+        return 1;
+    }
+    // Register other providers as tools
+    register_provider_tools(tools, current_provider);
+
+    // Populate session.tools from our tools instance
     tools.populate_session_tools(session);
 
     // Copy tool names to backend for output filtering
     for (const auto& tool : session.tools) {
         backend->valid_tool_names.insert(tool.name);
     }
+
+    // Configure session based on backend capabilities
+    session.desired_completion_tokens = calculate_desired_completion_tokens(
+        backend->context_size, backend->max_output_tokens);
+    session.auto_evict = (backend->context_size > 0 && !backend->is_local);
 
     Scheduler scheduler;
     if (!g_disable_scheduler) {
@@ -1116,6 +1149,7 @@ int TUI::run() {
         tui_debug(1, "Scheduler initialized");
     }
 
+    // Start generation thread AFTER backend is connected
     GenerationThread gen_thread;
     gen_thread.init(&session);
     gen_thread.start();
@@ -1271,7 +1305,7 @@ int TUI::run() {
                 continue;
             } else {
                 tui_debug(1, "Generation complete");
-                write_output("\n", LineType::ASSISTANT);
+                write_output("\n", CallbackEvent::CONTENT);
                 clear_queued_input_display();
                 in_tool_loop = false;
                 tool_loop_iteration = 0;

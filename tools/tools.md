@@ -88,14 +88,109 @@ Tools can be enabled/disabled via:
 
 Disabled tools are excluded from session.tools and will return an error if executed.
 
-## Provider-as-Tool
+## Provider-as-Tool (API Tools)
 
-When using API providers, non-active providers are registered as tools:
-- If using OpenAI, `ask_anthropic` and `ask_google` become available
-- Allows model to delegate to other providers for specialized tasks
-- Managed via `register_provider_tools(active_provider)`
+When using API providers, non-active providers are registered as tools (e.g., `ask_anthropic`, `ask_flash`). This enables multi-model collaboration where one model can delegate to another for specialized tasks.
+
+### Architecture
+
+**APIToolAdapter** (`api_tools.h`, `api_tools.cpp`) wraps an API provider as a callable tool:
+
+```
+APIToolAdapter
+├── Provider provider          # Provider config (type, model, API key, etc.)
+├── Session tool_session       # Dedicated session for this tool
+├── unique_ptr<Backend> backend # Persistent backend (created once)
+├── connected                   # Lazy initialization flag
+└── callback state              # Accumulated content, pending tool calls
+```
+
+### Design Principles
+
+**Mirrors CLI Pattern**: Uses `Provider.connect()` - the same flow as the main CLI:
+- No global config manipulation
+- Backend created once on first use, reused for subsequent calls
+- Each tool has its own Session with proper sampling parameters
+
+**Lazy Initialization**: Backend is created on first `execute()` call via `ensure_connected()`:
+1. Creates callback that captures CONTENT, TOOL_CALL, ERROR events
+2. Disables streaming (sub-backends must complete before returning)
+3. Calls `Provider.connect(tool_session, callback)`
+4. Backend persists across multiple calls
+
+**Stateless Sessions**: After each call, the session is cleared:
+```cpp
+tool_session.messages.clear();
+tool_session.total_tokens = 0;
+```
+
+### Nested Tool Execution
+
+API tools can themselves use tools. When `ask_flash` calls `get_time`:
+
+```
+ask_flash(prompt="what time is it")
+  get_time({})
+    04:30:14
+  The current time is 04:30:14.
+```
+
+The tool loop:
+1. Add user message to `tool_session`
+2. Call `backend->generate_from_session()`
+3. If TOOL_CALL events received, execute those tools
+4. Add tool results to session
+5. Loop until no more tool calls (max 10 iterations)
+6. Return accumulated content
+
+### Registration
+
+```cpp
+// Register all non-active providers as tools
+register_provider_tools(tools, active_provider_name);
+
+// Register single provider
+register_provider_as_tool(tools, "anthropic");
+
+// Unregister
+unregister_provider_tool(tools, "anthropic");
+```
+
+When switching providers (`/provider use X`), tools are automatically re-registered to exclude the new active provider.
+
+### Tool Parameters
+
+Each API tool accepts:
+- `prompt` (required): The question or request
+- `max_tokens` (optional): Maximum tokens to generate
+
+### Example Usage
+
+```
+> use the ask_flash tool "what's the capital of France"
+
+ask_flash(prompt=what's the capital of France)
+  The capital of France is Paris.
+```
+
+With nested tools:
+```
+> use the ask_openai tool "what time is it"
+
+ask_openai(prompt=what time is it)
+  get_time({})
+    14:30:25
+  The current time is 14:30:25.
+```
 
 ## History
+
+- v2.7.0: Refactored APIToolAdapter to mirror CLI pattern
+  - Uses Provider.connect() instead of global config swapping
+  - Backend created once on first use (lazy initialization)
+  - Each API tool has its own Session (thread-safe, no shared state)
+  - Added nested tool call display with indentation
+  - Fixed Gemini callback to emit TOOL_CALL events
 
 - v2.6.0: Replaced ToolRegistry singleton with instance-based Tools class
   - CLI and CLIServer each own their Tools instance

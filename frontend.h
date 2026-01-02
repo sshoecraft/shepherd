@@ -13,6 +13,53 @@
 // Forward declaration
 class Tools;
 
+/// @brief Logical colors for frontend output
+/// Maps to ANSI codes (CLI) or ncurses pairs (TUI)
+enum class FrontendColor {
+    DEFAULT,  // White/default terminal color
+    GREEN,    // User input, tool results
+    YELLOW,   // Tool calls
+    RED,      // Errors, system warnings
+    CYAN,     // Code blocks
+    GRAY      // Thinking, dim text
+};
+
+/// @brief Get logical color for a callback event type
+/// Centralizes color decisions so CLI and TUI are consistent
+inline FrontendColor get_color_for_event(CallbackEvent event) {
+    switch (event) {
+        case CallbackEvent::USER_PROMPT:  return FrontendColor::GREEN;
+        case CallbackEvent::TOOL_CALL:    return FrontendColor::YELLOW;
+        case CallbackEvent::TOOL_RESULT:  return FrontendColor::GREEN;
+        case CallbackEvent::ERROR:        return FrontendColor::RED;
+        case CallbackEvent::SYSTEM:       return FrontendColor::RED;
+        case CallbackEvent::THINKING:     return FrontendColor::GRAY;
+        case CallbackEvent::CODEBLOCK:    return FrontendColor::CYAN;
+        case CallbackEvent::CONTENT:      return FrontendColor::DEFAULT;
+        case CallbackEvent::STOP:         return FrontendColor::DEFAULT;
+        case CallbackEvent::STATS:        return FrontendColor::GRAY;
+        default:                          return FrontendColor::DEFAULT;
+    }
+}
+
+/// @brief Get indentation (number of spaces) for a callback event type
+/// Centralizes formatting so CLI and TUI are consistent
+inline int get_indent_for_event(CallbackEvent event) {
+    switch (event) {
+        case CallbackEvent::USER_PROMPT:  return 0;  // "> " prefix handled separately
+        case CallbackEvent::SYSTEM:       return 0;
+        case CallbackEvent::ERROR:        return 0;
+        case CallbackEvent::TOOL_CALL:    return 2;  // "  read(...)"
+        case CallbackEvent::TOOL_RESULT:  return 4;  // "    Output: ..."
+        case CallbackEvent::CONTENT:      return 2;  // Assistant response
+        case CallbackEvent::THINKING:     return 2;
+        case CallbackEvent::CODEBLOCK:    return 4;
+        case CallbackEvent::STATS:        return 2;
+        case CallbackEvent::STOP:         return 0;
+        default:                          return 0;
+    }
+}
+
 /// @brief Base class for all frontend presentation layers (CLI, Server)
 /// Manages backend, providers, and session lifecycle
 class Frontend {
@@ -56,7 +103,8 @@ public:
     /// @brief Start the frontend main loop
     /// Pure virtual - subclasses implement their specific behavior
     /// Connects to provider internally before running
-    virtual int run() = 0;
+    /// @param cmdline_provider Optional provider from command-line override (takes priority)
+    virtual int run(Provider* cmdline_provider = nullptr) = 0;
 
     /// @brief Handle slash commands (e.g., /provider, /model, /clear)
     /// @param input The full input string starting with /

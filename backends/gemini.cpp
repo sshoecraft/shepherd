@@ -88,7 +88,7 @@ size_t GeminiBackend::query_model_context_size(const std::string& model_name) {
 
 std::string GeminiBackend::make_get_request(const std::string& url) {
     if (!http_client) {
-        std::cerr << "HTTP client not initialized" << std::endl;
+        dout(1) << "HTTP client not initialized" << std::endl;
         return "";
     }
 
@@ -108,7 +108,7 @@ std::string GeminiBackend::make_get_request(const std::string& url) {
             } catch (...) {
                 error_msg = response.error_message.empty() ? error_msg : response.error_message;
             }
-            std::cerr << "Authentication failed: " + error_msg << std::endl;
+            dout(1) << "Authentication failed: " + error_msg << std::endl;
             throw BackendError("Authentication failed: " + error_msg);
         }
 
@@ -317,7 +317,33 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
             // Check if this message has functionCall parts (stored as JSON)
             if (!msg.tool_calls_json.empty()) {
                 try {
-                    content["parts"] = json::parse(msg.tool_calls_json);
+                    json tool_calls = json::parse(msg.tool_calls_json);
+                    // Check if it's OpenAI format (array with "function" objects)
+                    // vs Gemini format (array with "functionCall" parts)
+                    if (tool_calls.is_array() && !tool_calls.empty() &&
+                        tool_calls[0].contains("function")) {
+                        // Convert OpenAI format to Gemini format
+                        json parts = json::array();
+                        for (const auto& tc : tool_calls) {
+                            if (tc.contains("function")) {
+                                json func_call;
+                                func_call["functionCall"]["name"] = tc["function"]["name"];
+                                if (tc["function"].contains("arguments")) {
+                                    std::string args_str = tc["function"]["arguments"].get<std::string>();
+                                    try {
+                                        func_call["functionCall"]["args"] = json::parse(args_str);
+                                    } catch (...) {
+                                        func_call["functionCall"]["args"] = json::object();
+                                    }
+                                }
+                                parts.push_back(func_call);
+                            }
+                        }
+                        content["parts"] = parts;
+                    } else {
+                        // Already in Gemini format
+                        content["parts"] = tool_calls;
+                    }
                 } catch (const std::exception& e) {
                     dout(1) << std::string("WARNING: ") +"Failed to parse stored parts: " + std::string(e.what()) << std::endl;
                     content["parts"] = json::array({{{"text", msg.content}}});
@@ -655,8 +681,8 @@ void GeminiBackend::add_message(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Route through unified output filter
-                                    if (!output(delta_text)) {
+                                    // Route through unified output filter (includes channel parsing)
+                                    if (!process_output(delta_text)) {
                                         stream_complete = true;
                                         return false;
                                     }
@@ -716,11 +742,17 @@ void GeminiBackend::add_message(Session& session,
                 if (ranges.empty()) {
                     accumulated_resp.code = Response::CONTEXT_FULL;
                     accumulated_resp.error = "Context full, cannot evict enough messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
                 if (!session.evict_messages(ranges)) {
                     accumulated_resp.error = "Failed to evict messages";
+                    if (role == Message::TOOL_RESPONSE) {
+                        add_tool_response(session, content, tool_name, tool_id);
+                    }
                     callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
                 }
 
@@ -731,6 +763,10 @@ void GeminiBackend::add_message(Session& session,
                 continue;
             }
 
+            // Non-context error - add TOOL_RESPONSE for session consistency
+            if (role == Message::TOOL_RESPONSE) {
+                add_tool_response(session, content, tool_name, tool_id);
+            }
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
 
@@ -791,4 +827,147 @@ void GeminiBackend::add_message(Session& session,
     // Max retries reached
     callback(CallbackEvent::ERROR, "Max retries reached", "error", "");
     callback(CallbackEvent::STOP, "error", "", "");
+}
+
+void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
+    // Always use streaming for generate_from_session - the callback mechanism
+    // works the same whether the API server client requested stream or not
+    reset_output_state();
+    pending_tool_calls.clear();  // Clear any previous tool calls
+
+    dout(1) << "GeminiBackend::generate_from_session (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
+
+    // Build request from session
+    nlohmann::json request = build_request_from_session(session, max_tokens);
+
+    dout(1) << "Sending streaming request to Gemini API (generate_from_session)" << std::endl;
+
+    // Get headers and streaming endpoint
+    auto headers = get_api_headers();
+    std::string endpoint = get_streaming_endpoint();
+
+    // Streaming state
+    std::string accumulated_content;
+    SSEParser sse_parser;
+    bool stream_complete = false;
+    std::string finish_reason = "stop";
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+
+    // Streaming callback to process SSE chunks
+    auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+        sse_parser.process_chunk(chunk,
+            [&](const std::string& event, const std::string& data, const std::string& id) -> bool {
+                try {
+                    json delta_json = json::parse(data);
+
+                    // Gemini format: candidates[0].content.parts[0].text
+                    if (delta_json.contains("candidates") && !delta_json["candidates"].empty()) {
+                        const auto& candidate = delta_json["candidates"][0];
+
+                        // Get finish reason if present
+                        if (candidate.contains("finishReason") && !candidate["finishReason"].is_null()) {
+                            std::string reason = candidate["finishReason"].get<std::string>();
+                            if (reason == "STOP") {
+                                finish_reason = "stop";
+                            } else if (reason == "MAX_TOKENS") {
+                                finish_reason = "length";
+                            } else {
+                                finish_reason = reason;
+                            }
+                        }
+
+                        // Get content
+                        if (candidate.contains("content") && candidate["content"].contains("parts")) {
+                            const auto& parts = candidate["content"]["parts"];
+                            if (!parts.empty() && parts[0].contains("text")) {
+                                std::string delta_text = parts[0]["text"].get<std::string>();
+                                accumulated_content += delta_text;
+
+                                // Route through unified output filter
+                                // (in server mode, process_output sends raw content)
+                                if (!process_output(delta_text)) {
+                                    stream_complete = true;
+                                    return false;
+                                }
+                            }
+
+                            // Handle function calls
+                            if (!parts.empty() && parts[0].contains("functionCall")) {
+                                const auto& fc = parts[0]["functionCall"];
+                                ToolParser::ToolCall tool_call;
+                                tool_call.name = fc.value("name", "");
+                                if (fc.contains("args")) {
+                                    tool_call.raw_json = fc["args"].dump();
+                                    // Parse args into parameters map
+                                    try {
+                                        json args = json::parse(tool_call.raw_json);
+                                        for (auto it = args.begin(); it != args.end(); ++it) {
+                                            if (it.value().is_string()) {
+                                                tool_call.parameters[it.key()] = it.value().get<std::string>();
+                                            } else {
+                                                tool_call.parameters[it.key()] = it.value().dump();
+                                            }
+                                        }
+                                    } catch (...) {}
+                                }
+                                tool_call.tool_call_id = "gemini_" + std::to_string(pending_tool_calls.size());
+                                // Add to pending_tool_calls for API server to find
+                                pending_tool_calls.push_back(tool_call);
+                                dout(1) << "generate_from_session: got functionCall name=" + tool_call.name << std::endl;
+
+                                // Emit TOOL_CALL event via callback
+                                if (callback) {
+                                    callback(CallbackEvent::TOOL_CALL, tool_call.raw_json, tool_call.name, tool_call.tool_call_id);
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract usage metadata
+                    if (delta_json.contains("usageMetadata")) {
+                        const auto& usage = delta_json["usageMetadata"];
+                        prompt_tokens = usage.value("promptTokenCount", 0);
+                        completion_tokens = usage.value("candidatesTokenCount", 0);
+                        stream_complete = true;
+                    }
+
+                } catch (const std::exception& e) {
+                    dout(1) << std::string("WARNING: ") + "Failed to parse Gemini SSE data: " + std::string(e.what()) << std::endl;
+                }
+
+                return true;
+            });
+
+        return true;
+    };
+
+    // Make streaming HTTP call
+    HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                       stream_handler, nullptr);
+
+    // Check for HTTP errors
+    if (!http_response.is_success() && !stream_complete) {
+        std::string error_msg = http_response.error_message.empty() ? "API request failed" : http_response.error_message;
+        callback(CallbackEvent::ERROR, error_msg, "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+
+    // Flush any remaining output from the filter
+    flush_output();
+
+    // Update session token counts
+    if (prompt_tokens > 0 || completion_tokens > 0) {
+        session.total_tokens = prompt_tokens + completion_tokens;
+        session.last_prompt_tokens = prompt_tokens;
+        session.last_assistant_message_tokens = completion_tokens;
+    }
+
+    // Adjust finish reason for tool calls (pending_tool_calls is checked by API server)
+    if (!pending_tool_calls.empty()) {
+        finish_reason = "tool_calls";
+    }
+
+    callback(CallbackEvent::STOP, finish_reason, "", "");
 }

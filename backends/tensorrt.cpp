@@ -670,6 +670,17 @@ void TensorRTBackend::initialize(Session& session) {
             chat_template_text_, model_config_, template_node_, eos_tok, bos_token);
         dout(1) << "Created ChatTemplate for family: " + std::to_string(static_cast<int>(model_config_.family)) << std::endl;
 
+        // Probe template capabilities (discovers what features the template supports)
+        if (chat_template_) {
+            chat_template_->probe_capabilities();
+            const auto& caps = chat_template_->get_capabilities();
+            dout(1) << "Template capabilities: system=" + std::string(caps.supports_system_role ? "yes" : "no") +
+                       ", tools=" + std::string(caps.supports_tools ? "yes" : "no") +
+                       ", tool_calls=" + std::string(caps.supports_tool_calls ? "yes" : "no") +
+                       ", tool_responses=" + std::string(caps.supports_tool_responses ? "yes" : "no") +
+                       ", channels=" + std::string(caps.has_channels ? "yes" : "no") << std::endl;
+        }
+
         // Build stop token sequences for generation
         // Some models use multi-token role tags (e.g., <|user|>) that need sequence-based stopping
         std::vector<std::string> stop_sequences;
@@ -762,6 +773,13 @@ int TensorRTBackend::count_message_tokens(Message::Role role,
         dout(1) << std::string("WARNING: ") +"Exception formatting message for token count: " + std::string(e.what()) << std::endl;
         return tokenizer_->count_tokens(content);
     }
+}
+
+const ChatTemplates::ChatTemplateCaps* TensorRTBackend::get_chat_template_caps() const {
+    if (chat_template_) {
+        return &chat_template_->get_capabilities();
+    }
+    return nullptr;
 }
 
 void TensorRTBackend::add_message(Session& session, Message::Role role,
@@ -1165,7 +1183,7 @@ std::string TensorRTBackend::render_message(const Message& msg, bool add_generat
 
 bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_generation_prompt) {
     if (!tokenizer_) {
-        std::cerr << "Tokenizer not loaded" << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Tokenizer not loaded", "", "");
         return false;
     }
 
@@ -1180,8 +1198,8 @@ bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_gen
     // Tokenize with add_special_tokens=false to avoid unwanted BOS/EOS tokens
     std::vector<int> tokens = tokenizer_->encode(formatted_text, false);
     if (tokens.empty()) {
-        std::cerr << "Failed to tokenize message - formatted_text length: " + std::to_string(formatted_text.length()) << std::endl;
-        std::cerr << "Formatted text: " + formatted_text.substr(0, 500) << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
+        dout(1) << "Formatted text: " + formatted_text.substr(0, 500) << std::endl;
         return false;
     }
 
@@ -1359,10 +1377,10 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             request_active_ = true;
             dout(1) << "Request enqueued with ID: " + std::to_string(request_id) << std::endl;
         } catch (const std::exception& e) {
-            std::cerr << "Exception enqueueing request: " + std::string(e.what()) << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Exception enqueueing request: " + std::string(e.what()), "", "");
             throw BackendError("Failed to enqueue request: " + std::string(e.what()));
         } catch (...) {
-            std::cerr << "Unknown exception enqueueing request" << std::endl;
+            if (callback) callback(CallbackEvent::ERROR, "Unknown exception enqueueing request", "", "");
             throw BackendError("Failed to enqueue request: unknown exception");
         }
 
@@ -1379,7 +1397,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             for (const auto& response : responses) {
                 if (response.hasError()) {
                     std::string error_msg = response.getErrorMsg();
-                    std::cerr << "Response error: " + error_msg << std::endl;
+                    if (callback) callback(CallbackEvent::ERROR, "Response error: " + error_msg, "", "");
                     request_active_ = false;
 
                     // Check if error is due to context/KV cache being full
@@ -1434,6 +1452,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
                     }
                     last_decoded_len = full_decoded.length();
 
+#ifdef _DEBUG
                     // Debug: Log token IDs and decoded text to track think tag issues
                     if (g_debug_level > 2) {
                         std::string token_ids_str;
@@ -1443,6 +1462,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
                         }
                         dout(1) << "Tokens [" + token_ids_str + "] -> \"" + new_text + "\"" << std::endl;
                     }
+#endif
 
                     if (config->streaming) {
                         // Streaming mode: invoke callback with new text (event-based)
@@ -1488,9 +1508,14 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             int context_used = accumulated_tokens.size();  // Will be cleared soon, so use size before clear
             int context_max = context_size;
 
-            std::cerr << "\033[90m[Prefill: " << input_tokens.size() << " tokens, "
+            // Send prefill stats via callback (frontend decides whether to display)
+            if (callback) {
+                std::ostringstream stats;
+                stats << "[Prefill: " << input_tokens.size() << " tokens, "
                       << std::fixed << std::setprecision(1) << prefill_tok_per_sec << " t/s, "
-                      << "context: " << context_used << "/" << context_max << "]\033[0m" " << std::endl;
+                      << "context: " << context_used << "/" << context_max << "]\n";
+                callback(CallbackEvent::STATS, stats.str(), "", "");
+            }
         }
 
         // Decode metrics
@@ -1502,9 +1527,14 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             int context_used = accumulated_tokens.size() + output_tokens.size();
             int context_max = context_size;
 
-            std::cerr << "\033[90m[Decode: " << output_tokens.size() << " tokens, "
+            // Send decode stats via callback (frontend decides whether to display)
+            if (callback) {
+                std::ostringstream stats;
+                stats << "\n[Decode: " << output_tokens.size() << " tokens, "
                       << std::fixed << std::setprecision(1) << decode_tok_per_sec << " t/s, "
-                      << "context: " << context_used << "/" << context_max << "]\033[0m" " << std::endl;
+                      << "context: " << context_used << "/" << context_max << "]\n";
+                callback(CallbackEvent::STATS, stats.str(), "", "");
+            }
         }
 
         // Handle <|eom_id|> token for continued tool execution
@@ -1540,6 +1570,17 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             }
         }
 
+        // Content extraction (for channel-based models like GPT-OSS)
+        // Uses ChatTemplate's extract_content() which detects format from template
+        if (chat_template_) {
+            std::string extracted = chat_template_->extract_content(response_text);
+            if (extracted.length() != response_text.length()) {
+                dout(1) << "Content extraction: " + std::to_string(response_text.length()) +
+                          " -> " + std::to_string(extracted.length()) + " chars" << std::endl;
+                response_text = extracted;
+            }
+        }
+
         // CLEAR accumulated_tokens after generation completes
         accumulated_tokens.clear();
         dout(1) << "Cleared accumulated tokens" << std::endl;
@@ -1549,7 +1590,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
     } catch (const std::exception& e) {
         request_active_ = false;
         accumulated_tokens.clear();
-        std::cerr << "TensorRT generation error: " + std::string(e.what()) << std::endl;
+        if (callback) callback(CallbackEvent::ERROR, "TensorRT generation error: " + std::string(e.what()), "", "");
         throw BackendError("TensorRT generation failed: " + std::string(e.what()));
     }
 }
@@ -1590,7 +1631,7 @@ void TensorRTBackend::shutdown() {
         try {
             delete executor;
         } catch (const std::exception& e) {
-            std::cerr << "Error during TensorRT executor cleanup: " + std::string(e.what()) << std::endl;
+            dout(1) << "Error during TensorRT executor cleanup: " + std::string(e.what()) << std::endl;
         }
 
         executor_ = nullptr;
@@ -1608,7 +1649,7 @@ void TensorRTBackend::monitor_kv_events() {
     namespace tle = tensorrt_llm::executor;
 
     if (!event_manager_) {
-        std::cerr << "Event manager not initialized" << std::endl;
+        dout(1) << "Event manager not initialized" << std::endl;
         return;
     }
 
@@ -1645,7 +1686,7 @@ void TensorRTBackend::monitor_kv_events() {
             }
 
         } catch (const std::exception& e) {
-            std::cerr << "Error in KV cache event monitoring: " + std::string(e.what()) << std::endl;
+            dout(1) << "Error in KV cache event monitoring: " + std::string(e.what()) << std::endl;
         }
     }
 
@@ -1788,5 +1829,9 @@ void TensorRTBackend::generate_from_session(Session&, int) {
 int TensorRTBackend::count_message_tokens(Message::Role, const std::string& content,
                                          const std::string&, const std::string&) {
     return static_cast<int>(content.length() / 4.0 + 0.5);
+}
+
+const ChatTemplates::ChatTemplateCaps* TensorRTBackend::get_chat_template_caps() const {
+    return nullptr;  // No chat template in stub
 }
 #endif

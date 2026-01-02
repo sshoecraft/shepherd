@@ -57,6 +57,7 @@ public:
     int count_message_tokens(Message::Role role, const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;
+    const ChatTemplates::ChatTemplateCaps* get_chat_template_caps() const override;
 
     // Backend state
     bool is_ready() const;

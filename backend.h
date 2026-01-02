@@ -8,6 +8,17 @@
 #include <string>
 #include <functional>
 #include <set>
+#include <memory>
+
+// Forward declaration for chat template capabilities
+namespace ChatTemplates {
+    struct ChatTemplateCaps;
+}
+
+// Forward declaration for channel parsing
+namespace ChannelParsing {
+    class ChannelParser;
+}
 
 // Unified response structure returned by all backends
 struct Response {
@@ -44,11 +55,13 @@ enum class CallbackEvent {
     CONTENT,      // Assistant text chunk
     THINKING,     // Reasoning/thinking chunk (if show_thinking enabled)
     TOOL_CALL,    // Model requesting a tool call
+    TOOL_RESULT,  // Result of tool execution (summary in content)
     USER_PROMPT,  // Echo user's prompt
     SYSTEM,       // System info/status messages
     ERROR,        // Error occurred (message in content, type in name)
     STOP,         // Generation complete (finish_reason in content)
-    CODEBLOCK     // Code block content (inside ```)
+    CODEBLOCK,    // Code block content (inside ```)
+    STATS         // Performance stats (prefill/decode speed, KV cache info)
 };
 
 class Backend {
@@ -65,7 +78,7 @@ public:
                                              const std::string& id)>;
 
     Backend(size_t context_size, Session& session, EventCallback callback);
-    virtual ~Backend() = default;
+    virtual ~Backend();  // Defined in .cpp where ChannelParser is complete
 
     // Main transactional message interface
     // Adds message and generates response, handling eviction if needed
@@ -87,6 +100,10 @@ public:
     virtual std::vector<std::string> get_tool_call_end_markers() const { return {}; }
     virtual std::vector<std::string> get_thinking_start_markers() const { return {}; }
     virtual std::vector<std::string> get_thinking_end_markers() const { return {}; }
+
+    // Get chat template capabilities (for channel-based models)
+    // Returns nullptr if no template or not available
+    virtual const ChatTemplates::ChatTemplateCaps* get_chat_template_caps() const { return nullptr; }
 
     /// @brief Count tokens for a message (without adding to context)
     /// Formats exactly as add_message() would, but only returns token count
@@ -149,6 +166,13 @@ protected:
     bool output(const char* text, size_t len);
     bool output(const std::string& text) { return output(text.c_str(), text.length()); }
 
+    // Process output through channel parser (for GPT-OSS harmony format)
+    // If model has channels: routes through ChannelParser first, then output()
+    // If no channels: falls back to output() directly
+    // Returns true to continue, false if cancelled or stop requested
+    bool process_output(const char* text, size_t len);
+    bool process_output(const std::string& text) { return process_output(text.c_str(), text.length()); }
+
     // Reset filter state between requests
     void reset_output_state();
 
@@ -157,6 +181,11 @@ protected:
 
     // Control flags
     bool show_thinking = false;
+
+public:
+    // Tool calls detected during streaming via emit_tool_call()
+    // Used by derived backends and API server to access tool calls captured by channel parser
+    std::vector<ToolParser::ToolCall> pending_tool_calls;
 
 private:
     std::vector<std::string> cached_models;  // Lazy-loaded model list
@@ -190,6 +219,10 @@ private:
     std::vector<std::string> thinking_start_markers;
     std::vector<std::string> thinking_end_markers;
     bool markers_initialized = false;
+
+    // Channel parser for GPT-OSS harmony format (integrated for all modes)
+    std::unique_ptr<ChannelParsing::ChannelParser> channel_parser_;
+    bool channel_parsing_enabled_ = false;
 
     // Filter helpers
     void ensure_markers_initialized();

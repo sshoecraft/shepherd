@@ -325,10 +325,152 @@ To add support for a new chat template format:
 
 - Template selection happens once during initialization (not per-message)
 - Formatting is lightweight string concatenation (except MinjaTemplate)
-- MinjaTemplate rendering has overhead but only used for unknown models
+- MinjaTemplate rendering has overhead but now primary path for models with embedded templates
+- Full-conversation rendering with caching minimizes overhead
 - No runtime detection or dynamic dispatch beyond virtual method calls
 
+## Full-Conversation Rendering Architecture
+
+As of version 2.5.0, the system uses full-conversation rendering (like llama.cpp server and vLLM):
+
+### Problem with Single-Message Rendering
+
+Jinja chat templates are designed to iterate over a full `messages` array:
+```jinja
+{% for message in messages %}
+  ...format with context of previous messages...
+{% endfor %}
+```
+
+Rendering one message at a time breaks templates that:
+- Need conversation context (e.g., alternating speaker formatting)
+- Use loop indices or message positions
+- Have different formatting for first vs. subsequent messages
+
+### Solution: Incremental Full-Conversation Rendering
+
+Based on llama.cpp's `common_chat_format_single()`:
+
+1. **Render messages[0..n-1]** - Get prefix without new message
+2. **Render messages[0..n]** - Get full output with new message
+3. **Return diff** - `full.substr(prefix.length())`
+
+This applies the template correctly while only returning the incremental part.
+
+### Caching Strategy
+
+MinjaTemplate caches the last rendered output:
+- If adding messages sequentially, prefix is cached (1 render per message)
+- If conversation changed, re-render needed (2 renders)
+- String manipulation is fast - actual heavy work (tokenization, KV cache) is optimized separately
+
+## Capability Probing
+
+Templates are probed at initialization to discover supported features:
+
+```cpp
+struct ChatTemplateCaps {
+    bool supports_tools;           // Can render tools array
+    bool supports_tool_calls;      // Can format tool_calls in assistant messages
+    bool supports_tool_responses;  // Can handle role="tool" messages
+    bool supports_system_role;     // Has system message support
+
+    // Channel-based output (detected from template, not hardcoded)
+    bool has_channels;             // Template uses channel-based output format
+    std::string channel_extract_marker;  // e.g., "<|channel|>final<|message|>"
+    std::string channel_end_marker;      // e.g., "<|end|>"
+};
+```
+
+Probing works by:
+1. Test-rendering with needle strings and checking if they appear in output (for tool/system support)
+2. Examining the template text for channel patterns like `<|channel|>final` (for channel detection)
+
+## Channel-Based Output Extraction
+
+Some models (e.g., GPT-OSS) use channel-based output where the model outputs different "channels" like `analysis`, `commentary`, and `final`. Only the `final` channel should be shown to users.
+
+**Detection**: During `probe_capabilities()`, the template text is examined for patterns like `<|channel|>final`. If found, the markers are stored in `ChatTemplateCaps`.
+
+**Extraction**: The `extract_content()` method handles this:
+
+```cpp
+std::string extract_content(const std::string& raw_output) const {
+    if (!caps.has_channels) {
+        return raw_output;  // Pass-through for non-channel models
+    }
+    // Find channel_extract_marker ("final" channel)
+    // If not found, return "" (tool-call-only response has no final content)
+    // Otherwise return content after marker (before channel_end_marker)
+}
+```
+
+**Tool-call-only responses**: When a model outputs only analysis + commentary channels (no "final" channel), `extract_content()` returns an empty string. The tool call is handled separately via the channel parser and `pending_tool_calls`.
+
+**Usage in backends**:
+- LlamaCppBackend calls `chat_template->extract_content()` after generation
+- TensorRTBackend calls `chat_template_->extract_content()` after generation
+
+This approach:
+- Detects format dynamically from the template (no hardcoded markers)
+- Works for any model using the Harmony/channel output format
+- Is backend-agnostic (same ChatTemplate used by both LlamaCpp and TensorRT)
+
+## Polyfills for Missing Features
+
+When probing detects a template lacks a feature, polyfills are applied:
+
+- **No tools support**: Inject tool descriptions into system message
+- **No system role**: Merge system content into first user message
+- **No tool responses**: Convert tool response to user message format
+
+This allows any model to work with tools even if its template doesn't natively support them.
+
+## Tool Call Value Compatibility
+
+When building minja context for templates with tool_calls, the system provides tool call data in multiple formats for maximum template compatibility:
+
+```cpp
+// Standard OpenAI format
+tc_obj.set("id", ...);
+tc_obj.set("type", "function");
+tc_obj.set("function", func_obj);  // Contains name, arguments (as string)
+
+// Additional fields for template compatibility
+tc_obj.set("name", ...);           // Top-level name (for templates using tool_call.name)
+tc_obj.set("arguments", args_obj); // Parsed arguments object (for tool_call.arguments|items)
+```
+
+This allows templates that use different access patterns:
+- OpenAI-style: `tool_call.function.name`, `tool_call.function.arguments`
+- Simplified: `tool_call.name`, `tool_call.arguments`
+- Iteration: `tool_call.arguments|items` (requires parsed object, not string)
+
 ## Version History
+
+- **2.5.2** - Tool call value compatibility
+  - Added `tool_call.name` at top level for templates that use it directly
+  - Added `tool_call.arguments` as parsed minja object for templates that iterate over it
+  - Fixes compatibility with Qwen3-Coder and similar templates using `tool_call.arguments|items`
+
+- **2.5.1** - Dynamic channel detection
+  - Removed hardcoded channel markers from ModelConfig (GPT_OSS)
+  - Added `has_channels`, `channel_extract_marker`, `channel_end_marker` to ChatTemplateCaps
+  - Template probing now detects channel patterns from template text
+  - Added `extract_content()` method for backend-agnostic content extraction
+  - LlamaCpp and TensorRT backends now use ChatTemplate for output extraction
+  - Removed channel filtering from backend.cpp and api_server.cpp
+  - Based on vLLM's harmony parser and llama.cpp's gpt-oss handling approach
+
+- **2.5.0** - Full-conversation rendering refactor
+  - MinjaTemplate now primary path when model has embedded Jinja template
+  - Added `format_conversation()` for full-conversation rendering
+  - Added `format_message_incremental()` with caching for efficient incremental rendering
+  - Added capability probing (`probe_capabilities()`) to discover template features
+  - Added polyfills for templates missing tool/system support
+  - Factory now prioritizes MinjaTemplate over hardcoded templates
+  - Hardcoded templates kept as fallback for models without embedded templates
+  - Based on llama.cpp server and vLLM approaches
 
 - **2.4.0** - Thinking model support
   - Added Qwen3ThinkingTemplate for thinking/reasoning models

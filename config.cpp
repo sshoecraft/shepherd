@@ -61,8 +61,14 @@ void Config::set_defaults() {
 	// Thinking/reasoning blocks hidden by default
 	thinking = false;
 
+	// Performance stats hidden by default
+	stats = false;
+
 	// Auto-switch provider on connection failure (disabled by default)
 	auto_provider = false;
+
+	// Raw output mode (disable channel parsing, like vLLM)
+	raw_output = false;
 
 	// TUI mode disabled by default (classic scrolling terminal)
 	tui = false;

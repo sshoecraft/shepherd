@@ -11,6 +11,7 @@
 #include "tools/memory_tools.h"
 #include "tools/mcp_resource_tools.h"
 #include "tools/core_tools.h"
+#include "tools/api_tools.h"
 #include "message.h"
 #include "config.h"
 #include "provider.h"
@@ -35,10 +36,11 @@
 #include "replxx.h"
 
 // External globals from main.cpp
-extern int g_debug_level;
 extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
 
+#ifdef _DEBUG
+extern int g_debug_level;
 // Debug output helper
 static void cli_debug(int level, const std::string& text) {
     if (g_debug_level >= level) {
@@ -51,6 +53,9 @@ static void cli_debug(int level, const std::string& text) {
         fprintf(stderr, "[%s.%03d] %s\n", timestamp, (int)ms.count(), text.c_str());
     }
 }
+#else
+static void cli_debug(int, const std::string&) {}
+#endif
 
 // Helper: Extract tool call from Response (handles both structured and text-based)
 static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
@@ -92,6 +97,7 @@ void CLI::init(bool no_mcp, bool no_tools) {
     if (interactive_mode) {
         replxx = replxx_init();
         replxx_set_max_history_size(replxx, 1000);
+        replxx_enable_bracketed_paste(replxx);  // Enable paste support
 
         // Set history file path
         const char* home = getenv("HOME");
@@ -114,6 +120,9 @@ void CLI::init(bool no_mcp, bool no_tools) {
                 // Queue tool for execution
                 pending_tool_calls.push({tool_name, content, tool_call_id});
                 break;
+            case CallbackEvent::TOOL_RESULT:
+                // Tool results are displayed via show_tool_result(), not callback
+                break;
             case CallbackEvent::ERROR:
                 show_error(content);
                 break;
@@ -122,6 +131,12 @@ void CLI::init(bool no_mcp, bool no_tools) {
                 break;
             case CallbackEvent::USER_PROMPT:
                 // CLI doesn't need to echo - replxx handles display
+                break;
+            case CallbackEvent::STATS:
+                // Only show stats if enabled via --stats flag
+                if (config->stats) {
+                    write_colored(content, type);
+                }
                 break;
             case CallbackEvent::STOP:
                 // Only add newline if no pending tool calls (they handle their own formatting)
@@ -140,7 +155,33 @@ void CLI::init(bool no_mcp, bool no_tools) {
               ", colors: " + std::string(colors_enabled ? "yes" : "no") + ")");
 }
 
-int CLI::run() {
+int CLI::run(Provider* cmdline_provider) {
+    cli_debug(1, "Starting CLI mode (interactive: " + std::string(interactive_mode ? "yes" : "no") + ")");
+
+    // Determine which provider to connect
+    Provider* provider_to_use = nullptr;
+    if (cmdline_provider) {
+        provider_to_use = cmdline_provider;
+    } else if (!providers.empty()) {
+        provider_to_use = &providers[0];  // Highest priority
+    }
+
+    if (!provider_to_use) {
+        callback(CallbackEvent::SYSTEM, "No providers configured. Use 'shepherd provider add' to configure.\n", "", "");
+        return 1;
+    }
+
+    // Output loading message (no newline - we'll add completion indicator)
+    callback(CallbackEvent::SYSTEM, "Loading Provider: " + provider_to_use->name, "", "");
+
+    // Connect to provider
+    if (!connect_provider(provider_to_use->name)) {
+        callback(CallbackEvent::SYSTEM, " - FAILED\n", "", "");
+        return 1;
+    }
+    // Register other providers as tools
+    register_provider_tools(tools, current_provider);
+
     // Populate session.tools from our tools instance
     tools.populate_session_tools(session);
 
@@ -149,7 +190,10 @@ int CLI::run() {
         backend->valid_tool_names.insert(tool.name);
     }
 
-    cli_debug(1, "Starting CLI mode (interactive: " + std::string(interactive_mode ? "yes" : "no") + ")");
+    // Configure session based on backend capabilities
+    session.desired_completion_tokens = calculate_desired_completion_tokens(
+        backend->context_size, backend->max_output_tokens);
+    session.auto_evict = (backend->context_size > 0 && !backend->is_local);
 
     // Initialize scheduler (unless disabled)
     Scheduler scheduler;
@@ -401,50 +445,56 @@ int CLI::run() {
     return 0;
 }
 
-// ANSI color codes for callback event types
-const char* CLI::ansi_color(CallbackEvent event) {
-    switch (event) {
-        case CallbackEvent::SYSTEM: return ANSI_FG_RED;
-        case CallbackEvent::USER_PROMPT: return ANSI_FG_GREEN;
-        case CallbackEvent::TOOL_CALL: return ANSI_FG_YELLOW;
-        case CallbackEvent::THINKING: return ANSI_FG_BRIGHT_BLACK;
-        case CallbackEvent::ERROR: return ANSI_FG_RED;
-        case CallbackEvent::CODEBLOCK: return ANSI_FG_CYAN;
-        case CallbackEvent::CONTENT: return "";
-        case CallbackEvent::STOP: return "";
+// ANSI color codes for FrontendColor (centralized in frontend.h)
+static const char* ansi_from_color(FrontendColor color) {
+    switch (color) {
+        case FrontendColor::GREEN:   return ANSI_FG_GREEN;
+        case FrontendColor::YELLOW:  return ANSI_FG_YELLOW;
+        case FrontendColor::RED:     return ANSI_FG_RED;
+        case FrontendColor::CYAN:    return ANSI_FG_CYAN;
+        case FrontendColor::GRAY:    return ANSI_FG_BRIGHT_BLACK;
+        case FrontendColor::DEFAULT: return "";
     }
     return "";
+}
+
+// ANSI color codes for callback event types
+const char* CLI::ansi_color(CallbackEvent event) {
+    return ansi_from_color(get_color_for_event(event));
 }
 
 void CLI::write_colored(const std::string& text, CallbackEvent type) {
     if (text.empty()) return;
 
-    // Determine indent based on type
-    // No indent: USER_PROMPT, SYSTEM, ERROR
-    // 4 spaces: CODEBLOCK
-    // 2 spaces: everything else (CONTENT, THINKING, TOOL_CALL, etc)
-    const char* indent = "";
-    if (type == CallbackEvent::CODEBLOCK) {
-        indent = "    ";
-    } else if (type != CallbackEvent::USER_PROMPT &&
-               type != CallbackEvent::SYSTEM &&
-               type != CallbackEvent::ERROR) {
-        indent = "  ";
-    }
+    // Get indent from centralized config (frontend.h)
+    int indent_spaces = get_indent_for_event(type);
+    std::string indent(indent_spaces, ' ');
 
     const char* color = colors_enabled ? ansi_color(type) : "";
     const char* reset = colors_enabled ? ANSI_RESET : "";
 
     // Output with indentation at line starts
-    for (char c : text) {
-        if (at_line_start && c != '\n' && indent[0] != '\0') {
-            printf("%s", indent);
+    // Process line-by-line to handle indentation while preserving UTF-8
+    size_t pos = 0;
+    while (pos < text.length()) {
+        // Add indentation at line starts
+        if (at_line_start && text[pos] != '\n' && !indent.empty()) {
+            printf("%s", indent.c_str());
             at_line_start = false;
         }
-        if (c != '\n') at_line_start = false;
-        printf("%s%c%s", color, c, reset);
-        if (c == '\n') {
+
+        // Find end of current line (or end of text)
+        size_t line_end = text.find('\n', pos);
+        if (line_end == std::string::npos) {
+            // No newline - print rest of text
+            printf("%s%s%s", color, text.substr(pos).c_str(), reset);
+            at_line_start = false;
+            break;
+        } else {
+            // Print up to and including the newline
+            printf("%s%s%s", color, text.substr(pos, line_end - pos + 1).c_str(), reset);
             at_line_start = true;
+            pos = line_end + 1;
         }
     }
     fflush(stdout);
@@ -459,21 +509,20 @@ void CLI::write_raw(const std::string& text) {
 }
 
 void CLI::show_tool_call(const std::string& name, const std::string& params) {
+    // Ensure tool call starts on its own line (model text may not end with newline)
+    if (!at_line_start) {
+        std::cout << std::endl;
+        at_line_start = true;
+    }
+    // Indentation handled by write_colored via get_indent_for_event()
     std::string msg = name + "(" + params + ")\n";
     write_colored(msg, CallbackEvent::TOOL_CALL);
 }
 
 void CLI::show_tool_result(const std::string& summary, bool success) {
-    // Display one-line summary with 4-space indent
-    // Green for success, red for error
-    std::string msg = "    " + summary + "\n";
-    if (colors_enabled) {
-        const char* color = success ? ANSI_FG_GREEN : ANSI_FG_RED;
-        write_raw(std::string(color) + msg + ANSI_RESET);
-    } else {
-        write_raw(msg);
-    }
-    at_line_start = true;
+    // Indentation handled by write_colored via get_indent_for_event()
+    std::string msg = summary + "\n";
+    write_colored(msg, success ? CallbackEvent::TOOL_RESULT : CallbackEvent::ERROR);
 }
 
 void CLI::show_error(const std::string& error) {

@@ -8,17 +8,18 @@ The Frontend class (`frontend.cpp/h`) is the base class for all presentation lay
 
 ```
 Frontend (abstract base)
-    │
-    ├── CLI
-    │   └── Interactive terminal mode
-    │
-    └── Server (abstract)
-        │
-        ├── CLIServer
-        │   └── HTTP server with tool execution
-        │
-        └── APIServer
-            └── OpenAI-compatible API
+    |
+    +-- CLI
+    |   +-- Interactive terminal mode
+    |
+    +-- Server (abstract)
+        |
+        +-- CLIServer
+        |   +-- HTTP server with tool execution
+        |   +-- See docs/cliserver.md
+        |
+        +-- APIServer
+            +-- OpenAI-compatible API
 ```
 
 ## Frontend Base Class
@@ -31,32 +32,41 @@ public:
         const std::string& mode,      // "cli", "api-server", "cli-server"
         const std::string& host,
         int port,
-        Session& session,
         Provider* cmdline_provider = nullptr,
         bool no_mcp = false,
         bool no_tools = false
     );
 
     // Initialization
-    virtual void init(Session& session, bool no_mcp, bool no_tools) {}
+    virtual void init(bool no_mcp, bool no_tools) {}
 
     // Main loop - subclasses implement
-    virtual int run(Session& session) = 0;
+    virtual int run(Provider* cmdline_provider = nullptr) = 0;
+
+    // Event callback - subclasses can override for custom handling
+    virtual bool on_event(CallbackEvent event,
+                          const std::string& content,
+                          const std::string& name,
+                          const std::string& id) { return true; }
 
     // Provider management
     Provider* get_provider(const std::string& name);
     std::vector<std::string> list_providers() const;
-    bool connect_next_provider(Session& session);
-    bool connect_provider(const std::string& name, Session& session);
+    bool connect_next_provider();
+    bool connect_provider(const std::string& name);
+
+    // Tool execution (for CLI, TUI, CLIServer - NOT APIServer)
+    ToolResult execute_tool(Tools& tools,
+                           const std::string& tool_name,
+                           const std::map<std::string, std::any>& parameters,
+                           const std::string& tool_call_id);
 
     // State
-    std::vector<Provider> providers;
-    std::string current_provider;
-    std::unique_ptr<Backend> backend;
-
-protected:
-    // Common tool initialization
-    static void init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools);
+    Session session;                      // Conversation state
+    std::vector<Provider> providers;      // Available providers
+    std::string current_provider;         // Currently connected provider
+    std::unique_ptr<Backend> backend;     // Active backend
+    Backend::EventCallback callback;      // Streaming callback
 };
 ```
 
@@ -66,18 +76,16 @@ protected:
 1. Creates appropriate frontend subclass
 2. Loads providers from disk
 3. Adds command-line provider (if any)
-4. Sets output writer
-5. Calls `init()` for tool setup
+4. Calls `init()` for tool setup
 
 ```cpp
-auto frontend = Frontend::create("cli", "", 0, session, nullptr, false, false);
-frontend->connect_next_provider(session);
-return frontend->run(session);
+auto frontend = Frontend::create("cli", "", 0, nullptr, false, false);
+frontend->run(cmdline_provider);
 ```
 
 ## Common Tool Initialization
 
-`init_tools()` is shared by CLI and CLIServer (v2.13.0):
+`init_tools()` is shared by CLI and CLIServer:
 
 ```cpp
 void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools) {
@@ -115,7 +123,7 @@ void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_t
 ```cpp
 struct Provider {
     std::string name;
-    std::string backend;     // "openai", "anthropic", etc.
+    std::string backend;     // "openai", "anthropic", "llamacpp", etc.
     std::string model;
     std::string api_key;
     std::string api_base;
@@ -126,22 +134,64 @@ struct Provider {
 ### Connection Flow
 
 ```cpp
-bool connect_next_provider(Session& session) {
-    for (auto& provider : providers) {
-        try {
-            backend = provider.connect(session);
-            if (backend) {
-                current_provider = provider.name;
-                session.backend = backend.get();
-                return true;
-            }
-        } catch (...) {
-            // Try next provider
-        }
-    }
-    return false;
+bool connect_provider(const std::string& name) {
+    Provider* provider = get_provider(name);
+    if (!provider) return false;
+
+    // Create backend based on provider type
+    backend = create_backend_for_provider(*provider, session, callback);
+    if (!backend) return false;
+
+    current_provider = name;
+    session.backend = backend.get();
+    return true;
 }
 ```
+
+## Centralized Formatting (frontend.h)
+
+Color and indentation are centralized so CLI and TUI are consistent:
+
+```cpp
+/// Logical colors for frontend output
+enum class FrontendColor {
+    DEFAULT,  // White/default terminal color
+    GREEN,    // User input, tool results
+    YELLOW,   // Tool calls
+    RED,      // Errors, system warnings
+    CYAN,     // Code blocks
+    GRAY      // Thinking, dim text
+};
+
+/// Get color for a callback event type
+FrontendColor get_color_for_event(CallbackEvent event);
+
+/// Get indentation (spaces) for a callback event type
+int get_indent_for_event(CallbackEvent event);
+```
+
+### Color Mapping
+
+| CallbackEvent | FrontendColor |
+|--------------|---------------|
+| USER_PROMPT | GREEN |
+| TOOL_CALL | YELLOW |
+| TOOL_RESULT | GREEN |
+| ERROR | RED |
+| SYSTEM | RED |
+| THINKING | GRAY |
+| CODEBLOCK | CYAN |
+| CONTENT | DEFAULT |
+
+### Indentation
+
+| CallbackEvent | Spaces |
+|--------------|--------|
+| USER_PROMPT, SYSTEM, ERROR | 0 |
+| TOOL_CALL, CONTENT, THINKING, STATS | 2 |
+| TOOL_RESULT, CODEBLOCK | 4 |
+
+CLI maps FrontendColor to ANSI codes; TUI maps to ncurses color pairs.
 
 ## CLI Frontend
 
@@ -150,11 +200,11 @@ Interactive terminal mode with tool execution.
 ```cpp
 class CLI : public Frontend {
 public:
-    void init(Session& session, bool no_mcp, bool no_tools) override {
+    void init(bool no_mcp, bool no_tools) override {
         Frontend::init_tools(session, tools, no_mcp, no_tools);
     }
 
-    int run(Session& session) override;
+    int run(Provider* cmdline_provider = nullptr) override;
 
     // Tool management
     Tools tools;
@@ -163,70 +213,85 @@ public:
     void show_tool_call(const std::string& name, const std::string& params);
     void show_tool_result(const std::string& result);
     void show_error(const std::string& error);
-    void show_cancelled();
 
     // Slash commands
-    bool handle_slash_commands(const std::string& input, Session& session);
+    bool handle_slash_commands(const std::string& input);
 };
+```
+
+### CLI Callback Setup
+
+```cpp
+int CLI::run(Provider* cmdline_provider) {
+    // Set up callback before connecting
+    callback = [this](CallbackEvent event, const std::string& content,
+                      const std::string& name, const std::string& id) -> bool {
+        switch (event) {
+            case CallbackEvent::CONTENT:
+            case CallbackEvent::CODEBLOCK:
+            case CallbackEvent::THINKING:
+                write_colored(content, get_color_for_event(event));
+                break;
+            case CallbackEvent::TOOL_CALL:
+                show_tool_call(name, content);
+                break;
+            case CallbackEvent::ERROR:
+                show_error(content);
+                break;
+            case CallbackEvent::STOP:
+                // Generation complete
+                break;
+            // ... handle other events
+        }
+        return !g_generation_cancelled;
+    };
+
+    // Connect to provider (uses callback)
+    connect_provider(provider_name);
+
+    // Main loop
+    while (true) {
+        std::string input = read_input();
+        if (handle_slash_commands(input)) continue;
+
+        session.add_message(Message::USER, input);
+        // ... handle tool calls
+    }
+}
 ```
 
 ### CLI Run Loop
 
 ```cpp
-int CLI::run(Session& session) {
-    GenerationThread gen_thread;
-    gen_thread.init(&session);
-    gen_thread.start();
-
+int CLI::run(Provider* cmdline_provider) {
     while (true) {
         // 1. Get user input
-        auto [input, needs_echo] = tio.read_with_echo_flag(">");
+        std::string input = tio.read(">");
 
         // 2. Handle slash commands
-        if (handle_slash_commands(input, session)) continue;
+        if (handle_slash_commands(input)) continue;
 
-        // 3. Submit to generation thread with callback
-        GenerationRequest req;
-        req.type = Message::USER;
-        req.content = input;
-        req.callback = [](Message::Type type, const std::string& content, ...) {
-            tio.write(content, type);
-            return true;
-        };
-        gen_thread.submit(req);
+        // 3. Add message (triggers generation via backend)
+        session.add_message(Message::USER, input);
 
-        // 4. Wait for completion
-        while (!gen_thread.is_complete()) {
-            // Poll TUI, check escape, etc.
-        }
-
-        // 5. Handle tool calls
-        while (has_tool_calls(resp)) {
-            execute_tool();
-            submit_result();
+        // 4. Handle tool calls if any
+        while (!backend->pending_tool_calls.empty()) {
+            auto& tc = backend->pending_tool_calls.front();
+            ToolResult result = execute_tool(tools, tc.name, tc.parameters, tc.tool_call_id);
+            session.add_message(Message::TOOL_RESPONSE, result.output, tc.name, tc.tool_call_id);
+            backend->pending_tool_calls.erase(backend->pending_tool_calls.begin());
         }
     }
 }
 ```
 
-## Output Writers
-
-Frontend mode determines the output writer:
-
-| Mode | Writer | Description |
-|------|--------|-------------|
-| cli (console) | console_writer | Direct stdout with ANSI colors |
-| cli (tui) | tui_writer | Route to TUI windows |
-| api-server | server_writer | Timestamps + type prefixes |
-| cli-server | server_writer | Timestamps + type prefixes |
-
 ## Files
 
 - `frontend.h` / `frontend.cpp` - Base class and init_tools()
-- `cli.h` / `cli.cpp` - CLI implementation
-- `server/server.h` / `server/server.cpp` - Server base class
-- `server/api_server.h` / `server/api_server.cpp` - API server
-- `server/cli_server.h` / `server/cli_server.cpp` - CLI server
+- `frontends/cli.h` / `frontends/cli.cpp` - CLI implementation
+- `server.h` / `server.cpp` - Server base class
+- `frontends/api_server.h` / `frontends/api_server.cpp` - API server
+- `frontends/cli_server.h` / `frontends/cli_server.cpp` - CLI server
 
 ## Version History
 

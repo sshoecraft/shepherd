@@ -2,46 +2,51 @@
 
 ## Overview
 
-The Server module (`server/`) provides HTTP-based interfaces for Shepherd. There are two server types:
+The Server module provides HTTP-based interfaces for Shepherd. There are two server types:
 
 - **CLIServer**: Full-featured server with local tool execution and SSE streaming
 - **APIServer**: OpenAI-compatible API endpoint
 
-Both servers use the unified EventCallback pattern introduced in v2.13.0.
+Both servers inherit from the `Server` base class and use the unified EventCallback pattern.
 
 ## Class Hierarchy
 
 ```
 Frontend (abstract)
-    │
-    └── Server (abstract)
-            │
-            ├── CLIServer
-            │   └── HTTP server + SSE + local tools
-            │
-            └── APIServer
-                └── OpenAI-compatible /v1/chat/completions
+    |
+    +-- Server (abstract)
+            |
+            +-- CLIServer
+            |   +-- HTTP server + SSE + local tool execution
+            |   +-- See docs/cliserver.md for details
+            |
+            +-- APIServer
+                +-- OpenAI-compatible /v1/chat/completions
 ```
 
 ## Server Base Class
 
-The `Server` class (`server/server.h`, `server/server.cpp`) provides common functionality:
+The `Server` class (`server.h`, `server.cpp`) provides common functionality:
 
 ```cpp
 class Server : public Frontend {
 public:
-    Server(const std::string& host, int port);
+    Server(const std::string& host, int port, const std::string& server_type);
     virtual ~Server();
 
-    // HTTP server management
-    virtual bool start();
-    virtual void stop();
-    bool is_running() const;
+    // Main run loop - starts TCP and control socket
+    int run(Provider* cmdline_provider = nullptr) override;
+
+    // Graceful shutdown
+    void shutdown();
 
 protected:
-    std::string host;
-    int port;
-    std::atomic<bool> running{false};
+    // Subclasses implement
+    virtual void register_endpoints() = 0;
+    virtual void add_status_info(nlohmann::json& status) {}
+    virtual void on_server_start() {}
+    virtual void on_server_stop() {}
+    virtual void on_shutdown() {}
 
     // TCP server for main API
     httplib::Server tcp_server;
@@ -49,12 +54,49 @@ protected:
     // Unix socket for control commands
     httplib::Server control_server;
 
-    // Subclasses implement
-    virtual void register_endpoints(Session& session) = 0;
-    virtual void add_status_info(nlohmann::json& status) {}
-    virtual void on_server_start() {}
-    virtual void on_server_stop() {}
+    // Server state
+    std::atomic<bool> running{true};
+    std::chrono::steady_clock::time_point start_time;
+    std::atomic<uint64_t> requests_processed{0};
+
+    // Configuration
+    std::string host;
+    int port;
+    std::string server_type;
+    std::string control_socket_path;
 };
+```
+
+### Server Lifecycle
+
+```cpp
+int Server::run(Provider* cmdline_provider) {
+    // 1. Connect to provider
+    connect_provider(provider_name);
+
+    // 2. Configure session
+    session.desired_completion_tokens = calculate_desired_completion_tokens(...);
+    session.auto_evict = false;  // Server mode returns errors instead
+
+    // 3. Register common endpoints (/health, /status)
+    register_common_endpoints();
+
+    // 4. Let subclass register its endpoints
+    register_endpoints();
+
+    // 5. Start control socket
+    start_control_socket();
+
+    // 6. Let subclass start background threads
+    on_server_start();
+
+    // 7. Start TCP server (blocks until stopped)
+    tcp_server.listen(host, port);
+
+    // 8. Cleanup
+    on_server_stop();
+    cleanup_control_socket();
+}
 ```
 
 ### Control Socket
@@ -68,6 +110,8 @@ Local control commands via Unix domain socket:
 
 ### Common TCP Endpoints
 
+Both CLIServer and APIServer inherit these:
+
 - `GET /health` - Basic health check
 - `GET /status` - Server status with model info
 
@@ -75,111 +119,20 @@ Local control commands via Unix domain socket:
 
 Full-featured HTTP server that executes tools locally.
 
-### Endpoints
+**See [docs/cliserver.md](cliserver.md) for complete documentation including:**
+- HTTP endpoints (/request, /updates, /session, /clear)
+- SSE broadcasting architecture
+- Tool execution flow
+- Multi-client support
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/request` | Submit user prompt |
-| GET | `/updates` | SSE stream for real-time updates |
-| GET | `/status` | Server status |
+### Quick Reference
 
-### EventCallback Pattern (v2.13.0)
+```bash
+# Start CLI server
+shepherd --cliserver --host 0.0.0.0 --port 8000
 
-CLIServer uses the unified EventCallback for streaming:
-
-```cpp
-void CLIServer::handle_request(const HttpRequest& req, HttpResponse& resp) {
-    // Event callback streams to SSE clients
-    auto stream_callback = [&](Message::Type type,
-                               const std::string& content,
-                               const std::string& tool_name,
-                               const std::string& tool_call_id) -> bool {
-        if (content.empty()) return true;
-
-        // Filter tool calls from stream
-        pending_buffer += content;
-        size_t marker_pos = find_earliest_marker(pending_buffer, markers);
-
-        if (marker_pos != std::string::npos) {
-            // Output up to marker, buffer the rest
-            std::string output = pending_buffer.substr(0, marker_pos);
-            pending_buffer = pending_buffer.substr(marker_pos);
-            if (!output.empty()) {
-                broadcast_sse("delta", {{"content", output}});
-            }
-        } else {
-            broadcast_sse("delta", {{"content", pending_buffer}});
-            pending_buffer.clear();
-        }
-        return true;
-    };
-
-    // Single add_message() call with callback
-    Response resp = session->add_message(
-        Message::USER, prompt, stream_callback);
-}
-```
-
-### SSE Events
-
-Events broadcast to connected clients:
-
-```json
-// Text delta
-{"type": "delta", "content": "Hello"}
-
-// Tool call (server executes locally)
-{"type": "tool_call", "name": "read_file", "args": {"path": "/foo"}}
-
-// Tool result
-{"type": "tool_result", "name": "read_file", "success": true, "content": "..."}
-
-// Generation complete
-{"type": "response_complete", "finish_reason": "stop"}
-
-// Error
-{"type": "error", "message": "Rate limited"}
-```
-
-### Tool Execution Flow
-
-```
-Client                   CLIServer                Backend
-  │                         │                        │
-  ├──POST /request─────────►│                        │
-  │                         ├───add_message(cb)─────►│
-  │                         │◄──callback(ASSISTANT)──┤
-  │◄──SSE: delta────────────┤                        │
-  │                         │    [tool call parsed]  │
-  │◄──SSE: tool_call────────┤                        │
-  │                         │                        │
-  │                         │ ┌─execute_tool()       │
-  │                         │ │  (local)             │
-  │                         │ └─────────────────────►│
-  │◄──SSE: tool_result──────┤                        │
-  │                         │                        │
-  │                         ├───add_message(result)─►│
-  │                         │◄──callback(ASSISTANT)──┤
-  │◄──SSE: delta────────────┤                        │
-  │◄──SSE: complete─────────┤                        │
-```
-
-### Request Format
-
-```json
-{
-    "prompt": "Read the file /etc/hostname",
-    "stream": true
-}
-```
-
-### Response (non-streaming)
-
-```json
-{
-    "success": true,
-    "response": "The contents of /etc/hostname are: myhost"
-}
+# Connect as client
+shepherd --provider cli
 ```
 
 ## APIServer
@@ -197,22 +150,24 @@ OpenAI-compatible API server.
 ### EventCallback for Streaming
 
 ```cpp
-auto stream_callback = [&](Message::Type type,
+auto stream_callback = [&](CallbackEvent event,
                            const std::string& content,
-                           const std::string& tool_name,
-                           const std::string& tool_call_id) -> bool {
-    // Format as OpenAI chunk
-    nlohmann::json chunk = {
-        {"choices", {{
-            {"delta", {{"content", content}}}
-        }}}
-    };
-
-    send_sse("data: " + chunk.dump() + "\n\n");
+                           const std::string& name,
+                           const std::string& id) -> bool {
+    if (event == CallbackEvent::CONTENT) {
+        // Format as OpenAI chunk
+        nlohmann::json chunk = {
+            {"choices", {{
+                {"delta", {{"content", content}}}
+            }}}
+        };
+        send_sse("data: " + chunk.dump() + "\n\n");
+    }
     return true;
 };
 
-Response resp = backend->generate_from_session(session, max_tokens, stream_callback);
+backend->callback = stream_callback;
+session.add_message(Message::USER, prompt);
 ```
 
 ### Request Format
@@ -266,62 +221,6 @@ data: {"choices":[{"finish_reason":"stop"}]}
 data: [DONE]
 ```
 
-## CLIClient Backend
-
-For remote CLI server connections, `CLIClientBackend` acts as a proxy:
-
-```cpp
-class CLIClientBackend : public ApiBackend {
-    Response add_message(Session& session, Message::Type type,
-                        const std::string& content,
-                        EventCallback callback = nullptr, ...) override;
-private:
-    std::string base_url;
-    void sse_listener_thread();  // Receives server events
-};
-```
-
-### SSE Listener
-
-CLIClientBackend spawns a thread to receive server events:
-
-```cpp
-void CLIClientBackend::sse_listener_thread() {
-    while (sse_running) {
-        std::string event = read_sse_event();
-        auto json = nlohmann::json::parse(event);
-
-        // Display based on event type
-        if (json["type"] == "delta") {
-            tio.write(json["content"], Message::ASSISTANT);
-        } else if (json["type"] == "tool_call") {
-            tio.write("* " + json["name"].get<std::string>() + "(...)\n",
-                     Message::TOOL_REQUEST);
-        } else if (json["type"] == "tool_result") {
-            tio.write("✓ Success\n", Message::TOOL_RESPONSE);
-        }
-    }
-}
-```
-
-**Note**: CLIClientBackend is the only backend that writes directly to tio - because it's a proxy displaying events from a remote server, not generating content locally.
-
-## Thread Safety
-
-Both servers handle concurrent requests with session locking:
-
-```cpp
-struct SessionState {
-    std::unique_ptr<Session> session;
-    std::mutex session_mutex;
-};
-
-void handle_request(...) {
-    std::lock_guard<std::mutex> lock(state.session_mutex);
-    // Process request safely
-}
-```
-
 ## Control Client
 
 The control client communicates with running servers via Unix socket:
@@ -345,6 +244,10 @@ shepherd --apiserver --host 0.0.0.0 --port 8000
 
 # Start CLI server
 shepherd --cliserver --host 0.0.0.0 --port 8000
+
+# Control running server
+shepherd ctl status
+shepherd ctl shutdown
 ```
 
 ## Error Handling
@@ -366,14 +269,12 @@ shepherd --cliserver --host 0.0.0.0 --port 8000
 
 ## Files
 
-- `server/server.h` / `server/server.cpp` - Base server class
-- `server/cli_server.h` / `server/cli_server.cpp` - CLI server with tools
-- `server/api_server.h` / `server/api_server.cpp` - OpenAI-compatible API
-- `server/control.h` / `server/control.cpp` - Control client
-- `backends/cli_client.h` / `backends/cli_client.cpp` - Remote CLI client
+- `server.h` / `server.cpp` - Base Server class
+- `frontends/api_server.h` / `frontends/api_server.cpp` - API server
+- `frontends/cli_server.h` / `frontends/cli_server.cpp` - CLI server
 
 ## Version History
 
-- **2.13.0** - Unified EventCallback pattern (no more add_message_stream)
+- **2.13.0** - Unified EventCallback pattern
 - **2.10.0** - Added SSE support for real-time updates
 - **2.6.0** - Initial server implementations

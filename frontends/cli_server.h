@@ -2,6 +2,7 @@
 
 #include "server.h"
 #include "backend.h"
+#include "client_output.h"
 #include "../session.h"
 #include "../tools/tools.h"
 #include <string>
@@ -12,12 +13,7 @@
 #include <atomic>
 #include <thread>
 #include <set>
-
-/// @brief SSE client connection for updates
-struct SSEClient {
-    httplib::DataSink* sink;
-    std::string client_id;
-};
+#include <functional>
 
 // Forward declaration
 class CLIServer;
@@ -37,9 +33,9 @@ struct CliServerState {
     // Request mutex - ensures only one request is processed at a time
     std::mutex request_mutex;
 
-    // SSE clients for broadcasting updates
-    std::vector<SSEClient*> sse_clients;
-    std::mutex sse_mutex;
+    // SSE observer clients (connected to /updates)
+    std::vector<ClientOutputs::StreamingOutput*> observers;
+    std::mutex observers_mutex;
 
     std::atomic<bool> processing{false};
     std::atomic<bool> running{true};
@@ -54,8 +50,12 @@ struct CliServerState {
     // Wait for and get next input
     std::string get_next_input();
 
-    // Broadcast event to all SSE clients
-    void broadcast_event(const std::string& event_type, const nlohmann::json& data);
+    // Send event to all observers - removes disconnected ones
+    void send_to_observers(const std::function<void(ClientOutputs::ClientOutput&)>& action);
+
+    // Register/unregister observer
+    void register_observer(ClientOutputs::StreamingOutput* observer);
+    void unregister_observer(ClientOutputs::StreamingOutput* observer);
 };
 
 /// @brief CLI Server - HTTP server that executes tools locally

@@ -41,5 +41,8 @@ private:
     std::atomic<bool> sse_running{false};
     void sse_listener_thread();
 
+    // Track when we're making a request (to skip our own user message echo)
+    std::atomic<bool> request_in_progress{false};
+
     Response send_request(const std::string& prompt, EventCallback callback = nullptr);
 };

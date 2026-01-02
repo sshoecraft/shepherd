@@ -201,21 +201,18 @@ void CLIClientBackend::sse_listener_thread() {
                     auto event_data = json_data.value("data", nlohmann::json::object());
 
                     if (event_type == "message_added") {
-                        // Render message by role - output handler decides formatting
                         std::string role = event_data.value("role", "unknown");
                         std::string content = event_data.value("content", "");
 
-                        Message::Role msg_type = Message::ASSISTANT;
-                        std::string display_content = content;
                         if (role == "user") {
-                            msg_type = Message::USER;
-                            display_content = "> " + content;
-                        } else if (role == "tool") {
-                            msg_type = Message::TOOL_RESPONSE;
+                            // Skip our own user messages (frontend already echoed)
+                            // Show other clients' messages when we're not in a request
+                            if (!request_in_progress) {
+                                callback(CallbackEvent::USER_PROMPT, "> " + content + "\n", "", "");
+                            }
                         }
-                        std::cout << display_content + "\n";
+                        // Tool and assistant messages handled by other events
                     } else if (event_type == "tool_call") {
-                        // Tool call notification - format as * tool_name(param=value, ...)
                         std::string tool_name = event_data.value("tool_call", "tool");
                         std::string args_str;
                         if (event_data.contains("parameters")) {
@@ -234,31 +231,22 @@ void CLIClientBackend::sse_listener_thread() {
                                 }
                             } catch (...) {}
                         }
-                        std::cout << "  * " + tool_name + "(" + args_str + ")\n";
+                        // Use callback with TOOL_CALL event
+                        callback(CallbackEvent::TOOL_CALL, args_str, tool_name, "");
                     } else if (event_type == "tool_result") {
-                        // Tool execution result
                         bool success = event_data.value("success", true);
-                        if (success) {
-                            std::cout << std::string("    ✓ Success\n");
-                        } else {
-                            std::string error = event_data.value("error", "Unknown error");
-                            std::cout << std::string("    Error: ") + error + "\n";
-                        }
-                    } else if (event_type == "user_echo") {
-                        // User prompt echo from server
-                        std::string content = event_data.value("user_echo", "");
-                        if (!content.empty()) {
-                            std::cout << content;
-                        }
+                        std::string result_str = success ? "Success" : ("Error: " + event_data.value("error", "Unknown"));
+                        callback(CallbackEvent::TOOL_RESULT, result_str, event_data.value("tool_name", ""), "");
                     } else if (event_type == "delta") {
-                        // Streaming delta from server
                         std::string delta = event_data.value("delta", "");
                         if (!delta.empty()) {
-                            std::cout << delta;
+                            callback(CallbackEvent::CONTENT, delta, "", "");
                         }
                     } else if (event_type == "response_complete") {
-                        // End of response - add newline
-                        std::cout << std::string("\n");
+                        callback(CallbackEvent::STOP, "stop", "", "");
+                    } else if (event_type == "error") {
+                        std::string error = event_data.value("error", "Unknown error");
+                        callback(CallbackEvent::ERROR, error, "server_error", "");
                     }
                 } catch (...) {}
                 return sse_running;
@@ -280,75 +268,50 @@ void CLIClientBackend::sse_listener_thread() {
     dout(1) << "SSE listener thread stopped" << std::endl;
 }
 
-Response CLIClientBackend::send_request(const std::string& prompt, EventCallback callback) {
+Response CLIClientBackend::send_request(const std::string& prompt, EventCallback cb) {
     Response resp;
     std::string endpoint = base_url + "/request";
 
     nlohmann::json request;
     request["prompt"] = prompt;
-    request["stream"] = true;  // Server streams, SSE handles display
+    request["stream"] = false;  // Non-streaming - SSE /updates handles all display
 
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
 
-    // Just POST and wait for completion - SSE handles all display
-    std::string accumulated;
-    bool stream_complete = false;
+    // Mark request in progress (SSE listener will skip our own user messages)
+    request_in_progress = true;
 
-    auto stream_handler = [&](const std::string& chunk, void* userdata) -> bool {
-        if (stream_complete) return true;
+    // Simple synchronous POST - SSE listener handles real-time display
+    HttpResponse http_resp = http_client->post(endpoint, request.dump(), headers);
 
-        std::istringstream stream(chunk);
-        std::string line;
-
-        while (std::getline(stream, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
-
-            if (line.substr(0, 6) == "data: ") {
-                try {
-                    nlohmann::json event = nlohmann::json::parse(line.substr(6));
-
-                    if (event.contains("user_echo")) {
-                        // User prompt echo - fire callback with USER type
-                        if (config->streaming) {
-                            callback(CallbackEvent::USER_PROMPT, event["user_echo"].get<std::string>(), "", "");
-                        }
-                    }
-                    if (event.contains("delta")) {
-                        std::string delta = event["delta"].get<std::string>();
-                        accumulated += delta;
-                        // Fire callback with ASSISTANT type for streaming
-                        if (config->streaming) {
-                            callback(CallbackEvent::CONTENT, delta, "", "");
-                        }
-                    }
-                    if (event.contains("done") && event["done"].get<bool>()) {
-                        resp.content = event.value("response", accumulated);
-                        resp.success = true;
-                        resp.code = Response::SUCCESS;
-                        stream_complete = true;
-                    }
-                    if (event.contains("error")) {
-                        resp.success = false;
-                        resp.code = Response::ERROR;
-                        resp.error = event["error"].get<std::string>();
-                        stream_complete = true;
-                    }
-                } catch (...) {}
-            }
-        }
-        return true;
-    };
-
-    HttpResponse http_resp = http_client->post_stream_cancellable(endpoint, request.dump(), headers, stream_handler, nullptr);
-
-    if (!http_resp.is_success() && !resp.success) {
+    if (!http_resp.is_success()) {
+        request_in_progress = false;
         resp.success = false;
         resp.code = Response::ERROR;
         resp.error = http_resp.error_message.empty() ? "HTTP request failed" : http_resp.error_message;
+        return resp;
     }
 
+    try {
+        nlohmann::json response_json = nlohmann::json::parse(http_resp.body);
+
+        if (response_json.value("success", false)) {
+            resp.success = true;
+            resp.code = Response::SUCCESS;
+            resp.content = response_json.value("response", "");
+        } else {
+            resp.success = false;
+            resp.code = Response::ERROR;
+            resp.error = response_json.value("error", "Unknown error");
+        }
+    } catch (const std::exception& e) {
+        resp.success = false;
+        resp.code = Response::ERROR;
+        resp.error = std::string("Failed to parse response: ") + e.what();
+    }
+
+    request_in_progress = false;
     return resp;
 }
 

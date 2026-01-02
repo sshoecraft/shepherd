@@ -37,6 +37,7 @@ set(SHEPHERD_SOURCES
     frontends/tui.cpp
     frontends/api_server.cpp
     frontends/cli_server.cpp
+    frontends/client_output.cpp
 
     # Backend sources (always included)
     backends/factory.cpp
@@ -89,6 +90,7 @@ if(ENABLE_LLAMACPP)
     list(APPEND SHEPHERD_SOURCES
         backends/llamacpp.cpp
         backends/chat_template.cpp
+        backends/channel_parser.cpp
     )
 endif()
 
@@ -365,11 +367,6 @@ target_link_libraries(shepherd PRIVATE replxx)
 target_include_directories(shepherd PRIVATE vendor/replxx/include)
 message(STATUS "Using replxx for line editing")
 
-# FTXUI for TUI mode
-add_subdirectory(vendor/ftxui)
-target_link_libraries(shepherd PRIVATE ftxui::screen ftxui::dom ftxui::component)
-message(STATUS "Using FTXUI for TUI")
-
 # Compiler options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Common warning flags
@@ -401,9 +398,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_definitions(shepherd PRIVATE _DEBUG)
         message(STATUS "Debug build: -g -O0 -D_DEBUG")
     elseif(CMAKE_BUILD_TYPE STREQUAL "Release")
-        target_compile_options(shepherd PRIVATE -O3 -march=native)
+        target_compile_options(shepherd PRIVATE -O3 -march=native -pipe -flto)
+        target_link_options(shepherd PRIVATE -flto)
         target_compile_definitions(shepherd PRIVATE NDEBUG)
-        message(STATUS "Release build: -O3 -march=native -DNDEBUG")
+        message(STATUS "Release build: -O3 -march=native -pipe -flto -DNDEBUG")
     elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
         target_compile_options(shepherd PRIVATE -g -O2)
         target_compile_definitions(shepherd PRIVATE NDEBUG)
@@ -418,3 +416,7 @@ message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
 
 # Install targets
 install(TARGETS shepherd RUNTIME DESTINATION bin)
+
+# Test suite (optional, excluded from default build)
+# Build with: cmake -DBUILD_TESTS=ON ..
+add_subdirectory(tests EXCLUDE_FROM_ALL)

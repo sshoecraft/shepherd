@@ -62,11 +62,13 @@ enum class CallbackEvent {
     CONTENT,      // Assistant text chunk
     THINKING,     // Reasoning/thinking chunk (if show_thinking enabled)
     TOOL_CALL,    // Model requesting a tool call
+    TOOL_RESULT,  // Result of tool execution (summary in content)
     USER_PROMPT,  // Echo user's prompt back
     SYSTEM,       // System info/status messages
     ERROR,        // Error occurred (message in content, type in name)
     STOP,         // Generation complete (finish_reason in content)
-    CODEBLOCK     // Content inside ``` code blocks (for special formatting)
+    CODEBLOCK,    // Content inside ``` code blocks (for special formatting)
+    STATS         // Performance stats (prefill/decode speed, KV cache info)
 };
 
 // Defined in backends/backend.h
@@ -327,47 +329,58 @@ Provider connection:
 
 ## Server Modes
 
-### CLI Server (cli_server.cpp)
-- Endpoints: `/request`, `/updates` (SSE), `/input`
+### CLI Server (frontends/cli_server.cpp)
+- Endpoints: `/request`, `/updates` (SSE), `/session`, `/clear`
 - Executes tools locally
 - Streams via Server-Sent Events
 - Maintains session state
+- See [docs/cliserver.md](cliserver.md) for complete architecture
 
-### API Server (api_server.cpp)
+### API Server (frontends/api_server.cpp)
 - OpenAI-compatible endpoints
 - `/v1/chat/completions`
 - `/v1/models`
 - Stateless (prefix caching for efficiency)
 - No tool execution (returns tool_calls to client)
 
+### CLI Client Backend (backends/cli_client.cpp)
+- Proxy backend for remote CLI server connections
+- SSE listener thread for real-time updates from server
+- Tool execution happens on server, not client
+- See [docs/cliserver.md](cliserver.md) for architecture details
+
 ## File Structure
 
 ```
 shepherd/
 ├── main.cpp              # Entry point, arg parsing
-├── cli.cpp/h             # CLI frontend
-├── frontend.cpp/h        # Frontend base class
-├── session.cpp/h         # Session management
-├── terminal_io.cpp/h     # Input/output handling
-├── tui.cpp/h             # NCurses TUI
-├── generation_thread.cpp/h # Async generation
+├── frontend.h/cpp        # Frontend base class
+├── backend.h/cpp         # Backend base class + EventCallback
+├── session.h/cpp         # Session management
+├── server.h/cpp          # Server base class
+├── terminal_io.h/cpp     # Input/output handling
+├── frontends/
+│   ├── cli.h/cpp         # CLI frontend
+│   ├── tui.h/cpp         # NCurses TUI
+│   ├── api_server.h/cpp  # OpenAI-compatible API server
+│   └── cli_server.h/cpp  # CLI server (HTTP + tool execution)
 ├── backends/
-│   ├── backend.h         # Abstract base + EventCallback
-│   ├── api.cpp/h         # API backend base
-│   ├── openai.cpp/h      # OpenAI implementation
-│   ├── anthropic.cpp/h   # Anthropic implementation
-│   ├── gemini.cpp/h      # Google Gemini
-│   ├── ollama.cpp/h      # Ollama
-│   ├── llamacpp.cpp/h    # llama.cpp
-│   ├── tensorrt.cpp/h    # TensorRT-LLM
-│   └── cli_client.cpp/h  # Remote CLI server proxy
-├── server/
-│   ├── server.cpp/h      # Server base class
-│   ├── api_server.cpp/h  # OpenAI-compatible API
-│   └── cli_server.cpp/h  # CLI over HTTP
+│   ├── api.h/cpp         # API backend base
+│   ├── openai.h/cpp      # OpenAI implementation
+│   ├── anthropic.h/cpp   # Anthropic implementation
+│   ├── gemini.h/cpp      # Google Gemini
+│   ├── ollama.h/cpp      # Ollama
+│   ├── llamacpp.h/cpp    # llama.cpp
+│   ├── tensorrt.h/cpp    # TensorRT-LLM
+│   └── cli_client.h/cpp  # Remote CLI server proxy
 ├── tools/
-│   ├── tools.cpp/h       # Tool registry
+│   ├── tools.h/cpp       # Tool registry
 │   └── *.cpp             # Tool implementations
 └── docs/
-    └── *.md              # Documentation
+    ├── architecture.md   # This file
+    ├── backends.md       # Backend implementations
+    ├── frontend.md       # Frontend implementations
+    ├── server.md         # Server implementations
+    ├── cliserver.md      # CLI server/client architecture
+    └── *.md              # Other documentation
 ```

@@ -40,29 +40,35 @@ std::string CliServerState::get_next_input() {
     return prompt;
 }
 
-void CliServerState::broadcast_event(const std::string& event_type, const nlohmann::json& data) {
-    std::lock_guard<std::mutex> lock(sse_mutex);
+void CliServerState::send_to_observers(const std::function<void(ClientOutputs::ClientOutput&)>& action) {
+    std::lock_guard<std::mutex> lock(observers_mutex);
 
-    nlohmann::json event;
-    event["type"] = event_type;
-    event["data"] = data;
-    std::string sse_data = "data: " + event.dump() + "\n\n";
-
-    dprintf(3, "Broadcasting SSE event: %s to %zu clients", event_type.c_str(), sse_clients.size());
-
-    // Send to all connected SSE clients
-    for (auto it = sse_clients.begin(); it != sse_clients.end(); ) {
-        SSEClient* client = *it;
-        if (client && client->sink) {
-            if (!client->sink->write(sse_data.c_str(), sse_data.size())) {
-                // Client disconnected, remove from list
-                dprintf(1, "SSE client disconnected during broadcast");
-                it = sse_clients.erase(it);
-                delete client;
-                continue;
-            }
+    // Send to all connected observers, remove disconnected ones
+    for (auto it = observers.begin(); it != observers.end(); ) {
+        ClientOutputs::StreamingOutput* observer = *it;
+        if (observer && observer->is_connected()) {
+            action(*observer);
+            ++it;
+        } else {
+            dprintf(1, "Observer disconnected during send");
+            it = observers.erase(it);
+            // Note: observer is owned by the /updates content provider, not deleted here
         }
-        ++it;
+    }
+}
+
+void CliServerState::register_observer(ClientOutputs::StreamingOutput* observer) {
+    std::lock_guard<std::mutex> lock(observers_mutex);
+    observers.push_back(observer);
+    dprintf(2, "Observer registered, total: %zu", observers.size());
+}
+
+void CliServerState::unregister_observer(ClientOutputs::StreamingOutput* observer) {
+    std::lock_guard<std::mutex> lock(observers_mutex);
+    auto it = std::find(observers.begin(), observers.end(), observer);
+    if (it != observers.end()) {
+        observers.erase(it);
+        dprintf(2, "Observer unregistered, remaining: %zu", observers.size());
     }
 }
 
@@ -87,51 +93,174 @@ static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& res
     return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
 }
 
-// Process a single request with tool execution loop
-static json process_request(CliServerState& state, const std::string& prompt) {
-    json result;
-    result["success"] = true;
-
-    std::string accumulated_response;
-
-    // Add user message and generate response
-    // Output flows through backend callback; response retrieved from session messages
-    state.session->add_message(Message::USER, prompt);
-
-    // Broadcast user message to all SSE clients
-    // Find the user message we just added
-    for (auto it = state.session->messages.rbegin(); it != state.session->messages.rend(); ++it) {
-        if (it->role == Message::USER) {
-            json msg_json;
-            msg_json["role"] = it->get_role();
-            msg_json["content"] = utf8_sanitizer::sanitize_utf8(it->content);
-            msg_json["tokens"] = it->tokens;
-            state.broadcast_event("message_added", msg_json);
-            break;
+// Helper to convert tool parameters to JSON
+static json params_to_json(const std::map<std::string, std::any>& parameters) {
+    json params_json = json::object();
+    for (const auto& [key, val] : parameters) {
+        if (val.type() == typeid(std::string)) {
+            params_json[key] = std::any_cast<std::string>(val);
+        } else if (val.type() == typeid(int)) {
+            params_json[key] = std::any_cast<int>(val);
+        } else if (val.type() == typeid(double)) {
+            params_json[key] = std::any_cast<double>(val);
+        } else if (val.type() == typeid(bool)) {
+            params_json[key] = std::any_cast<bool>(val);
+        } else {
+            params_json[key] = "[complex]";
         }
     }
+    return params_json;
+}
 
-    // Find the assistant response
+// Unified generation function - sends to requester AND all observers
+static void do_generation(CliServerState& state,
+                          ClientOutputs::ClientOutput* requester,
+                          const std::string& prompt) {
+    std::string accumulated_response;
+
+    // Send user prompt to requester and observers
+    requester->on_user_prompt(prompt);
+    state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+        obs.on_user_prompt(prompt);
+    });
+
+    // Tool call filtering state
+    std::vector<std::string> tool_markers = state.backend->get_tool_call_markers();
+    std::string pending_buffer;
+    bool in_tool_call = false;
+
+    // Helper to check if buffer ends with partial marker
+    auto ends_with_partial_marker = [&tool_markers](const std::string& buf) -> bool {
+        for (const auto& marker : tool_markers) {
+            for (size_t len = 1; len < marker.size() && len <= buf.size(); len++) {
+                if (buf.substr(buf.size() - len) == marker.substr(0, len)) {
+                    return true;
+                }
+            }
+        }
+        std::string json_pattern = "{\"name\"";
+        for (size_t len = 1; len < json_pattern.size() && len <= buf.size(); len++) {
+            if (buf.substr(buf.size() - len) == json_pattern.substr(0, len)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Helper to check if buffer contains any marker
+    auto matches_marker = [&tool_markers](const std::string& buf) -> bool {
+        for (const auto& marker : tool_markers) {
+            if (buf.find(marker) != std::string::npos) {
+                return true;
+            }
+        }
+        if (buf.find("{\"name\"") != std::string::npos) {
+            return true;
+        }
+        return false;
+    };
+
+    // Find position where tool call starts in buffer
+    auto find_tool_call_start = [&tool_markers](const std::string& buf) -> size_t {
+        size_t earliest = std::string::npos;
+        for (const auto& marker : tool_markers) {
+            size_t pos = buf.find(marker);
+            if (pos != std::string::npos && (earliest == std::string::npos || pos < earliest)) {
+                earliest = pos;
+            }
+        }
+        size_t json_pos = buf.find("{\"name\"");
+        if (json_pos != std::string::npos && (earliest == std::string::npos || json_pos < earliest)) {
+            earliest = json_pos;
+        }
+        return earliest;
+    };
+
+    // Helper to flush pending buffer as delta
+    auto flush_pending = [&]() {
+        if (!pending_buffer.empty()) {
+            requester->on_delta(pending_buffer);
+            state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                obs.on_delta(pending_buffer);
+            });
+            pending_buffer.clear();
+        }
+    };
+
+    // Callback streams to requester AND all observers
+    auto callback = [&](CallbackEvent type,
+                        const std::string& content,
+                        const std::string& tool_name_arg,
+                        const std::string& tool_call_id) -> bool {
+        // Handle STOP
+        if (type == CallbackEvent::STOP) {
+            flush_pending();
+            return true;
+        }
+
+        // Handle ERROR
+        if (type == CallbackEvent::ERROR) {
+            requester->on_error(content);
+            state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                obs.on_error(content);
+            });
+            return true;
+        }
+
+        // Handle TOOL_CALL - handled via pending_tool_calls queue
+        if (type == CallbackEvent::TOOL_CALL) {
+            return true;
+        }
+
+        if (content.empty()) return true;
+
+        // Handle USER_PROMPT echo (already handled above)
+        if (type == CallbackEvent::USER_PROMPT) {
+            return true;
+        }
+
+        const std::string& delta = content;
+        pending_buffer += delta;
+
+        if (in_tool_call) {
+            return true;
+        }
+
+        if (matches_marker(pending_buffer)) {
+            size_t tool_start = find_tool_call_start(pending_buffer);
+            if (tool_start > 0) {
+                std::string before_tool = pending_buffer.substr(0, tool_start);
+                requester->on_delta(before_tool);
+                state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                    obs.on_delta(before_tool);
+                });
+                pending_buffer = pending_buffer.substr(tool_start);
+            }
+            in_tool_call = true;
+            return true;
+        }
+
+        if (ends_with_partial_marker(pending_buffer)) {
+            return true;
+        }
+
+        // Safe to output
+        flush_pending();
+        return true;
+    };
+
+    // Set callback and add user message (triggers generation)
+    state.backend->callback = callback;
+    state.session->add_message(Message::USER, prompt);
+
+    // Build Response from session's last message
     Response resp;
     resp.success = true;
     if (!state.session->messages.empty() &&
         state.session->messages.back().role == Message::ASSISTANT) {
         resp.content = state.session->messages.back().content;
     }
-
     accumulated_response = resp.content;
-
-    // Broadcast initial assistant response to all SSE clients
-    if (!resp.content.empty() && !state.session->messages.empty()) {
-        const auto& assistant_msg = state.session->messages.back();
-        if (assistant_msg.get_role() == "assistant") {
-            json msg_json;
-            msg_json["role"] = assistant_msg.get_role();
-            msg_json["content"] = utf8_sanitizer::sanitize_utf8(assistant_msg.content);
-            msg_json["tokens"] = assistant_msg.tokens;
-            state.broadcast_event("message_added", msg_json);
-        }
-    }
 
     // Tool execution loop
     const int max_tool_iterations = 50;
@@ -140,22 +269,38 @@ static json process_request(CliServerState& state, const std::string& prompt) {
     while (iteration < max_tool_iterations) {
         iteration++;
 
-        // Check for tool calls
         auto tool_call_opt = extract_tool_call(resp, state.backend);
-
         if (!tool_call_opt) {
-            // No more tool calls - done
             break;
         }
 
         auto& tool_call = *tool_call_opt;
         std::string tool_name = tool_call.name;
+        json params_json = params_to_json(tool_call.parameters);
 
-        // Execute tool (handles truncation)
-        ToolResult tool_result = state.server->execute_tool(*state.tools, tool_name, tool_call.parameters, tool_call.tool_call_id);
+        // Send tool call to requester and observers
+        requester->on_tool_call(tool_name, params_json, tool_call.tool_call_id);
+        state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+            obs.on_tool_call(tool_name, params_json, tool_call.tool_call_id);
+        });
 
-        // Send tool result to model and get next response
-        state.session->add_message(Message::TOOL_RESPONSE, tool_result.content, tool_name, tool_call.tool_call_id);
+        // Execute tool
+        ToolResult tool_result = state.server->execute_tool(
+            *state.tools, tool_name, tool_call.parameters, tool_call.tool_call_id);
+
+        // Send tool result to requester and observers
+        requester->on_tool_result(tool_name, tool_result.success, tool_result.error);
+        state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+            obs.on_tool_result(tool_name, tool_result.success, tool_result.error);
+        });
+
+        // Reset filtering state for next generation
+        in_tool_call = false;
+        pending_buffer.clear();
+
+        // Send tool result to model
+        state.session->add_message(
+            Message::TOOL_RESPONSE, tool_result.content, tool_name, tool_call.tool_call_id);
 
         // Build Response from session's last message
         if (!state.session->messages.empty() &&
@@ -164,44 +309,62 @@ static json process_request(CliServerState& state, const std::string& prompt) {
             resp.content = state.session->messages.back().content;
         }
 
-        // Broadcast tool message to all SSE clients
-        if (!state.session->messages.empty()) {
-            const auto& tool_msg = state.session->messages.back();
-            json msg_json;
-            msg_json["role"] = tool_msg.get_role();
-            msg_json["content"] = utf8_sanitizer::sanitize_utf8(tool_msg.content);
-            msg_json["tokens"] = tool_msg.tokens;
-            if (!tool_msg.tool_name.empty()) {
-                msg_json["tool_name"] = tool_msg.tool_name;
-            }
-            if (!tool_msg.tool_call_id.empty()) {
-                msg_json["tool_call_id"] = tool_msg.tool_call_id;
-            }
-            state.broadcast_event("message_added", msg_json);
-        }
-
-        // Broadcast assistant response to all SSE clients
-        if (!resp.content.empty() && !state.session->messages.empty()) {
-            const auto& assistant_msg = state.session->messages.back();
-            if (assistant_msg.get_role() == "assistant") {
-                json msg_json;
-                msg_json["role"] = assistant_msg.get_role();
-                msg_json["content"] = utf8_sanitizer::sanitize_utf8(assistant_msg.content);
-                msg_json["tokens"] = assistant_msg.tokens;
-                state.broadcast_event("message_added", msg_json);
-            }
-        }
-
-        if (!resp.success) {
-            result["success"] = false;
-            result["error"] = resp.error;
-            return result;
-        }
-
         accumulated_response = resp.content;
     }
 
-    result["response"] = accumulated_response;
+    // Send completion to requester and observers
+    requester->on_complete(accumulated_response);
+    state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+        obs.on_complete(accumulated_response);
+    });
+}
+
+// Process a single request with tool execution loop (for async requests)
+static json process_request(CliServerState& state, const std::string& prompt) {
+    // Create a batched output that just collects the response
+    // (no HTTP response to write to - this is for async processing)
+    std::string accumulated_response;
+    bool has_error = false;
+    std::string error_message;
+
+    // Simple output collector (not a real HTTP response)
+    struct AsyncCollector : public ClientOutputs::ClientOutput {
+        std::string& accumulated;
+        bool& has_error;
+        std::string& error_msg;
+
+        AsyncCollector(std::string& acc, bool& err, std::string& errmsg)
+            : accumulated(acc), has_error(err), error_msg(errmsg) {}
+
+        void on_delta(const std::string& delta) override {
+            accumulated += delta;
+        }
+        void on_user_prompt(const std::string&) override {}
+        void on_message_added(const std::string&, const std::string&, int) override {}
+        void on_tool_call(const std::string&, const nlohmann::json&, const std::string&) override {}
+        void on_tool_result(const std::string&, bool, const std::string&) override {}
+        void on_complete(const std::string& full_response) override {
+            accumulated = full_response;
+        }
+        void on_error(const std::string& error) override {
+            has_error = true;
+            error_msg = error;
+        }
+        void flush() override {}
+        bool is_connected() const override { return true; }
+    };
+
+    AsyncCollector collector(accumulated_response, has_error, error_message);
+    do_generation(state, &collector, prompt);
+
+    json result;
+    if (has_error) {
+        result["success"] = false;
+        result["error"] = error_message;
+    } else {
+        result["success"] = true;
+        result["response"] = accumulated_response;
+    }
     return result;
 }
 
@@ -356,286 +519,28 @@ void CLIServer::register_endpoints() {
                 res.set_header("Cache-Control", "no-cache");
                 res.set_header("X-Accel-Buffering", "no");
 
-                // Capture state pointer for lambda
                 CliServerState* state_ptr = &state;
 
                 res.set_content_provider(
                     "text/event-stream",
-                    [state_ptr, prompt](size_t offset, httplib::DataSink& sink) mutable {
-                        std::string accumulated_response;
+                    [state_ptr, prompt, client_info](size_t offset, httplib::DataSink& sink) mutable {
+                        // Create streaming output for this request
+                        ClientOutputs::StreamingOutput requester(&sink, client_info);
 
-                        // Broadcast user message to all SSE clients
-                        json user_msg_event;
-                        user_msg_event["role"] = "user";
-                        user_msg_event["content"] = prompt;
-                        state_ptr->broadcast_event("message_added", user_msg_event);
+                        // Run unified generation
+                        do_generation(*state_ptr, &requester, prompt);
 
-                        // Tool call filtering state
-                        std::vector<std::string> tool_markers = state_ptr->backend->get_tool_call_markers();
-                        std::string pending_buffer;
-                        bool in_tool_call = false;
-
-                        // Helper to check if buffer ends with partial marker
-                        auto ends_with_partial_marker = [&tool_markers](const std::string& buf) -> bool {
-                            // Check if buffer ends with start of any marker
-                            for (const auto& marker : tool_markers) {
-                                for (size_t len = 1; len < marker.size() && len <= buf.size(); len++) {
-                                    if (buf.substr(buf.size() - len) == marker.substr(0, len)) {
-                                        return true;
-                                    }
-                                }
-                            }
-                            // Check for partial JSON tool call pattern at end
-                            std::string json_pattern = "{\"name\"";
-                            for (size_t len = 1; len < json_pattern.size() && len <= buf.size(); len++) {
-                                if (buf.substr(buf.size() - len) == json_pattern.substr(0, len)) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        };
-
-                        // Helper to check if buffer contains any marker
-                        auto matches_marker = [&tool_markers](const std::string& buf) -> bool {
-                            for (const auto& marker : tool_markers) {
-                                if (buf.find(marker) != std::string::npos) {
-                                    return true;
-                                }
-                            }
-                            // Check for raw JSON tool call
-                            if (buf.find("{\"name\"") != std::string::npos) {
-                                return true;
-                            }
-                            return false;
-                        };
-
-                        // Find position where tool call starts in buffer
-                        auto find_tool_call_start = [&tool_markers](const std::string& buf) -> size_t {
-                            size_t earliest = std::string::npos;
-                            for (const auto& marker : tool_markers) {
-                                size_t pos = buf.find(marker);
-                                if (pos != std::string::npos && (earliest == std::string::npos || pos < earliest)) {
-                                    earliest = pos;
-                                }
-                            }
-                            size_t json_pos = buf.find("{\"name\"");
-                            if (json_pos != std::string::npos && (earliest == std::string::npos || json_pos < earliest)) {
-                                earliest = json_pos;
-                            }
-                            return earliest;
-                        };
-
-                        // Callback streams to SSE sink with tool call filtering
-                        auto callback = [&](CallbackEvent type,
-                                                   const std::string& content,
-                                                   const std::string& tool_name_arg,
-                                                   const std::string& tool_call_id) -> bool {
-                            // Handle STOP - signals completion, content is finish_reason
-                            if (type == CallbackEvent::STOP) {
-                                // Flush any pending content before signaling completion
-                                if (!pending_buffer.empty()) {
-                                    std::string sanitized = utf8_sanitizer::sanitize_utf8(pending_buffer);
-                                    json chunk;
-                                    chunk["delta"] = sanitized;
-                                    std::string data = "data: " + chunk.dump() + "\n\n";
-                                    state_ptr->broadcast_event("delta", {{"delta", sanitized}});
-                                    sink.write(data.c_str(), data.size());
-                                    pending_buffer.clear();
-                                }
-                                return true;
-                            }
-
-                            // Handle ERROR
-                            if (type == CallbackEvent::ERROR) {
-                                json error_chunk;
-                                error_chunk["error"] = content;
-                                std::string data = "data: " + error_chunk.dump() + "\n\n";
-                                sink.write(data.c_str(), data.size());
-                                return true;
-                            }
-
-                            // Handle TOOL_CALL
-                            if (type == CallbackEvent::TOOL_CALL) {
-                                // Tool calls are handled via pending_tool_calls queue
-                                return true;
-                            }
-
-                            if (content.empty()) return true;
-
-                            // Handle USER message echo specially
-                            if (type == CallbackEvent::USER_PROMPT) {
-                                json user_chunk;
-                                user_chunk["user_echo"] = content;
-                                std::string data = "data: " + user_chunk.dump() + "\n\n";
-                                state_ptr->broadcast_event("user_echo", user_chunk);
-                                sink.write(data.c_str(), data.size());
-                                return true;
-                            }
-
-                            const std::string& delta = content;  // Alias for compatibility
-
-                            // Add delta to pending buffer
-                            pending_buffer += delta;
-
-                            // If we're already in a tool call, just buffer it
-                            if (in_tool_call) {
-                                return true;
-                            }
-
-                            // Check if buffer contains a tool call marker
-                            if (matches_marker(pending_buffer)) {
-                                // Found tool call - output everything before it, then buffer the rest
-                                size_t tool_start = find_tool_call_start(pending_buffer);
-                                if (tool_start > 0) {
-                                    // Output text before the tool call
-                                    std::string before_tool = pending_buffer.substr(0, tool_start);
-                                    std::string sanitized = utf8_sanitizer::sanitize_utf8(before_tool);
-
-                                    json chunk;
-                                    chunk["delta"] = sanitized;
-                                    std::string data = "data: " + chunk.dump() + "\n\n";
-
-                                    json delta_event;
-                                    delta_event["delta"] = sanitized;
-                                    state_ptr->broadcast_event("delta", delta_event);
-
-                                    sink.write(data.c_str(), data.size());
-
-                                    // Keep only the tool call part
-                                    pending_buffer = pending_buffer.substr(tool_start);
-                                }
-                                in_tool_call = true;
-                                return true;
-                            }
-
-                            // Check if buffer ends with partial marker - keep buffering
-                            if (ends_with_partial_marker(pending_buffer)) {
-                                return true;
-                            }
-
-                            // Safe to output the pending buffer
-                            if (!pending_buffer.empty()) {
-                                std::string sanitized = utf8_sanitizer::sanitize_utf8(pending_buffer);
-
-                                json chunk;
-                                chunk["delta"] = sanitized;
-                                std::string data = "data: " + chunk.dump() + "\n\n";
-
-                                json delta_event;
-                                delta_event["delta"] = sanitized;
-                                state_ptr->broadcast_event("delta", delta_event);
-
-                                pending_buffer.clear();
-                                if (!sink.write(data.c_str(), data.size())) {
-                                    return false;
-                                }
-                            }
-                            return true;
-                        };
-
-                        // Set callback and add user message (triggers generation)
-                        state_ptr->backend->callback = callback;
-                        state_ptr->session->add_message(Message::USER, prompt);
-
-                        // Build Response from session's last message
-                        Response resp;
-                        resp.success = true;
-                        if (!state_ptr->session->messages.empty() &&
-                            state_ptr->session->messages.back().role == Message::ASSISTANT) {
-                            resp.content = state_ptr->session->messages.back().content;
-                        }
-
-                        accumulated_response = resp.content;
-
-                        // Tool execution loop
-                        const int max_tool_iterations = 50;
-                        int iteration = 0;
-
-                        while (iteration < max_tool_iterations) {
-                            iteration++;
-
-                            auto tool_call_opt = extract_tool_call(resp, state_ptr->backend);
-                            if (!tool_call_opt) {
-                                break;
-                            }
-
-                            auto& tool_call = *tool_call_opt;
-                            std::string tool_name = tool_call.name;
-
-                            // Send tool call notification with parameters
-                            json tool_chunk;
-                            tool_chunk["tool_call"] = tool_name;
-                            // Convert parameters map to JSON
-                            json params_json = json::object();
-                            for (const auto& [key, val] : tool_call.parameters) {
-                                if (val.type() == typeid(std::string)) {
-                                    params_json[key] = std::any_cast<std::string>(val);
-                                } else if (val.type() == typeid(int)) {
-                                    params_json[key] = std::any_cast<int>(val);
-                                } else if (val.type() == typeid(double)) {
-                                    params_json[key] = std::any_cast<double>(val);
-                                } else if (val.type() == typeid(bool)) {
-                                    params_json[key] = std::any_cast<bool>(val);
-                                } else {
-                                    params_json[key] = "[complex]";
-                                }
-                            }
-                            tool_chunk["parameters"] = params_json;
-                            std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
-                            sink.write(tool_data.c_str(), tool_data.size());
-
-                            // Broadcast to SSE clients
-                            state_ptr->broadcast_event("tool_call", tool_chunk);
-
-                            // Execute tool (handles truncation)
-                            ToolResult tool_result = state_ptr->server->execute_tool(*state_ptr->tools, tool_name, tool_call.parameters, tool_call.tool_call_id);
-
-                            // Broadcast tool result to SSE clients
-                            json result_event;
-                            result_event["tool_name"] = tool_name;
-                            result_event["success"] = tool_result.success;
-                            if (!tool_result.success) {
-                                result_event["error"] = tool_result.error;
-                            }
-                            state_ptr->broadcast_event("tool_result", result_event);
-
-                            // Reset filtering state for next generation
-                            in_tool_call = false;
-                            pending_buffer.clear();
-
-                            // Send tool result to model
-                            state_ptr->session->add_message(
-                                Message::TOOL_RESPONSE, tool_result.content, tool_name, tool_call.tool_call_id);
-
-                            // Build Response from session's last message
-                            if (!state_ptr->session->messages.empty() &&
-                                state_ptr->session->messages.back().role == Message::ASSISTANT) {
-                                resp.success = true;
-                                resp.content = state_ptr->session->messages.back().content;
-                            }
-
-                            accumulated_response = resp.content;
-                        }
-
-                        // Broadcast response complete to SSE clients
-                        json complete_event;
-                        complete_event["response"] = accumulated_response;
-                        state_ptr->broadcast_event("response_complete", complete_event);
-
-                        // Send final done message
-                        json done_chunk;
-                        done_chunk["done"] = true;
-                        done_chunk["response"] = accumulated_response;
-                        std::string done_data = "data: " + done_chunk.dump() + "\n\n";
-                        sink.write(done_data.c_str(), done_data.size());
+                        // Flush (sends done marker) and close
+                        requester.flush();
                         sink.done();
-                        return false;  // Signal no more content
+                        return false;
                     }
                 );
             } else {
-                // Non-streaming response
-                json response = process_request(state, prompt);
-                res.set_content(response.dump(), "application/json");
+                // Non-streaming response using BatchedOutput
+                ClientOutputs::BatchedOutput requester(&res);
+                do_generation(state, &requester, prompt);
+                requester.flush();
             }
 
         } catch (const std::exception& e) {
@@ -716,7 +621,7 @@ void CLIServer::register_endpoints() {
         res.set_content(response.dump(), "application/json");
     });
 
-    // GET /updates - SSE endpoint for live session updates
+    // GET /updates - SSE endpoint for live session updates (observers)
     tcp_server.Get("/updates", [this](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Content-Type", "text/event-stream");
         res.set_header("Cache-Control", "no-cache");
@@ -728,21 +633,16 @@ void CLIServer::register_endpoints() {
             client_id = req.remote_addr;
         }
 
-        std::cout << "Client connected: " << req.remote_addr << std::endl;
+        std::cout << "Observer connected: " << req.remote_addr << std::endl;
 
         res.set_content_provider(
             "text/event-stream",
             [this, client_id](size_t offset, httplib::DataSink& sink) mutable {
-                // Create client entry
-                SSEClient* client = new SSEClient();
-                client->sink = &sink;
-                client->client_id = client_id;
+                // Create streaming output for this observer
+                ClientOutputs::StreamingOutput observer(&sink, client_id);
 
-                // Register this client
-                {
-                    std::lock_guard<std::mutex> lock(state.sse_mutex);
-                    state.sse_clients.push_back(client);
-                }
+                // Register this observer
+                state.register_observer(&observer);
 
                 // Send initial connected event
                 json connected;
@@ -751,30 +651,20 @@ void CLIServer::register_endpoints() {
                 std::string initial = "data: " + connected.dump() + "\n\n";
                 sink.write(initial.c_str(), initial.size());
 
-                // Keep connection open - the broadcast_event function will send data
-                // This provider will block until the connection is closed
-                while (state.running) {
+                // Keep connection open - events are sent via send_to_observers()
+                while (state.running && observer.is_connected()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-                    // Check if sink is still valid by trying to send a keep-alive
-                    // (empty comment line is valid SSE)
-                    const char* keepalive = ": keepalive\n\n";
-                    if (!sink.write(keepalive, strlen(keepalive))) {
-                        break;  // Connection closed
+                    // Send keep-alive to detect disconnection
+                    if (!observer.send_keepalive()) {
+                        break;
                     }
                 }
 
-                // Cleanup: remove this client from the list
-                {
-                    std::lock_guard<std::mutex> lock(state.sse_mutex);
-                    auto it = std::find(state.sse_clients.begin(), state.sse_clients.end(), client);
-                    if (it != state.sse_clients.end()) {
-                        state.sse_clients.erase(it);
-                    }
-                }
-                delete client;
+                // Cleanup: unregister this observer
+                state.unregister_observer(&observer);
 
-                dout(1) << "SSE client disconnected: " + client_id << std::endl;
+                dout(1) << "Observer disconnected: " + client_id << std::endl;
                 sink.done();
                 return false;
             }

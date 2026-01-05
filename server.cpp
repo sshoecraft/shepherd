@@ -171,7 +171,8 @@ int handle_ctl_args(const std::vector<std::string>& args) {
 }
 
 // Server base class implementation
-Server::Server(const std::string& host, int port, const std::string& server_type)
+Server::Server(const std::string& host, int port, const std::string& server_type,
+               const std::string& auth_mode)
     : Frontend(), host(host), port(port), server_type(server_type) {
     // Set default control socket path
     // Prefer /var/tmp (persistent, user-writable) over /tmp
@@ -180,6 +181,9 @@ Server::Server(const std::string& host, int port, const std::string& server_type
     } else {
         control_socket_path = "/tmp/shepherd.sock";
     }
+
+    // Initialize API key authentication
+    key_store = KeyStore::create(auth_mode);
 
     // Default no-op callback - subclasses should set their own callback
     // in their constructor to properly handle events
@@ -196,6 +200,60 @@ Server::~Server() {
     if (control_thread.joinable()) {
         control_thread.join();
     }
+}
+
+bool Server::check_auth(const httplib::Request& req, httplib::Response& res) {
+    if (!key_store->is_enabled()) {
+        return true;  // No auth required
+    }
+
+    // Extract Bearer token from Authorization header
+    std::string auth_header = req.get_header_value("Authorization");
+    std::string prefix = "Bearer ";
+
+    if (auth_header.empty()) {
+        res.status = 401;
+        json error = {
+            {"error", {
+                {"message", "Missing Authorization header"},
+                {"type", "authentication_error"},
+                {"code", "401"}
+            }}
+        };
+        res.set_content(error.dump(), "application/json");
+        return false;
+    }
+
+    if (auth_header.length() < prefix.length() ||
+        auth_header.substr(0, prefix.length()) != prefix) {
+        res.status = 401;
+        json error = {
+            {"error", {
+                {"message", "Invalid Authorization header format. Expected: Bearer <api_key>"},
+                {"type", "authentication_error"},
+                {"code", "401"}
+            }}
+        };
+        res.set_content(error.dump(), "application/json");
+        return false;
+    }
+
+    std::string received_key = auth_header.substr(prefix.length());
+
+    if (!key_store->validate_key(received_key)) {
+        res.status = 401;
+        json error = {
+            {"error", {
+                {"message", "Invalid API key"},
+                {"type", "authentication_error"},
+                {"code", "401"}
+            }}
+        };
+        res.set_content(error.dump(), "application/json");
+        return false;
+    }
+
+    return true;
 }
 
 void Server::shutdown() {
@@ -385,6 +443,22 @@ int Server::run(Provider* cmdline_provider) {
 
     // Let subclass register its endpoints (uses frontend's session member)
     register_endpoints();
+
+    // Set up authentication middleware if enabled
+    if (key_store->is_enabled()) {
+        tcp_server.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+            // Public endpoints - no auth required
+            if (req.path == "/health" || req.path == "/v1/models") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+
+            if (!check_auth(req, res)) {
+                return httplib::Server::HandlerResponse::Handled;  // 401 response already set
+            }
+            return httplib::Server::HandlerResponse::Unhandled;  // Continue to route handler
+        });
+        std::cout << "API key authentication enabled" << std::endl;
+    }
 
     // Start control socket (required for graceful shutdown)
     if (!start_control_socket()) {

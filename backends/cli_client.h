@@ -34,6 +34,7 @@ public:
 
 private:
     std::string base_url;
+    std::string api_key;  // API key for server authentication
     std::unique_ptr<HttpClient> http_client;
 
     // SSE listener thread for updates

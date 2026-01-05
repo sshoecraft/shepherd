@@ -29,10 +29,10 @@ void Backend::ensure_markers_initialized() {
 
     // Add common fallback markers if backend doesn't provide any
     if (tool_call_start_markers.empty()) {
-        tool_call_start_markers = {"<tool_call>", "<function_call>", "<tool_use>", "{"};
+        tool_call_start_markers = {"<tool_call>", "<function_call>", "<tool_use>", "<tools>", "<action>", "<execute>", "{"};
     }
     if (tool_call_end_markers.empty()) {
-        tool_call_end_markers = {"</tool_call>", "</function_call>", "</tool_use>"};
+        tool_call_end_markers = {"</tool_call>", "</function_call>", "</tool_use>", "</tools>", "</action>", "</execute>"};
     }
 
     markers_initialized = true;
@@ -279,10 +279,8 @@ void Backend::emit_tool_call() {
 // If no channels: falls back to output() directly
 // Returns true to continue, false if cancelled or stop requested
 bool Backend::process_output(const char* text, size_t len) {
-    // In server mode, skip all filtering - client expects raw markdown
-    if (g_server_mode) {
-        return callback(CallbackEvent::CONTENT, std::string(text, len), "", "");
-    }
+    // Always filter output - backends detect tool calls and emit TOOL_CALL events
+    // Server mode affects how events are formatted for clients, not detection
 
     if (!channel_parsing_enabled_ || !channel_parser_) {
         // No channel parsing - use existing output filter directly

@@ -37,7 +37,7 @@ Frontend::Frontend() {
 Frontend::~Frontend() {
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& auth_mode) {
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -47,10 +47,10 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
         frontend = std::make_unique<TUI>();
     }
     else if (mode == "api-server") {
-        frontend = std::make_unique<APIServer>(host, port);
+        frontend = std::make_unique<APIServer>(host, port, auth_mode);
     }
     else if (mode == "cli-server") {
-        frontend = std::make_unique<CLIServer>(host, port);
+        frontend = std::make_unique<CLIServer>(host, port, auth_mode);
     }
     else {
         throw std::runtime_error("Invalid frontend mode: " + mode);

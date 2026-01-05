@@ -86,9 +86,11 @@ public:
     /// @param cmdline_provider Optional provider from command-line override
     /// @param no_mcp If true, skip MCP initialization
     /// @param no_tools If true, skip all tool initialization
+    /// @param auth_mode Authentication mode for servers: "none", "json"
     static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
                                             Provider* cmdline_provider = nullptr,
-                                            bool no_mcp = false, bool no_tools = false);
+                                            bool no_mcp = false, bool no_tools = false,
+                                            const std::string& auth_mode = "none");
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
     virtual void init(bool no_mcp = false, bool no_tools = false) {}

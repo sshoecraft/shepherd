@@ -50,7 +50,7 @@ TOOL_SRCS=tools/command_tools.cpp tools/core_tools.cpp tools/filesystem_tools.cp
 MCP_SRCS=mcp/mcp_client.cpp mcp/mcp_config.cpp mcp/mcp.cpp mcp/mcp_server.cpp mcp/mcp_tool.cpp
 API_TOOLS_SRCS=api_tools/api_tool_config.cpp api_tools/api_tool_adapter.cpp api_tools/api_tools.cpp
 SERVER_SRCS=server/server.cpp
-SRCS=main.cpp cli.cpp session.cpp config.cpp logger.cpp http_client.cpp rag.cpp $(BACKENDS) $(TOOL_SRCS) $(MCP_SRCS) $(API_TOOLS_SRCS) $(SERVER_SRCS)
+SRCS=main.cpp cli.cpp session.cpp config.cpp logger.cpp http_client.cpp rag.cpp auth.cpp $(BACKENDS) $(TOOL_SRCS) $(MCP_SRCS) $(API_TOOLS_SRCS) $(SERVER_SRCS)
 OBJS=$(SRCS:%.cpp=%$(OBJSUFFIX).o)
 DEPS=$(SRCS:%.cpp=.deps/%.d)
 DEPDIR=.deps

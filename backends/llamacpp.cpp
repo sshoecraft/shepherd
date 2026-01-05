@@ -162,12 +162,13 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
 
             dout(1) << "Configured " + std::to_string(gpu_devices.size() - 1) + " devices for multi-GPU" << std::endl;
 
+            const char* split_mode_str = (tensor_parallel > 1) ? "ROW" : "LAYER";
             if (pipeline_parallel > 1) {
-                dout(1) << "Pipeline parallelism: PP=" + std::to_string(pipeline_parallel) + " GPUs with ROW split mode (tensor + layer splitting)" << std::endl;
+                dout(1) << "Pipeline parallelism: PP=" + std::to_string(pipeline_parallel) + " GPUs with " + split_mode_str + " split mode" << std::endl;
             } else if (num_gpus_for_splitting == 0) {
-                dout(1) << "Multi-GPU: AUTO (using all available GPUs with ROW split mode)" << std::endl;
+                dout(1) << "Multi-GPU: AUTO (using all available GPUs with " + std::string(split_mode_str) + " split mode)" << std::endl;
             } else {
-                dout(1) << "Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with ROW split mode (consider using --pp for clarity)" << std::endl;
+                dout(1) << "Tensor parallelism: TP=" + std::to_string(tensor_parallel) + " GPUs with " + split_mode_str + " split mode" << std::endl;
             }
         } else {
             // No explicit TP/PP specified - auto-detect GPUs
@@ -1289,10 +1290,21 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         // Accept the token
         llama_sampler_accept(sampler, next_token);
 
-        // Convert token to text (filter special tokens with false parameter)
+        // Convert token to text
+        // NOTE: Testing whether raw output (like vLLM) works with shepherd client
+        // If so, we don't need special token filtering here at all
+#if 0
+        // Skip special tokens that llama.cpp's special=false misses
+        // llama.cpp only filters CONTROL|UNKNOWN, but not USER_DEFINED (added tokens like <|start|>)
+        // This matches vLLM's skip_special_tokens=True behavior
+        llama_token_attr attr = llama_vocab_get_attr(vocab, next_token);
+        if (attr & (LLAMA_TOKEN_ATTR_CONTROL | LLAMA_TOKEN_ATTR_USER_DEFINED)) {
+            dout(1) << "Skipping special token " << next_token << " (attr=" << attr << ")" << std::endl;
+            continue;
+        }
+#endif
         char token_str[256];
         int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, false);
-        dout(3) << "Token " << next_token << " -> len=" << token_len << std::endl;
 
         if (token_len > 0) {
             // Accumulate for final response
@@ -1846,12 +1858,15 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     // Add assistant response to backend_session to keep it in sync with KV cache
     // Without this, next request's prefix matching fails because backend_session
     // only has the user message but KV cache has user + assistant tokens
-    if (!result.empty()) {
+    // CRITICAL: Always add the message if any tokens were generated, even if content extraction
+    // returned empty (e.g., for channel-based models that only output analysis without final).
+    // This ensures the next request detects divergence and clears the stale KV cache.
+    if (last_assistant_kv_tokens > 0) {
         Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
         backend_session.messages.push_back(assistant_msg);
         backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
         backend_session.last_assistant_message_tokens = last_assistant_kv_tokens;
-        dout(1) << "Added assistant message to backend_session (" << last_assistant_kv_tokens << " tokens)" << std::endl;
+        dout(1) << "Added assistant message to backend_session (" << last_assistant_kv_tokens << " tokens, content_len=" << result.length() << ")" << std::endl;
     }
 
     // Content already delivered via callback during generate()

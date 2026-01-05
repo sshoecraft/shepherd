@@ -31,6 +31,7 @@ set(SHEPHERD_SOURCES
     frontend.cpp
     backend.cpp
     server.cpp
+    auth.cpp
 
     # Frontend sources
     frontends/cli.cpp

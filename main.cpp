@@ -16,6 +16,7 @@
 #include "backends/models.h"
 #include "version.h"
 #include "scheduler.h"
+#include "auth.h"
 
 #include <iostream>
 #include <fstream>
@@ -102,6 +103,7 @@ static void print_usage(int, char** argv) {
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
 	printf("	%s ctl <status|shutdown> [--socket PATH]\n", argv[0]);
+	printf("	%s keygen <--name NAME|list|remove NAME> [--notes NOTES]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 #ifdef _DEBUG
@@ -135,6 +137,7 @@ static void print_usage(int, char** argv) {
 	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
+	printf("	--auth-mode MODE   Authentication mode: none (default), json\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
 	printf("	--colors		   Force enable colored output (overrides environment)\n");
@@ -417,6 +420,16 @@ int main(int argc, char** argv) {
 		return handle_ctl_args(args);
 	}
 
+	// Handle keygen subcommand (API key management)
+	if (argc >= 2 && std::string(argv[1]) == "keygen") {
+		std::vector<std::string> args;
+		for (int i = 2; i < argc; i++) {
+			args.push_back(argv[i]);
+		}
+		auto out = [](const std::string& msg) { std::cout << msg; };
+		return handle_keygen_args(args, out);
+	}
+
 	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
 	bool no_stream = false;
@@ -426,6 +439,7 @@ int main(int argc, char** argv) {
 	std::string config_file_path;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
+	std::string auth_mode = "none";
 	std::string frontend_mode = "cli";
 
 	// Temporary storage for command-line overrides (applied to config after load)
@@ -484,6 +498,7 @@ int main(int argc, char** argv) {
 		{"cliserver", no_argument, 0, 1036},
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
+		{"auth-mode", required_argument, 0, 1045},
 		{"truncate", required_argument, 0, 1019},
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
@@ -591,6 +606,13 @@ int main(int argc, char** argv) {
 				break;
 			case 1017: // --host
 				server_host = optarg;
+				break;
+			case 1045: // --auth-mode
+				auth_mode = optarg;
+				if (auth_mode != "none" && auth_mode != "json") {
+					printf("Error: auth-mode must be one of: none, json\n");
+					return 1;
+				}
 				break;
 			case 1019: // --truncate
 				override.truncate_limit = std::atoi(optarg);
@@ -891,7 +913,7 @@ int main(int argc, char** argv) {
 		// Create and initialize frontend (loads providers, registers tools)
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
-		                                 cmdline_provider_ptr, no_mcp, no_tools);
+		                                 cmdline_provider_ptr, no_mcp, no_tools, auth_mode);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

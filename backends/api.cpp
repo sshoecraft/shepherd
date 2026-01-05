@@ -242,7 +242,7 @@ void ApiBackend::add_message(Session& session, Message::Role role, const std::st
                 }
             }
 
-            // Send any structured tool calls from API (in addition to content-detected ones)
+            // Send any structured tool calls from API
             if (!resp.tool_calls.empty()) {
                 for (const auto& tc : resp.tool_calls) {
                     callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);

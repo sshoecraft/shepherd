@@ -231,13 +231,18 @@ This ensures proper Jinja template formatting when TOOL_RESPONSE messages are ad
 After generation completes, the assistant message must be added to `backend_session.messages` to keep it synchronized with the KV cache:
 
 ```cpp
-// After successful generation
-Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
-backend_session.messages.push_back(assistant_msg);
-backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+// After generation - always add if tokens were generated
+if (last_assistant_kv_tokens > 0) {
+    Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
+    backend_session.messages.push_back(assistant_msg);
+    backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+}
 ```
 
-This is critical for prefix caching in server mode. Without this sync, subsequent requests would match the user message prefix but the KV cache would contain extra assistant tokens, causing immediate EOS generation.
+This is critical for prefix caching in server mode. The condition checks `last_assistant_kv_tokens > 0` rather than `!result.empty()` to handle channel-based models (like GPT-OSS) where content extraction may return empty if the model doesn't reach the final channel (e.g., due to max_tokens limits). Without proper sync:
+- The KV cache contains stray tokens (generation_prompt + partial_content + closing_tag)
+- Next request's prefix matching doesn't detect divergence (backend_session doesn't have these tokens)
+- Next generation continues from stale KV cache state, causing alternating success/failure patterns
 
 ## Template Rendering Fallback
 

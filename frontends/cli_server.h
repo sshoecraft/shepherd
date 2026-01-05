@@ -61,7 +61,7 @@ struct CliServerState {
 /// @brief CLI Server - HTTP server that executes tools locally
 class CLIServer : public Server {
 public:
-    CLIServer(const std::string& host, int port);
+    CLIServer(const std::string& host, int port, const std::string& auth_mode = "none");
     ~CLIServer();
 
     /// @brief Initialize tools and RAG

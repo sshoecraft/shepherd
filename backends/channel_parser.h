@@ -54,11 +54,12 @@ private:
         FINAL        // <|channel|>final - user-visible content
     };
 
-    Config config_;
-    Channel current_channel_ = Channel::NONE;
-    std::string buffer_;
-    bool in_message_ = false;  // True after seeing <|message|>
-    bool seen_final_channel_ = false;  // True after we've exited a final channel
+    Config cfg;
+    Channel current_channel = Channel::NONE;
+    std::string buffer;
+    std::string channel_header;  // Full channel header (e.g., "commentary to=functions.X")
+    bool in_message = false;  // True after seeing <|message|>
+    bool seen_final_channel = false;  // True after we've exited a final channel
 
     // Parse channel type from buffer after <|channel|>
     Channel parse_channel_type(const std::string& type_str);

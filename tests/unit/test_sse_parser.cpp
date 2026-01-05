@@ -224,6 +224,8 @@ TEST(SSEParserTest, CallbackCancellationFirstEvent) {
 // =============================================================================
 
 TEST(SSEParserTest, EmptyData) {
+    // Per SSE spec: data: with empty value results in empty data buffer after
+    // trailing LF removal, so no event should be dispatched
     SSEParser parser;
     std::string received_data = "not_set";
 
@@ -233,7 +235,7 @@ TEST(SSEParserTest, EmptyData) {
     };
 
     parser.process_chunk("data:\n\n", callback);
-    EXPECT_EQ(received_data, "");
+    EXPECT_EQ(received_data, "not_set");  // Callback should NOT be called
 }
 
 TEST(SSEParserTest, DataWithColon) {

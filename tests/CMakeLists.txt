@@ -26,12 +26,17 @@ set(SHEPHERD_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/provider.cpp
     ${CMAKE_SOURCE_DIR}/sse_parser.cpp
     ${CMAKE_SOURCE_DIR}/backend.cpp
+    ${CMAKE_SOURCE_DIR}/auth.cpp
+    ${CMAKE_SOURCE_DIR}/rag.cpp
     ${CMAKE_SOURCE_DIR}/backends/models.cpp
     ${CMAKE_SOURCE_DIR}/backends/factory.cpp
+    ${CMAKE_SOURCE_DIR}/backends/cli_client.cpp
+    ${CMAKE_SOURCE_DIR}/backends/channel_parser.cpp
     ${CMAKE_SOURCE_DIR}/tools/tool.cpp
     ${CMAKE_SOURCE_DIR}/tools/tools.cpp
     ${CMAKE_SOURCE_DIR}/tools/tool_parser.cpp
     ${CMAKE_SOURCE_DIR}/tools/utf8_sanitizer.cpp
+    ${CMAKE_SOURCE_DIR}/tools/api_tools.cpp
 )
 
 # Add API backend sources if enabled
@@ -81,11 +86,23 @@ if(ENABLE_API_BACKENDS)
 endif()
 
 if(ENABLE_LLAMACPP)
+    set(LLAMACPP_DIR ${CMAKE_SOURCE_DIR}/llama.cpp)
     target_compile_definitions(shepherd_testlib PUBLIC ENABLE_LLAMACPP)
     target_include_directories(shepherd_testlib PUBLIC
         ${CMAKE_SOURCE_DIR}/llama.cpp/include
         ${CMAKE_SOURCE_DIR}/llama.cpp/ggml/include
         ${CMAKE_SOURCE_DIR}/llama.cpp/common
+    )
+    target_link_libraries(shepherd_testlib PUBLIC
+        ${LLAMACPP_DIR}/build/common/libcommon.a
+        llama
+        ggml
+        ggml-base
+        ggml-cpu
+    )
+    # Set RPATH for llama.cpp libraries
+    set_target_properties(shepherd_testlib PROPERTIES
+        BUILD_RPATH "${LLAMACPP_DIR}/build/bin"
     )
 endif()
 
@@ -102,12 +119,17 @@ target_compile_options(shepherd_testlib PRIVATE
 
 add_executable(test_unit
     test_main.cpp
+    test_stubs.cpp
     unit/test_config.cpp
     unit/test_session.cpp
     unit/test_scheduler.cpp
     unit/test_sse_parser.cpp
     unit/test_message.cpp
     unit/test_providers.cpp
+    unit/test_auth.cpp
+    unit/test_models.cpp
+    unit/test_chat_template.cpp
+    unit/test_channel_parser.cpp
 )
 
 target_include_directories(test_unit PRIVATE
@@ -126,17 +148,19 @@ target_link_libraries(test_unit PRIVATE
 # ============================================================================
 
 # Tool tests require additional sources
+# Note: core_tools.cpp and web_search.cpp have complex dependencies on global config
+# They are excluded from unit tests - integration tests will cover them
 set(TOOL_TEST_SOURCES
-    ${CMAKE_SOURCE_DIR}/tools/core_tools.cpp
     ${CMAKE_SOURCE_DIR}/tools/filesystem_tools.cpp
     ${CMAKE_SOURCE_DIR}/tools/command_tools.cpp
-    ${CMAKE_SOURCE_DIR}/tools/memory_tools.cpp
     ${CMAKE_SOURCE_DIR}/tools/json_tools.cpp
+    ${CMAKE_SOURCE_DIR}/tools/http_tools.cpp
 )
 
 add_executable(test_tools
     test_main.cpp
     tools/test_tools_manager.cpp
+    ${TOOL_TEST_SOURCES}
 )
 
 target_include_directories(test_tools PRIVATE

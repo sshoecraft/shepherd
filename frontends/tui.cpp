@@ -902,6 +902,22 @@ void TUI::set_status(const std::string& left, const std::string& right) {
     doupdate();
 }
 
+void TUI::update_status_bar() {
+    // Left side: provider name and model
+    std::string left = current_provider;
+    if (backend && !backend->model_name.empty()) {
+        left += " | " + backend->model_name;
+    }
+
+    // Right side: token count / context size
+    std::string right;
+    if (backend && backend->context_size > 0) {
+        right = std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size);
+    }
+
+    set_status(left, right);
+}
+
 void TUI::set_input_content(const std::string& content) {
     {
         std::lock_guard<std::mutex> lock(input_mutex);
@@ -1129,6 +1145,9 @@ int TUI::run(Provider* cmdline_provider) {
     // Register other providers as tools
     register_provider_tools(tools, current_provider);
 
+    // Update status bar with provider info
+    update_status_bar();
+
     // Populate session.tools from our tools instance
     tools.populate_session_tools(session);
 
@@ -1207,6 +1226,9 @@ int TUI::run(Provider* cmdline_provider) {
 
             tui_debug(1, "Got response, length: " + std::to_string(resp.content.length()));
             in_tool_loop = true;
+
+            // Update status bar with current token count
+            update_status_bar();
         }
 
         if (in_tool_loop && !awaiting_generation) {

@@ -332,6 +332,7 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         config->json["top_k"] = top_k;
         config->json["repeat_penalty"] = repeat_penalty;
         config->json["n_batch"] = n_batch;
+        config->json["ubatch"] = ubatch;
         config->json["cache_type"] = cache_type;
         if (n_threads > 0) config->json["n_threads"] = n_threads;
     } else if (type == "tensorrt") {

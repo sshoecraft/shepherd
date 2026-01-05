@@ -249,8 +249,8 @@ Examples:
     parser.add_argument("--prompt", 
                         default="Write a detailed explanation of how transformers work in neural networks.",
                         help="Prompt to use for benchmarking")
-    parser.add_argument("--max-tokens", type=int, default=128,
-                        help="Max tokens to generate (default: 128)")
+    parser.add_argument("--max-tokens", type=int, default=2048,
+                        help="Max tokens to generate (default: 2048)")
     parser.add_argument("--runs", type=int, default=5,
                         help="Number of benchmark runs (default: 5, use 100+ for stress test)")
     parser.add_argument("--warmup", type=int, default=1,

@@ -433,8 +433,10 @@ int CLI::run(Provider* cmdline_provider) {
 
         cli_debug(1, "tokens: " + std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
 
-        // Always show token count to stderr
-        fprintf(stderr, "tokens: %d/%zu\n", session.total_tokens, backend->context_size);
+        // Show token count to stderr (only for local backends - remote has its own display)
+        if (backend->is_local) {
+            fprintf(stderr, "tokens: %d/%zu\n", session.total_tokens, backend->context_size);
+        }
     }
 
     // Cleanup

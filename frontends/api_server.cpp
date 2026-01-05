@@ -17,8 +17,8 @@ using json = nlohmann::json;
 extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
-APIServer::APIServer(const std::string& host, int port)
-    : Server(host, port, "api") {
+APIServer::APIServer(const std::string& host, int port, const std::string& auth_mode)
+    : Server(host, port, "api", auth_mode) {
     // Set up the event callback - routes to request_handler when set
     callback = [this](CallbackEvent event, const std::string& content,
                       const std::string& name, const std::string& id) -> bool {

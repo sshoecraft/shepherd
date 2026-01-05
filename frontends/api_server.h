@@ -10,7 +10,7 @@
 /// @brief API Server - OpenAI-compatible HTTP API server
 class APIServer : public Server {
 public:
-    APIServer(const std::string& host, int port);
+    APIServer(const std::string& host, int port, const std::string& auth_mode = "none");
     ~APIServer();
 
 protected:

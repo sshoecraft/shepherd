@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frontend.h"
+#include "auth.h"
 #include "llama.cpp/vendor/cpp-httplib/httplib.h"
 #include "nlohmann/json.hpp"
 #include <memory>
@@ -43,7 +44,8 @@ int handle_ctl_args(const std::vector<std::string>& args);
 /// Manages HTTP server lifecycle, control socket, and common endpoints
 class Server : public Frontend {
 public:
-    Server(const std::string& host, int port, const std::string& server_type);
+    Server(const std::string& host, int port, const std::string& server_type,
+           const std::string& auth_mode = "none");
     virtual ~Server();
 
     /// @brief Run the server - starts TCP and control socket listeners
@@ -75,6 +77,15 @@ protected:
     /// @brief Called when shutdown is requested (before tcp_server.stop())
     /// Subclasses can override to signal threads to exit
     virtual void on_shutdown() {}
+
+    /// @brief Check if request is authenticated (when auth is enabled)
+    /// @param req HTTP request
+    /// @param res HTTP response (set to 401 on failure)
+    /// @return true if authorized, false otherwise (response already set)
+    bool check_auth(const httplib::Request& req, httplib::Response& res);
+
+    // API key authentication store
+    std::unique_ptr<KeyStore> key_store;
 
     // TCP server for main API endpoints
     httplib::Server tcp_server;

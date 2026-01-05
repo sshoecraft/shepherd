@@ -73,8 +73,8 @@ void CliServerState::unregister_observer(ClientOutputs::StreamingOutput* observe
 }
 
 // CLIServer class implementation
-CLIServer::CLIServer(const std::string& host, int port)
-    : Server(host, port, "cli") {
+CLIServer::CLIServer(const std::string& host, int port, const std::string& auth_mode)
+    : Server(host, port, "cli", auth_mode) {
 }
 
 CLIServer::~CLIServer() {
@@ -194,7 +194,10 @@ static void do_generation(CliServerState& state,
                         const std::string& tool_call_id) -> bool {
         // Handle STOP
         if (type == CallbackEvent::STOP) {
-            flush_pending();
+            // Only flush if not in a tool call (tool call content should not be shown)
+            if (!in_tool_call) {
+                flush_pending();
+            }
             return true;
         }
 
@@ -209,6 +212,11 @@ static void do_generation(CliServerState& state,
 
         // Handle TOOL_CALL - handled via pending_tool_calls queue
         if (type == CallbackEvent::TOOL_CALL) {
+            return true;
+        }
+
+        // Skip STATS - these are local display only, not sent to clients
+        if (type == CallbackEvent::STATS) {
             return true;
         }
 
@@ -439,6 +447,12 @@ void CLIServer::register_endpoints() {
     state.backend = backend.get();
     state.session = &session;
     state.tools = &tools;
+
+    // Copy tool names to backend for output filtering
+    // This enables the backend to detect tool calls and emit TOOL_CALL events
+    for (const auto& tool : session.tools) {
+        backend->valid_tool_names.insert(tool.name);
+    }
 
     // POST /request - Main request endpoint
     tcp_server.Post("/request", [this](const httplib::Request& req, httplib::Response& res) {

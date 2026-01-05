@@ -57,6 +57,7 @@ public:
 
     // Status line
     void set_status(const std::string& left, const std::string& right);
+    void update_status_bar();  // Update status with provider/token info
 
     // Run one iteration - handles resize and refresh (no input handling)
     // Returns false if quit was requested

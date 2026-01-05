@@ -20,6 +20,9 @@ CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, Eve
     std::string endpoint = base_url + "/session";
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
+    if (!api_key.empty()) {
+        headers["Authorization"] = "Bearer " + api_key;
+    }
 
     HttpResponse http_resp = http_client->get(endpoint, headers);
 
@@ -177,6 +180,10 @@ void CLIClientBackend::parse_backend_config() {
     if (config && !config->api_base.empty()) {
         base_url = config->api_base;
     }
+    // Get API key from config (used for server authentication)
+    if (config && !config->key.empty() && config->key != "none") {
+        api_key = config->key;
+    }
 }
 
 void CLIClientBackend::sse_listener_thread() {
@@ -185,6 +192,9 @@ void CLIClientBackend::sse_listener_thread() {
     std::string endpoint = base_url + "/updates";
     std::map<std::string, std::string> headers;
     headers["Accept"] = "text/event-stream";
+    if (!api_key.empty()) {
+        headers["Authorization"] = "Bearer " + api_key;
+    }
 
     // Reconnection loop - keep trying while sse_running is true
     while (sse_running) {
@@ -278,6 +288,9 @@ Response CLIClientBackend::send_request(const std::string& prompt, EventCallback
 
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
+    if (!api_key.empty()) {
+        headers["Authorization"] = "Bearer " + api_key;
+    }
 
     // Mark request in progress (SSE listener will skip our own user messages)
     request_in_progress = true;

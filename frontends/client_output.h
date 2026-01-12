@@ -17,6 +17,9 @@ public:
     // Content streaming - called for each delta from model generation
     virtual void on_delta(const std::string& delta) = 0;
 
+    // Code block content - called for content inside code blocks
+    virtual void on_codeblock(const std::string& content) = 0;
+
     // User prompt echo - called when user message is submitted
     virtual void on_user_prompt(const std::string& prompt) = 0;
 
@@ -49,6 +52,7 @@ public:
     StreamingOutput(httplib::DataSink* sink, const std::string& client_id);
 
     void on_delta(const std::string& delta) override;
+    void on_codeblock(const std::string& content) override;
     void on_user_prompt(const std::string& prompt) override;
     void on_message_added(const std::string& role,
                           const std::string& content,
@@ -85,6 +89,7 @@ public:
     BatchedOutput(httplib::Response* response);
 
     void on_delta(const std::string& delta) override;
+    void on_codeblock(const std::string& content) override;
     void on_user_prompt(const std::string& prompt) override;
     void on_message_added(const std::string& role,
                           const std::string& content,
@@ -107,6 +112,7 @@ private:
     bool has_error = false;
     std::string error_message;
     bool flushed = false;
+    bool in_codeblock = false;
 };
 
 } // namespace ClientOutputs

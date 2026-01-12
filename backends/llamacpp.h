@@ -1,7 +1,7 @@
 #pragma once
 
 #include "shepherd.h"
-#include "backend.h"
+#include "gpu.h"
 #include "models.h"
 #include "chat_template.h"
 #include "llama.cpp/vendor/minja/minja.hpp"
@@ -12,13 +12,15 @@
 #include <string>
 #include <memory>
 
+// Note: harmony.h no longer needed - parser is now in GpuBackend (parser.h)
+
 // Forward declarations for llama.cpp types
 typedef int32_t llama_token;
 struct common_chat_templates;
 #endif
 
 /// @brief Backend manager for llama.cpp local models
-class LlamaCppBackend : public Backend {
+class LlamaCppBackend : public GpuBackend {
 public:
     LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     ~LlamaCppBackend() override;
@@ -72,15 +74,16 @@ protected:
 private:
     // Internal methods (not part of public interface)
     bool initialize_old(const std::string& model_path, const std::string& api_key = "", const std::string& template_path = "");
-    std::string generate(int max_tokens = 0, EventCallback callback = nullptr);
+    std::string generate(const Session& session, int max_tokens = 0, EventCallback callback = nullptr);
 
     /// @brief Run inference using llama.cpp
     /// @param prompt_text The text to generate from
     /// @param max_tokens Maximum tokens to generate
     /// @param suppress_streaming Don't stream output (for tool calls)
     /// @param callback Optional streaming callback for token-by-token output
+    /// @param generation_prompt_tokens Tokens to pre-feed to harmony parser (already decoded into KV cache)
     /// @return Generated text response
-    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, EventCallback callback = nullptr);
+    std::string run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming = false, EventCallback callback = nullptr, const std::vector<llama_token>& generation_prompt_tokens = {});
 
     /// @brief Parse JSON arguments from tool call
     std::map<std::string, std::any> parse_json_to_args(const std::string& json);
@@ -138,9 +141,10 @@ private:
     int n_batch = 512;  // Logical batch size for prompt processing
     int n_ubatch = 512; // Physical micro-batch size (must be <= n_batch)
 
-    // State tracking
-    // For server mode: backend maintains its own session tracking what's in KV cache
-    Session backend_session;
+    // Token-level KV cache tracking (for accurate prefix caching)
+    // This mirrors the actual tokens in the KV cache, enabling
+    // precise prefix matching regardless of how content was extracted/stored
+    std::vector<llama_token> kv_cache_mirror;
 
     // For CLI mode: pointer to current session being processed (for eviction callbacks)
     const Session* current_session = nullptr;
@@ -165,6 +169,17 @@ private:
     // Tool call markers extracted from chat template (e.g., "<|python_tag|>")
     std::vector<std::string> tool_call_markers;
     bool have_tool_markers = false;
+
+    // Harmony stop token IDs (for GPT-OSS models with channels)
+    // Used for debug logging of stop token detection
+    std::vector<int32_t> harmony_stop_tokens;
+
+    // Harmony mode flag - true if model uses GPT-OSS channel format
+    // Parser is now managed by GpuBackend (HarmonyParser or GenericParser)
+    bool harmony_enabled = false;
+
+    // UTF-8 buffering for incomplete multi-byte sequences across tokens
+    std::string parser_utf8_buffer;
 
     // Detected model configuration
     ModelConfig model_config;

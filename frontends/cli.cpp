@@ -2,7 +2,6 @@
 #include "cli.h"
 #include "shepherd.h"
 #include "tools/tool.h"
-#include "tools/tool_parser.h"
 #include "tools/utf8_sanitizer.h"
 #include "tools/filesystem_tools.h"
 #include "tools/command_tools.h"
@@ -28,6 +27,7 @@
 #include <tuple>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/select.h>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -36,7 +36,6 @@
 #include "replxx.h"
 
 // External globals from main.cpp
-extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
 
 #ifdef _DEBUG
@@ -57,14 +56,6 @@ static void cli_debug(int level, const std::string& text) {
 static void cli_debug(int, const std::string&) {}
 #endif
 
-// Helper: Extract tool call from Response (handles both structured and text-based)
-static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
-    if (!resp.tool_calls.empty()) {
-        return resp.tool_calls[0];
-    }
-    return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
-}
-
 // CLI Implementation
 CLI::CLI() : Frontend() {
 }
@@ -77,7 +68,10 @@ CLI::~CLI() {
     }
 }
 
-void CLI::init(bool no_mcp, bool no_tools) {
+void CLI::init(bool no_mcp, bool no_tools_flag) {
+    // Store tools flag
+    no_tools = no_tools_flag;
+
     // Detect interactive mode
     interactive_mode = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     colors_enabled = interactive_mode;
@@ -110,18 +104,66 @@ void CLI::init(bool no_mcp, bool no_tools) {
     // Set up the event callback for streaming output
     callback = [this](CallbackEvent type, const std::string& content,
                             const std::string& tool_name, const std::string& tool_call_id) -> bool {
+        // Already cancelled - just keep returning false
+        if (generation_cancelled || g_generation_cancelled) {
+            return false;
+        }
+
+        // Check for escape key to cancel generation
+        if (check_escape_key()) {
+            generation_cancelled = true;
+            g_generation_cancelled = true;  // Set global so backend stops
+            show_cancelled();
+            return false;
+        }
+
         switch (type) {
             case CallbackEvent::CONTENT:
             case CallbackEvent::THINKING:
             case CallbackEvent::CODEBLOCK:
                 write_colored(content, type);
                 break;
-            case CallbackEvent::TOOL_CALL:
-                // Queue tool for execution
-                pending_tool_calls.push({tool_name, content, tool_call_id});
+            case CallbackEvent::TOOL_CALL: {
+                // TOOL_CALL fires after STOP - execute immediately
+                std::string params_str;
+                try {
+                    auto params = nlohmann::json::parse(content);
+                    bool first = true;
+                    for (auto& [key, value] : params.items()) {
+                        if (!first) params_str += ", ";
+                        first = false;
+                        std::string val = value.is_string() ? value.get<std::string>() : value.dump();
+                        if (val.length() > 50) val = val.substr(0, 47) + "...";
+                        params_str += key + "=" + val;
+                    }
+                } catch (...) {
+                    params_str = content;
+                }
+
+                show_tool_call(tool_name, params_str);
+
+                // Execute tool
+                ToolResult result = execute_tool(tools, tool_name, content, tool_call_id);
+
+                // Show result
+                std::string summary = result.summary.empty() ?
+                    (result.success ? result.content.substr(0, 100) : result.error) : result.summary;
+                show_tool_result(summary, result.success);
+
+                // Add tool result to session - triggers next generation cycle
+                session.add_message(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
                 break;
+            }
             case CallbackEvent::TOOL_RESULT:
                 // Tool results are displayed via show_tool_result(), not callback
+                break;
+            case CallbackEvent::TOOL_DISP:
+                // Display-only tool call (from remote server)
+                show_tool_call(tool_name, content);
+                break;
+            case CallbackEvent::RESULT_DISP:
+                // Display-only tool result (from remote server)
+                show_tool_result(content, tool_name != "error");
                 break;
             case CallbackEvent::ERROR:
                 show_error(content);
@@ -139,10 +181,7 @@ void CLI::init(bool no_mcp, bool no_tools) {
                 }
                 break;
             case CallbackEvent::STOP:
-                // Only add newline if no pending tool calls (they handle their own formatting)
-                if (pending_tool_calls.empty()) {
-                    write_raw("\n");
-                }
+                write_raw("\n");
                 break;
         }
         return !generation_cancelled;  // Return false to cancel if escape pressed
@@ -179,8 +218,10 @@ int CLI::run(Provider* cmdline_provider) {
         callback(CallbackEvent::SYSTEM, " - FAILED\n", "", "");
         return 1;
     }
-    // Register other providers as tools
-    register_provider_tools(tools, current_provider);
+    // Register other providers as tools (unless tools disabled)
+    if (!no_tools) {
+        register_provider_tools(tools, current_provider);
+    }
 
     // Populate session.tools from our tools instance
     tools.populate_session_tools(session);
@@ -193,7 +234,7 @@ int CLI::run(Provider* cmdline_provider) {
     // Configure session based on backend capabilities
     session.desired_completion_tokens = calculate_desired_completion_tokens(
         backend->context_size, backend->max_output_tokens);
-    session.auto_evict = (backend->context_size > 0 && !backend->is_local);
+    session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
 
     // Initialize scheduler (unless disabled)
     Scheduler scheduler;
@@ -208,11 +249,6 @@ int CLI::run(Provider* cmdline_provider) {
         cli_debug(1, "Running warmup message...");
         session.add_message(Message::USER, config->warmup_message);
     }
-
-    // State for tool loop
-    int tool_loop_iteration = 0;
-    const int max_consecutive_identical_calls = 10;
-    std::vector<std::string> recent_tool_calls;
 
     // Main synchronous loop
     while (true) {
@@ -252,8 +288,6 @@ int CLI::run(Provider* cmdline_provider) {
 
         // Reset state
         generation_cancelled = false;
-        tool_loop_iteration = 0;
-        recent_tool_calls.clear();
 
         // Sanitize user input
         user_input = utf8_sanitizer::strip_control_characters(user_input);
@@ -276,165 +310,21 @@ int CLI::run(Provider* cmdline_provider) {
         }
 
         // Send user message and generate response (blocking, streams via callback)
+        // Tool calls are handled in the callback - they fire AFTER STOP, execute
+        // immediately, and trigger recursive generation via session.add_message(TOOL_RESULT)
         cli_debug(1, "Submitting user message");
+
+        // Enter raw mode for escape key detection during generation
+        generation_cancelled = false;
+        g_generation_cancelled = false;
+        enter_generation_mode();
         session.add_message(Message::USER, user_input);
-
-        // Tool loop - process any tool calls
-        while (!pending_tool_calls.empty() || tool_loop_iteration == 0) {
-            tool_loop_iteration++;
-            cli_debug(1, "Tool loop iteration: " + std::to_string(tool_loop_iteration));
-
-            // Check for tool calls from pending queue
-            if (pending_tool_calls.empty()) {
-                // No more tool calls - done
-                break;
-            }
-
-            auto tc = pending_tool_calls.front();
-            pending_tool_calls.pop();
-
-            // Parse the tool call
-            auto tool_call_opt = ToolParser::parse_tool_call(
-                tc.args,
-                backend->get_tool_call_markers()
-            );
-
-            if (!tool_call_opt) {
-                // Try wrapping in tags
-                tool_call_opt = ToolParser::parse_tool_call(
-                    "<tool_call>" + tc.args + "</tool_call>",
-                    backend->get_tool_call_markers()
-                );
-            }
-
-            if (!tool_call_opt) {
-                cli_debug(1, "Failed to parse tool call: " + tc.name);
-                // Show error to user and send back to model
-                std::string error_msg = "Failed to parse tool call arguments for " + tc.name;
-                callback(CallbackEvent::ERROR, error_msg + "\n", "tool_parse", "");
-                // Send error back to model as tool result
-                backend->add_message(session, Message::Role::TOOL_RESPONSE,
-                    "Error: " + error_msg, tc.name, tc.tool_call_id);
-                continue;
-            }
-
-            auto tool_call = tool_call_opt.value();
-            tool_call.name = tc.name;
-            tool_call.tool_call_id = tc.tool_call_id;
-
-            std::string tool_name = tool_call.name;
-            std::string tool_call_id = tool_call.tool_call_id;
-
-            cli_debug(1, "Tool call detected: " + tool_name);
-
-            // Build call signature for loop detection
-            std::string call_signature = tool_name + "(";
-            bool first_sig_param = true;
-            for (const auto& param : tool_call.parameters) {
-                if (!first_sig_param) call_signature += ", ";
-                first_sig_param = false;
-                call_signature += param.first + "=";
-                try {
-                    if (param.second.type() == typeid(std::string)) {
-                        call_signature += "\"" + std::any_cast<std::string>(param.second) + "\"";
-                    } else if (param.second.type() == typeid(int)) {
-                        call_signature += std::to_string(std::any_cast<int>(param.second));
-                    } else if (param.second.type() == typeid(double)) {
-                        call_signature += std::to_string(std::any_cast<double>(param.second));
-                    } else if (param.second.type() == typeid(bool)) {
-                        call_signature += std::any_cast<bool>(param.second) ? "true" : "false";
-                    } else {
-                        call_signature += "?";
-                    }
-                } catch (...) {
-                    call_signature += "?";
-                }
-            }
-            call_signature += ")";
-
-            // Check for infinite loop
-            int consecutive_count = 1;
-            for (int i = (int)recent_tool_calls.size() - 1;
-                 i >= 0 && i >= (int)recent_tool_calls.size() - 10; i--) {
-                if (recent_tool_calls[i] == call_signature) {
-                    consecutive_count++;
-                    if (consecutive_count >= max_consecutive_identical_calls) {
-                        show_error("Detected infinite loop: " + call_signature +
-                                   " called " + std::to_string(consecutive_count) +
-                                   " times consecutively. Stopping.");
-                        // Clear pending tool calls
-                        while (!pending_tool_calls.empty()) pending_tool_calls.pop();
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            recent_tool_calls.push_back(call_signature);
-
-            // Build params string for display
-            std::string params_str;
-            bool first_param = true;
-            for (const auto& param : tool_call.parameters) {
-                if (!first_param) params_str += ", ";
-                first_param = false;
-                std::string value_str;
-                try {
-                    if (param.second.type() == typeid(std::string)) {
-                        value_str = std::any_cast<std::string>(param.second);
-                    } else if (param.second.type() == typeid(int)) {
-                        value_str = std::to_string(std::any_cast<int>(param.second));
-                    } else if (param.second.type() == typeid(double)) {
-                        value_str = std::to_string(std::any_cast<double>(param.second));
-                    } else if (param.second.type() == typeid(bool)) {
-                        value_str = std::any_cast<bool>(param.second) ? "true" : "false";
-                    } else {
-                        value_str = "<unknown>";
-                    }
-                } catch (...) {
-                    value_str = "<error>";
-                }
-                if (value_str.length() > 50) {
-                    value_str = value_str.substr(0, 47) + "...";
-                }
-                params_str += param.first + "=" + value_str;
-            }
-
-            show_tool_call(tool_name, params_str);
-
-            // Execute tool (handles truncation)
-            cli_debug(1, "Executing tool: " + tool_name);
-            ToolResult tool_result = execute_tool(tools, tool_name, tool_call.parameters, tool_call_id);
-
-            // Display summary (or fallback to error/content snippet)
-            std::string display_summary = tool_result.summary;
-            if (display_summary.empty()) {
-                if (!tool_result.success && !tool_result.error.empty()) {
-                    display_summary = tool_result.error;
-                } else if (!tool_result.content.empty()) {
-                    // Fallback: first line of content
-                    size_t newline = tool_result.content.find('\n');
-                    display_summary = (newline != std::string::npos)
-                        ? tool_result.content.substr(0, newline)
-                        : tool_result.content;
-                    if (display_summary.length() > 80) {
-                        display_summary = display_summary.substr(0, 77) + "...";
-                    }
-                } else {
-                    display_summary = tool_result.success ? "Done" : "Failed";
-                }
-            }
-            show_tool_result(display_summary, tool_result.success);
-
-            // Submit tool result to session (triggers model response)
-            cli_debug(1, "Submitting tool result");
-            session.add_message(Message::TOOL_RESPONSE, tool_result.content, tool_name, tool_call_id);
-        }
+        exit_generation_mode();
 
         cli_debug(1, "tokens: " + std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
 
-        // Show token count to stderr (only for local backends - remote has its own display)
-        if (backend->is_local) {
+        // Show token count to stderr (only for GPU backends - API backends have their own display)
+        if (backend->is_gpu) {
             fprintf(stderr, "tokens: %d/%zu\n", session.total_tokens, backend->context_size);
         }
     }
@@ -537,6 +427,41 @@ void CLI::show_cancelled() {
         std::string msg = "\n[Cancelled]\n";
         write_colored(msg, CallbackEvent::SYSTEM);
     }
+}
+
+void CLI::enter_generation_mode() {
+    if (!interactive_mode || term_raw_mode) return;
+
+    // Save current terminal settings and switch to raw mode
+    if (tcgetattr(STDIN_FILENO, &original_term) == 0) {
+        struct termios raw = original_term;
+        raw.c_lflag &= ~(ICANON | ECHO);  // Disable canonical mode and echo
+        raw.c_cc[VMIN] = 0;   // Non-blocking
+        raw.c_cc[VTIME] = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        term_raw_mode = true;
+    }
+}
+
+void CLI::exit_generation_mode() {
+    if (!term_raw_mode) return;
+
+    // Restore original terminal settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_term);
+    term_raw_mode = false;
+}
+
+bool CLI::check_escape_key() {
+    if (!interactive_mode || !term_raw_mode) return false;
+
+    // Simple non-blocking read (terminal already in raw mode)
+    char c;
+    if (read(STDIN_FILENO, &c, 1) == 1) {
+        if (c == 27 || c == 3) {  // ESC or Ctrl+C
+            return true;
+        }
+    }
+    return false;
 }
 
 void CLI::send_message(const std::string& message) {

@@ -8,6 +8,15 @@ This document describes how to set up the TensorRT-LLM backend for Shepherd.
 - NVIDIA driver 570+ (580+ recommended for TRT-LLM 1.2.x)
 - CUDA Toolkit (version must match TRT-LLM requirements)
 - Python 3.10 or 3.12
+- OpenMPI (for multi-GPU engine builds with tensor parallelism)
+
+### OpenMPI Installation
+
+For building engines with tensor parallelism (tp > 1), OpenMPI is required:
+
+```bash
+sudo apt install openmpi-bin openmpi-common
+```
 
 ## Step 1: Install TensorRT-LLM
 

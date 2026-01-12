@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <sstream>
 
+// Use config->thinking instead of g_show_thinking
+
 // External handler functions
 extern int handle_provider_args(const std::vector<std::string>& args,
                                 std::function<void(const std::string&)> out,
@@ -209,10 +211,10 @@ void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_t
 
 ToolResult Frontend::execute_tool(Tools& tools,
                                    const std::string& tool_name,
-                                   const std::map<std::string, std::any>& parameters,
+                                   const std::string& params_json,
                                    const std::string& tool_call_id) {
     // Execute the tool
-    ToolResult tool_result = tools.execute(tool_name, parameters);
+    ToolResult tool_result = tools.execute(tool_name, params_json);
 
     std::string result_content;
     if (tool_result.success) {

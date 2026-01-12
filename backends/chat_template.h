@@ -23,6 +23,10 @@ struct ChatTemplateCaps {
     bool has_channels = false;             // Template uses channel-based output format
     std::string channel_extract_marker;    // e.g., "<|channel|>final<|message|>" - extracted from template
     std::string channel_end_marker;        // e.g., "<|end|>" - extracted from template
+
+    // Thinking mode support
+    bool supports_enable_thinking = false; // Template responds to enable_thinking parameter
+    std::string generation_prompt_base;    // Base generation prompt (for injecting think block)
 };
 
 class ChatTemplate {
@@ -118,12 +122,20 @@ public:
         // Extract content after the marker
         std::string content = raw_output.substr(pos + caps.channel_extract_marker.length());
 
-        // Check for end marker
-        if (!caps.channel_end_marker.empty()) {
-            size_t end_pos = content.find(caps.channel_end_marker);
-            if (end_pos != std::string::npos) {
-                content = content.substr(0, end_pos);
-            }
+        // Check for end markers - content ends at <|end|>, <|return|>, or <|start|> (new turn)
+        // Take the earliest one found as the end boundary
+        size_t end_pos = std::string::npos;
+        size_t end1 = content.find("<|end|>");
+        size_t end2 = content.find("<|return|>");
+        size_t end3 = content.find("<|start|>");  // New turn = end of current content
+
+        // Find minimum of all valid positions
+        if (end1 != std::string::npos) end_pos = end1;
+        if (end2 != std::string::npos && (end_pos == std::string::npos || end2 < end_pos)) end_pos = end2;
+        if (end3 != std::string::npos && (end_pos == std::string::npos || end3 < end_pos)) end_pos = end3;
+
+        if (end_pos != std::string::npos) {
+            content = content.substr(0, end_pos);
         }
 
         return content;

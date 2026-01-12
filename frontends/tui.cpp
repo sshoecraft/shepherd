@@ -2,7 +2,6 @@
 #include "shepherd.h"
 #include "ansi.h"
 #include "tools/tool.h"
-#include "tools/tool_parser.h"
 #include "tools/utf8_sanitizer.h"
 #include "tools/filesystem_tools.h"
 #include "tools/command_tools.h"
@@ -21,9 +20,68 @@
 #include <unistd.h>
 #include <sstream>
 #include <chrono>
+#include <locale.h>
+#include <wchar.h>
+
+// UTF-8 display width helpers
+static int utf8_display_width(const std::string& str) {
+    // Convert UTF-8 to wide chars and sum their display widths
+    std::wstring wstr(str.length(), L'\0');
+    size_t wlen = mbstowcs(&wstr[0], str.c_str(), str.length());
+    if (wlen == (size_t)-1) return str.length();  // Fallback to byte count
+    wstr.resize(wlen);
+
+    int width = 0;
+    for (wchar_t wc : wstr) {
+        int w = wcwidth(wc);
+        if (w > 0) width += w;
+        else if (w == 0) width += 0;  // Zero-width chars
+        else width += 1;  // Unprintable, assume 1
+    }
+    return width;
+}
+
+// Substring by display width (returns valid UTF-8 up to max_width display columns)
+static std::string utf8_substr_width(const std::string& str, int max_width, int* actual_width = nullptr) {
+    if (max_width <= 0) {
+        if (actual_width) *actual_width = 0;
+        return "";
+    }
+
+    int width = 0;
+    size_t byte_pos = 0;
+
+    while (byte_pos < str.length() && width < max_width) {
+        // Decode one UTF-8 character
+        unsigned char c = str[byte_pos];
+        size_t char_len = 1;
+        if ((c & 0x80) == 0) char_len = 1;
+        else if ((c & 0xE0) == 0xC0) char_len = 2;
+        else if ((c & 0xF0) == 0xE0) char_len = 3;
+        else if ((c & 0xF8) == 0xF0) char_len = 4;
+
+        // Make sure we have enough bytes
+        if (byte_pos + char_len > str.length()) break;
+
+        // Convert this char to wchar and get width
+        wchar_t wc;
+        std::string one_char = str.substr(byte_pos, char_len);
+        if (mbtowc(&wc, one_char.c_str(), char_len) > 0) {
+            int char_width = wcwidth(wc);
+            if (char_width < 0) char_width = 1;
+            if (width + char_width > max_width) break;  // Would exceed
+            width += char_width;
+        } else {
+            width += 1;  // Invalid, count as 1
+        }
+        byte_pos += char_len;
+    }
+
+    if (actual_width) *actual_width = width;
+    return str.substr(0, byte_pos);
+}
 
 // External globals
-extern bool g_show_thinking;
 extern std::unique_ptr<Config> config;
 extern bool g_disable_scheduler;
 
@@ -87,7 +145,10 @@ TUI::~TUI() {
 }
 
 // Frontend interface - initialize tools and ncurses
-void TUI::init(bool no_mcp, bool no_tools) {
+void TUI::init(bool no_mcp, bool no_tools_flag) {
+    // Store tools flag
+    no_tools = no_tools_flag;
+
     // Set up the event callback for streaming output
     // This callback is called by the backend for all streaming events
     callback = [this](CallbackEvent type, const std::string& content,
@@ -101,6 +162,9 @@ void TUI::init(bool no_mcp, bool no_tools) {
 }
 
 bool TUI::init_ncurses() {
+    // Enable wide character (Unicode/emoji) support
+    setlocale(LC_ALL, "");
+
     // Set ESCDELAY before initscr - controls how long ncurses waits
     // to distinguish ESC key from escape sequences (default is 1000ms!)
     set_escdelay(25);  // 25ms - fast ESC response
@@ -368,10 +432,11 @@ void TUI::draw_input_box() {
             display_lines.push_back(remaining.substr(0, newline_pos));
             remaining = remaining.substr(newline_pos + 1);
         } else {
-            // Wrap long lines
-            while (static_cast<int>(remaining.length()) > content_width) {
-                display_lines.push_back(remaining.substr(0, content_width));
-                remaining = remaining.substr(content_width);
+            // Wrap long lines (UTF-8 aware)
+            while (utf8_display_width(remaining) > content_width) {
+                std::string line = utf8_substr_width(remaining, content_width);
+                display_lines.push_back(line);
+                remaining = remaining.substr(line.length());
             }
             display_lines.push_back(remaining);
             remaining.clear();
@@ -825,23 +890,26 @@ void TUI::write_output(const char* text_data, size_t len, CallbackEvent type) {
     // Get indent from centralized config (frontend.h)
     int indent_spaces = get_indent_for_event(type);
 
-    // Write to pad, stripping ANSI escapes
-    for (size_t i = 0; i < len; i++) {
-        char c = text_data[i];
+    // Write to pad, handling UTF-8 properly
+    size_t i = 0;
+    while (i < len) {
+        unsigned char c = static_cast<unsigned char>(text_data[i]);
 
         // Strip incoming ANSI escape sequences
         if (c == '\033') {
             in_escape_sequence = true;
+            i++;
             continue;
         }
         if (in_escape_sequence) {
             if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
                 in_escape_sequence = false;
             }
+            i++;
             continue;
         }
 
-        if (c == '\r') continue;  // Skip carriage returns
+        if (c == '\r') { i++; continue; }  // Skip carriage returns
 
         // Add indentation at line starts
         if (at_line_start && c != '\n' && indent_spaces > 0) {
@@ -851,14 +919,31 @@ void TUI::write_output(const char* text_data, size_t len, CallbackEvent type) {
             at_line_start = false;
         }
 
-        // Write character to pad
-        waddch(output_pad, c);
+        // Determine UTF-8 character length
+        size_t char_len = 1;
+        if ((c & 0x80) == 0) char_len = 1;        // ASCII
+        else if ((c & 0xE0) == 0xC0) char_len = 2; // 2-byte
+        else if ((c & 0xF0) == 0xE0) char_len = 3; // 3-byte
+        else if ((c & 0xF8) == 0xF0) char_len = 4; // 4-byte
+
+        // Ensure we have the complete character
+        if (i + char_len > len) char_len = len - i;
+
+        if (char_len == 1) {
+            // Single byte - use waddch
+            waddch(output_pad, c);
+        } else {
+            // Multi-byte UTF-8 - use waddnstr to output the complete sequence
+            waddnstr(output_pad, text_data + i, char_len);
+        }
 
         if (c == '\n') {
             at_line_start = true;
         } else {
             at_line_start = false;
         }
+
+        i += char_len;
     }
 
     // Turn off attributes
@@ -1038,7 +1123,46 @@ void TUI::show_cancelled() {
 bool TUI::output_callback(CallbackEvent type, const std::string& content,
                           const std::string& tool_name, const std::string& tool_call_id) {
     if (type == CallbackEvent::TOOL_CALL) {
-        pending_tool_calls.push({tool_name, content, tool_call_id});
+        // TOOL_CALL fires after STOP - execute immediately
+        std::string params_str;
+        try {
+            auto params = nlohmann::json::parse(content);
+            bool first = true;
+            for (auto& [key, value] : params.items()) {
+                if (!first) params_str += ", ";
+                first = false;
+                std::string val = value.is_string() ? value.get<std::string>() : value.dump();
+                if (val.length() > 50) val = val.substr(0, 47) + "...";
+                params_str += key + "=" + val;
+            }
+        } catch (...) {
+            params_str = content;
+        }
+
+        show_tool_call(tool_name, params_str);
+
+        // Execute tool
+        ToolResult result = execute_tool(tools, tool_name, content, tool_call_id);
+
+        // Show result
+        std::string summary = result.summary.empty() ?
+            (result.success ? result.content.substr(0, 100) : result.error) : result.summary;
+        show_tool_result(summary, result.success);
+
+        // Add tool result to session - triggers next generation cycle
+        session.add_message(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
+        return true;
+    }
+
+    // Display-only tool call (from remote server - no local execution)
+    if (type == CallbackEvent::TOOL_DISP) {
+        show_tool_call(tool_name, content);
+        return true;
+    }
+
+    // Display-only tool result (from remote server)
+    if (type == CallbackEvent::RESULT_DISP) {
+        show_tool_result(content, tool_name != "error");
         return true;
     }
 
@@ -1111,13 +1235,6 @@ bool TUI::output_callback(CallbackEvent type, const std::string& content,
 // Main Run Loop
 // ============================================================================
 
-static std::optional<ToolParser::ToolCall> tui_extract_tool_call(const Response& resp, Backend* backend) {
-    if (!resp.tool_calls.empty()) {
-        return resp.tool_calls[0];
-    }
-    return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
-}
-
 int TUI::run(Provider* cmdline_provider) {
     tui_debug(1, "Starting TUI mode");
 
@@ -1142,8 +1259,10 @@ int TUI::run(Provider* cmdline_provider) {
         callback(CallbackEvent::SYSTEM, " - FAILED\n", "", "");
         return 1;
     }
-    // Register other providers as tools
-    register_provider_tools(tools, current_provider);
+    // Register other providers as tools (unless tools disabled)
+    if (!no_tools) {
+        register_provider_tools(tools, current_provider);
+    }
 
     // Update status bar with provider info
     update_status_bar();
@@ -1159,7 +1278,7 @@ int TUI::run(Provider* cmdline_provider) {
     // Configure session based on backend capabilities
     session.desired_completion_tokens = calculate_desired_completion_tokens(
         backend->context_size, backend->max_output_tokens);
-    session.auto_evict = (backend->context_size > 0 && !backend->is_local);
+    session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
 
     Scheduler scheduler;
     if (!g_disable_scheduler) {
@@ -1179,9 +1298,6 @@ int TUI::run(Provider* cmdline_provider) {
     std::string user_input;
     bool awaiting_generation = false;
     Response resp;
-    int tool_loop_iteration = 0;
-    std::vector<std::string> recent_tool_calls;
-    bool in_tool_loop = false;
 
     while (!quit_requested) {
         if (!g_disable_scheduler) {
@@ -1199,13 +1315,13 @@ int TUI::run(Provider* cmdline_provider) {
             show_cancelled();
             clear_queued_input_display();
             awaiting_generation = false;
-            in_tool_loop = false;
             gen_thread.reset();
             g_generation_cancelled = false;
             continue;
         }
 
         if (awaiting_generation && gen_thread.is_complete()) {
+            // Generation complete - tool calls are handled recursively in callback
             awaiting_generation = false;
             resp = gen_thread.last_response;
             gen_thread.reset();
@@ -1213,130 +1329,25 @@ int TUI::run(Provider* cmdline_provider) {
             if (!resp.success) {
                 show_error(resp.error);
                 clear_queued_input_display();
-                in_tool_loop = false;
                 continue;
             }
 
             if (resp.finish_reason == "cancelled") {
                 show_cancelled();
                 clear_queued_input_display();
-                in_tool_loop = false;
                 continue;
             }
 
-            tui_debug(1, "Got response, length: " + std::to_string(resp.content.length()));
-            in_tool_loop = true;
+            tui_debug(1, "Generation complete, length: " + std::to_string(resp.content.length()));
+            write_output("\n", CallbackEvent::CONTENT);
+            clear_queued_input_display();
 
             // Update status bar with current token count
             update_status_bar();
+            continue;
         }
 
-        if (in_tool_loop && !awaiting_generation) {
-            tool_loop_iteration++;
-
-            std::optional<ToolParser::ToolCall> tool_call_opt;
-
-            if (!pending_tool_calls.empty()) {
-                auto tc = pending_tool_calls.front();
-                pending_tool_calls.pop();
-                tool_call_opt = ToolParser::parse_tool_call(
-                    "<tool_call>" + tc.args + "</tool_call>",
-                    backend->get_tool_call_markers()
-                );
-                if (tool_call_opt) {
-                    tool_call_opt->name = tc.name;
-                    tool_call_opt->tool_call_id = tc.tool_call_id;
-                }
-            } else {
-                tool_call_opt = tui_extract_tool_call(resp, backend.get());
-            }
-
-            if (tool_call_opt.has_value()) {
-                auto tool_call = tool_call_opt.value();
-                std::string tool_name = tool_call.name;
-                std::string tool_call_id = tool_call.tool_call_id;
-
-                tui_debug(1, "Tool call: " + tool_name);
-
-                std::string params_str;
-                bool first_param = true;
-                for (const auto& param : tool_call.parameters) {
-                    if (!first_param) params_str += ", ";
-                    first_param = false;
-                    std::string value_str;
-                    try {
-                        if (param.second.type() == typeid(std::string)) {
-                            value_str = std::any_cast<std::string>(param.second);
-                        } else if (param.second.type() == typeid(int)) {
-                            value_str = std::to_string(std::any_cast<int>(param.second));
-                        } else if (param.second.type() == typeid(double)) {
-                            value_str = std::to_string(std::any_cast<double>(param.second));
-                        } else if (param.second.type() == typeid(bool)) {
-                            value_str = std::any_cast<bool>(param.second) ? "true" : "false";
-                        } else {
-                            value_str = "<unknown>";
-                        }
-                    } catch (...) {
-                        value_str = "<error>";
-                    }
-                    if (value_str.length() > 50) {
-                        value_str = value_str.substr(0, 47) + "...";
-                    }
-                    params_str += param.first + "=" + value_str;
-                }
-
-                show_tool_call(tool_name, params_str);
-
-                // Execute tool (handles truncation)
-                ToolResult tool_result = execute_tool(tools, tool_name, tool_call.parameters, tool_call_id);
-
-                // Display summary (or fallback to error/content snippet)
-                std::string display_summary = tool_result.summary;
-                if (display_summary.empty()) {
-                    if (!tool_result.success && !tool_result.error.empty()) {
-                        display_summary = tool_result.error;
-                    } else if (!tool_result.content.empty()) {
-                        // Fallback: first line of content
-                        size_t newline = tool_result.content.find('\n');
-                        display_summary = (newline != std::string::npos)
-                            ? tool_result.content.substr(0, newline)
-                            : tool_result.content;
-                        if (display_summary.length() > 80) {
-                            display_summary = display_summary.substr(0, 77) + "...";
-                        }
-                    } else {
-                        display_summary = tool_result.success ? "Done" : "Failed";
-                    }
-                }
-                show_tool_result(display_summary, tool_result.success);
-
-                // Submit tool result via generation thread
-                GenerationRequest req;
-                req.role = Message::TOOL_RESPONSE;
-                req.content = tool_result.content;
-                req.tool_name = tool_name;
-                req.tool_id = tool_call_id;
-
-                req.callback = [this](CallbackEvent type, const std::string& content,
-                                      const std::string& tool_name, const std::string& tool_call_id) -> bool {
-                    return output_callback(type, content, tool_name, tool_call_id);
-                };
-
-                gen_thread.submit(req);
-                awaiting_generation = true;
-                continue;
-            } else {
-                tui_debug(1, "Generation complete");
-                write_output("\n", CallbackEvent::CONTENT);
-                clear_queued_input_display();
-                in_tool_loop = false;
-                tool_loop_iteration = 0;
-                recent_tool_calls.clear();
-                continue;
-            }
-        }
-
-        if (!awaiting_generation && !in_tool_loop && has_pending_input()) {
+        if (!awaiting_generation && has_pending_input()) {
             std::lock_guard<std::mutex> lock(input_mutex);
             if (user_input_queue.empty()) continue;
 
@@ -1373,7 +1384,7 @@ int TUI::run(Provider* cmdline_provider) {
             awaiting_generation = true;
         }
 
-        if (piped_eof && !has_pending_input() && !awaiting_generation && !in_tool_loop) {
+        if (piped_eof && !has_pending_input() && !awaiting_generation) {
             tui_debug(1, "EOF, exiting");
             break;
         }

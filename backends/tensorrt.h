@@ -1,6 +1,6 @@
 #pragma once
 
-#include "backend.h"
+#include "gpu.h"
 #include "models.h"
 #include "chat_template.h"
 
@@ -43,7 +43,7 @@ private:
 };
 
 /// @brief Backend for TensorRT-LLM acceleration
-class TensorRTBackend : public Backend {
+class TensorRTBackend : public GpuBackend {
 public:
     TensorRTBackend(size_t context_size, Session& session, EventCallback callback);
     ~TensorRTBackend() override;

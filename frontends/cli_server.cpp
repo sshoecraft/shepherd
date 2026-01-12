@@ -85,32 +85,6 @@ void CLIServer::init(bool no_mcp, bool no_tools) {
     Frontend::init_tools(session, tools, no_mcp, no_tools);
 }
 
-// Helper: Extract tool call from Response
-static std::optional<ToolParser::ToolCall> extract_tool_call(const Response& resp, Backend* backend) {
-    if (!resp.tool_calls.empty()) {
-        return resp.tool_calls[0];
-    }
-    return ToolParser::parse_tool_call(resp.content, backend->get_tool_call_markers());
-}
-
-// Helper to convert tool parameters to JSON
-static json params_to_json(const std::map<std::string, std::any>& parameters) {
-    json params_json = json::object();
-    for (const auto& [key, val] : parameters) {
-        if (val.type() == typeid(std::string)) {
-            params_json[key] = std::any_cast<std::string>(val);
-        } else if (val.type() == typeid(int)) {
-            params_json[key] = std::any_cast<int>(val);
-        } else if (val.type() == typeid(double)) {
-            params_json[key] = std::any_cast<double>(val);
-        } else if (val.type() == typeid(bool)) {
-            params_json[key] = std::any_cast<bool>(val);
-        } else {
-            params_json[key] = "[complex]";
-        }
-    }
-    return params_json;
-}
 
 // Unified generation function - sends to requester AND all observers
 static void do_generation(CliServerState& state,
@@ -210,8 +184,36 @@ static void do_generation(CliServerState& state,
             return true;
         }
 
-        // Handle TOOL_CALL - handled via pending_tool_calls queue
+        // Handle TOOL_CALL - fires after STOP, execute immediately
         if (type == CallbackEvent::TOOL_CALL) {
+            // Parse params for display
+            json params_json;
+            try {
+                params_json = json::parse(content);
+            } catch (...) {
+                params_json = json::object();
+            }
+
+            // Send tool call to clients
+            requester->on_tool_call(tool_name_arg, params_json, tool_call_id);
+            state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                obs.on_tool_call(tool_name_arg, params_json, tool_call_id);
+            });
+
+            // Execute tool
+            ToolResult tool_result = state.server->execute_tool(
+                *state.tools, tool_name_arg, content, tool_call_id);
+
+            // Send tool result to clients
+            requester->on_tool_result(tool_name_arg, tool_result.success, tool_result.error);
+            state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                obs.on_tool_result(tool_name_arg, tool_result.success, tool_result.error);
+            });
+
+            // Add tool result to session - triggers next generation cycle
+            state.session->add_message(
+                Message::TOOL_RESPONSE, tool_result.content, tool_name_arg, tool_call_id);
+
             return true;
         }
 
@@ -224,6 +226,15 @@ static void do_generation(CliServerState& state,
 
         // Handle USER_PROMPT echo (already handled above)
         if (type == CallbackEvent::USER_PROMPT) {
+            return true;
+        }
+
+        // Handle CODEBLOCK - send as separate event type
+        if (type == CallbackEvent::CODEBLOCK) {
+            requester->on_codeblock(content);
+            state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
+                obs.on_codeblock(content);
+            });
             return true;
         }
 
@@ -264,61 +275,13 @@ static void do_generation(CliServerState& state,
     // Build Response from session's last message
     Response resp;
     resp.success = true;
+    // Tool calls are handled recursively in callback
+    // Just get final response content
     if (!state.session->messages.empty() &&
         state.session->messages.back().role == Message::ASSISTANT) {
         resp.content = state.session->messages.back().content;
     }
     accumulated_response = resp.content;
-
-    // Tool execution loop
-    const int max_tool_iterations = 50;
-    int iteration = 0;
-
-    while (iteration < max_tool_iterations) {
-        iteration++;
-
-        auto tool_call_opt = extract_tool_call(resp, state.backend);
-        if (!tool_call_opt) {
-            break;
-        }
-
-        auto& tool_call = *tool_call_opt;
-        std::string tool_name = tool_call.name;
-        json params_json = params_to_json(tool_call.parameters);
-
-        // Send tool call to requester and observers
-        requester->on_tool_call(tool_name, params_json, tool_call.tool_call_id);
-        state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
-            obs.on_tool_call(tool_name, params_json, tool_call.tool_call_id);
-        });
-
-        // Execute tool
-        ToolResult tool_result = state.server->execute_tool(
-            *state.tools, tool_name, tool_call.parameters, tool_call.tool_call_id);
-
-        // Send tool result to requester and observers
-        requester->on_tool_result(tool_name, tool_result.success, tool_result.error);
-        state.send_to_observers([&](ClientOutputs::ClientOutput& obs) {
-            obs.on_tool_result(tool_name, tool_result.success, tool_result.error);
-        });
-
-        // Reset filtering state for next generation
-        in_tool_call = false;
-        pending_buffer.clear();
-
-        // Send tool result to model
-        state.session->add_message(
-            Message::TOOL_RESPONSE, tool_result.content, tool_name, tool_call.tool_call_id);
-
-        // Build Response from session's last message
-        if (!state.session->messages.empty() &&
-            state.session->messages.back().role == Message::ASSISTANT) {
-            resp.success = true;
-            resp.content = state.session->messages.back().content;
-        }
-
-        accumulated_response = resp.content;
-    }
 
     // Send completion to requester and observers
     requester->on_complete(accumulated_response);
@@ -346,6 +309,9 @@ static json process_request(CliServerState& state, const std::string& prompt) {
 
         void on_delta(const std::string& delta) override {
             accumulated += delta;
+        }
+        void on_codeblock(const std::string& content) override {
+            accumulated += "```\n" + content;  // Wrap in markdown for non-streaming
         }
         void on_user_prompt(const std::string&) override {}
         void on_message_added(const std::string&, const std::string&, int) override {}

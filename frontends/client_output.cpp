@@ -31,6 +31,12 @@ void StreamingOutput::on_delta(const std::string& delta) {
     write_sse("delta", {{"delta", sanitized}});
 }
 
+void StreamingOutput::on_codeblock(const std::string& content) {
+    if (content.empty()) return;
+    std::string sanitized = utf8_sanitizer::sanitize_utf8(content);
+    write_sse("codeblock", {{"content", sanitized}});
+}
+
 void StreamingOutput::on_user_prompt(const std::string& prompt) {
     nlohmann::json data;
     data["role"] = "user";
@@ -116,8 +122,22 @@ BatchedOutput::BatchedOutput(httplib::Response* response)
     : response(response) {}
 
 void BatchedOutput::on_delta(const std::string& delta) {
+    // Close code block if switching from codeblock to regular content
+    if (in_codeblock) {
+        accumulated += "```\n";
+        in_codeblock = false;
+    }
     // Accumulate deltas - will be returned in flush()
     accumulated += delta;
+}
+
+void BatchedOutput::on_codeblock(const std::string& content) {
+    // Accumulate code blocks with markers for batched output
+    if (!in_codeblock) {
+        accumulated += "```\n";
+        in_codeblock = true;
+    }
+    accumulated += content;
 }
 
 void BatchedOutput::on_user_prompt(const std::string& prompt) {

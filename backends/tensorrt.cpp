@@ -200,7 +200,7 @@ std::string TensorRTTokenizer::get_tokenizer_name() const { return "tensorrt"; }
 
 // TensorRTBackend implementation
 TensorRTBackend::TensorRTBackend(size_t context_size, Session& session, EventCallback callback)
-    : Backend(context_size, session, callback)
+    : GpuBackend(context_size, session, callback)
 #ifdef ENABLE_TENSORRT
       ,backend_session(),
       current_session(nullptr),
@@ -210,7 +210,7 @@ TensorRTBackend::TensorRTBackend(size_t context_size, Session& session, EventCal
     // Set public Backend variables
     backend_name = "tensorrt";
     this->context_size = context_size;
-    is_local = true;  // Local GPU backend
+    // is_gpu = true set by GpuBackend constructor
 
 #ifdef ENABLE_TENSORRT
     tokenizer_ = std::make_unique<TensorRTTokenizer>("");
@@ -1099,15 +1099,7 @@ void TensorRTBackend::generate_from_session(Session& session, int max_tokens, Ev
     backend_session.system_message = session.system_message;
 
     // Copy sampling parameters from request
-    backend_session.temperature = session.temperature;
-    backend_session.top_p = session.top_p;
-    backend_session.top_k = session.top_k;
-    backend_session.min_p = session.min_p;
-    backend_session.repetition_penalty = session.repetition_penalty;
-    backend_session.presence_penalty = session.presence_penalty;
-    backend_session.frequency_penalty = session.frequency_penalty;
-    backend_session.length_penalty = session.length_penalty;
-    backend_session.no_repeat_ngram_size = session.no_repeat_ngram_size;
+    backend_session.sampling = session.sampling;
 
     // Generate response
     std::string result = generate(backend_session, max_tokens, callback);
@@ -1183,7 +1175,7 @@ std::string TensorRTBackend::render_message(const Message& msg, bool add_generat
 
 bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_generation_prompt) {
     if (!tokenizer_) {
-        if (callback) callback(CallbackEvent::ERROR, "Tokenizer not loaded", "", "");
+        callback(CallbackEvent::ERROR, "Tokenizer not loaded", "", "");
         return false;
     }
 
@@ -1198,7 +1190,7 @@ bool TensorRTBackend::tokenize_and_accumulate_message(Message& msg, bool add_gen
     // Tokenize with add_special_tokens=false to avoid unwanted BOS/EOS tokens
     std::vector<int> tokens = tokenizer_->encode(formatted_text, false);
     if (tokens.empty()) {
-        if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
+        callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
         dout(1) << "Formatted text: " + formatted_text.substr(0, 500) << std::endl;
         return false;
     }
@@ -1259,15 +1251,16 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
         tle::FinishReason finish_reason = tle::FinishReason::kNOT_FINISHED;
 
         // Create sampling config - use Session overrides if set, otherwise use backend defaults
-        float use_temperature = (session.temperature >= 0.0f) ? session.temperature : temperature;
-        float use_top_p = (session.top_p >= 0.0f) ? session.top_p : top_p;
-        int use_top_k = (session.top_k >= 0) ? session.top_k : top_k;
-        float use_min_p = (session.min_p >= 0.0f) ? session.min_p : min_p;
-        float use_repetition_penalty = (session.repetition_penalty >= 0.0f) ? session.repetition_penalty : repetition_penalty;
-        float use_presence_penalty = (session.presence_penalty > -999.0f) ? session.presence_penalty : presence_penalty;
-        float use_frequency_penalty = (session.frequency_penalty > -999.0f) ? session.frequency_penalty : frequency_penalty;
-        float use_length_penalty = (session.length_penalty > -999.0f) ? session.length_penalty : length_penalty;
-        int use_no_repeat_ngram = (session.no_repeat_ngram_size >= 0) ? session.no_repeat_ngram_size : no_repeat_ngram_size;
+        const auto& sp = session.sampling;
+        float use_temperature = (sp.temperature >= 0.0f) ? sp.temperature : temperature;
+        float use_top_p = (sp.top_p >= 0.0f) ? sp.top_p : top_p;
+        int use_top_k = (sp.top_k >= 0) ? sp.top_k : top_k;
+        float use_min_p = (sp.min_p >= 0.0f) ? sp.min_p : min_p;
+        float use_repetition_penalty = (sp.repetition_penalty >= 0.0f) ? sp.repetition_penalty : repetition_penalty;
+        float use_presence_penalty = (sp.presence_penalty > -999.0f) ? sp.presence_penalty : presence_penalty;
+        float use_frequency_penalty = (sp.frequency_penalty > -999.0f) ? sp.frequency_penalty : frequency_penalty;
+        float use_length_penalty = (sp.length_penalty > -999.0f) ? sp.length_penalty : length_penalty;
+        int use_no_repeat_ngram = (sp.no_repeat_ngram_size >= 0) ? sp.no_repeat_ngram_size : no_repeat_ngram_size;
 
         dout(1) << "Sampling config: temp=" + std::to_string(use_temperature) +
                   " top_p=" + std::to_string(use_top_p) +
@@ -1377,10 +1370,10 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             request_active_ = true;
             dout(1) << "Request enqueued with ID: " + std::to_string(request_id) << std::endl;
         } catch (const std::exception& e) {
-            if (callback) callback(CallbackEvent::ERROR, "Exception enqueueing request: " + std::string(e.what()), "", "");
+            callback(CallbackEvent::ERROR, "Exception enqueueing request: " + std::string(e.what()), "", "");
             throw BackendError("Failed to enqueue request: " + std::string(e.what()));
         } catch (...) {
-            if (callback) callback(CallbackEvent::ERROR, "Unknown exception enqueueing request", "", "");
+            callback(CallbackEvent::ERROR, "Unknown exception enqueueing request", "", "");
             throw BackendError("Failed to enqueue request: unknown exception");
         }
 
@@ -1397,7 +1390,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             for (const auto& response : responses) {
                 if (response.hasError()) {
                     std::string error_msg = response.getErrorMsg();
-                    if (callback) callback(CallbackEvent::ERROR, "Response error: " + error_msg, "", "");
+                    callback(CallbackEvent::ERROR, "Response error: " + error_msg, "", "");
                     request_active_ = false;
 
                     // Check if error is due to context/KV cache being full
@@ -1509,13 +1502,11 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             int context_max = context_size;
 
             // Send prefill stats via callback (frontend decides whether to display)
-            if (callback) {
-                std::ostringstream stats;
-                stats << "[Prefill: " << input_tokens.size() << " tokens, "
-                      << std::fixed << std::setprecision(1) << prefill_tok_per_sec << " t/s, "
-                      << "context: " << context_used << "/" << context_max << "]\n";
-                callback(CallbackEvent::STATS, stats.str(), "", "");
-            }
+            std::ostringstream stats;
+            stats << "[Prefill: " << input_tokens.size() << " tokens, "
+                  << std::fixed << std::setprecision(1) << prefill_tok_per_sec << " t/s, "
+                  << "context: " << context_used << "/" << context_max << "]\n";
+            callback(CallbackEvent::STATS, stats.str(), "", "");
         }
 
         // Decode metrics
@@ -1528,13 +1519,11 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
             int context_max = context_size;
 
             // Send decode stats via callback (frontend decides whether to display)
-            if (callback) {
-                std::ostringstream stats;
-                stats << "\n[Decode: " << output_tokens.size() << " tokens, "
-                      << std::fixed << std::setprecision(1) << decode_tok_per_sec << " t/s, "
-                      << "context: " << context_used << "/" << context_max << "]\n";
-                callback(CallbackEvent::STATS, stats.str(), "", "");
-            }
+            std::ostringstream stats2;
+            stats2 << "\n[Decode: " << output_tokens.size() << " tokens, "
+                  << std::fixed << std::setprecision(1) << decode_tok_per_sec << " t/s, "
+                  << "context: " << context_used << "/" << context_max << "]\n";
+            callback(CallbackEvent::STATS, stats2.str(), "", "");
         }
 
         // Handle <|eom_id|> token for continued tool execution
@@ -1590,7 +1579,7 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
     } catch (const std::exception& e) {
         request_active_ = false;
         accumulated_tokens.clear();
-        if (callback) callback(CallbackEvent::ERROR, "TensorRT generation error: " + std::string(e.what()), "", "");
+        callback(CallbackEvent::ERROR, "TensorRT generation error: " + std::string(e.what()), "", "");
         throw BackendError("TensorRT generation failed: " + std::string(e.what()));
     }
 }

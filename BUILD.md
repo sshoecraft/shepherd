@@ -165,7 +165,7 @@ The TensorRT backend requires several components to be built and installed:
 
 ### 4. **MPI** (for multi-GPU models)
    - Required for models that use tensor parallelism
-   - Install: `sudo apt install libopenmpi-dev openmpi-bin`
+   - Install: `sudo apt install libopenmpi-dev openmpi-bin openmpi-common`
    - CMake automatically finds MPI when `ENABLE_TENSORRT=ON`
 
 ### Build Process Summary

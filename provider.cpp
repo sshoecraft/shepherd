@@ -996,7 +996,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			}
 
 			// Rebuild provider tools (excluding new active provider)
-			if (tools) {
+			// Only if native tools exist (tools not disabled via --notools)
+			if (tools && tools->has_native_tools()) {
 				register_provider_tools(*tools, name);
 				tools->populate_session_tools(*session);
 				// Update backend's valid tool names
@@ -1083,7 +1084,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			}
 
 			// Rebuild provider tools (excluding new active provider)
-			if (tools) {
+			// Only if native tools exist (tools not disabled via --notools)
+			if (tools && tools->has_native_tools()) {
 				register_provider_tools(*tools, next_prov->name);
 				tools->populate_session_tools(*session);
 				// Update backend's valid tool names

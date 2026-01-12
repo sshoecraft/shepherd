@@ -40,13 +40,23 @@ BENCHMARK_PROMPTS = [
 ]
 
 
-def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, quiet=False, debug=False, stream=True):
+def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, top_k=None, rep=None, freq=None, quiet=False, debug=False, stream=True):
     """Run a single request and measure performance."""
     start_time = time.perf_counter()
     first_token_time = None
     token_times = []
     tokens = 0
     all_content = []
+
+    # Build extra params for non-standard OpenAI params
+    # extra_body contents get merged into request body by the OpenAI client
+    extra_body = {}
+    if top_k is not None:
+        extra_body["top_k"] = top_k
+    if rep is not None:
+        extra_body["repetition_penalty"] = rep
+    if freq is not None:
+        extra_body["frequency_penalty"] = freq
 
     response = client.chat.completions.create(
         model=model,
@@ -55,9 +65,11 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, qui
         stream=stream,
         temperature=temperature,
         top_p=top_p,
+        **({"extra_body": extra_body} if extra_body else {})
     )
 
     if stream:
+        usage_tokens = None
         for chunk in response:
             if debug:
                 delta_content = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta else None
@@ -72,7 +84,13 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, qui
                     first_token_time = now
                 else:
                     token_times.append(now)
-                tokens += 1
+                tokens += 1  # Count chunks for ITL calculation
+            # Capture usage from final chunk if available
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage_tokens = chunk.usage.completion_tokens
+        # Use actual token count from usage if available
+        if usage_tokens is not None:
+            tokens = usage_tokens
     else:
         # Non-streaming mode - all tokens arrive at once
         if response.choices and response.choices[0].message.content:
@@ -124,7 +142,7 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, qui
     }
 
 
-def run_benchmark(base_url, api_key, model, prompt, max_tokens, runs, warmup, temperature, top_p, unique_prompts=False, quiet=False, debug=False, stream=True):
+def run_benchmark(base_url, api_key, model, prompt, max_tokens, runs, warmup, temperature, top_p, top_k=None, rep=None, freq=None, unique_prompts=False, quiet=False, debug=False, stream=True):
     """Run multiple benchmark iterations."""
     client = OpenAI(base_url=base_url, api_key=api_key)
 
@@ -144,7 +162,7 @@ def run_benchmark(base_url, api_key, model, prompt, max_tokens, runs, warmup, te
     if warmup > 0:
         print(f"Warming up ({warmup} runs)...")
         for _ in range(warmup):
-            benchmark_request(client, model, prompts[prompt_idx], max_tokens, temperature, top_p, quiet=True, debug=debug, stream=stream)
+            benchmark_request(client, model, prompts[prompt_idx], max_tokens, temperature, top_p, top_k=top_k, rep=rep, freq=freq, quiet=True, debug=debug, stream=stream)
             prompt_idx += 1
 
     # Benchmark runs
@@ -155,7 +173,7 @@ def run_benchmark(base_url, api_key, model, prompt, max_tokens, runs, warmup, te
     results = []
     failed_count = 0
     for i in range(runs):
-        result = benchmark_request(client, model, prompts[prompt_idx], max_tokens, temperature, top_p, quiet=quiet, debug=debug, stream=stream)
+        result = benchmark_request(client, model, prompts[prompt_idx], max_tokens, temperature, top_p, top_k=top_k, rep=rep, freq=freq, quiet=quiet, debug=debug, stream=stream)
         prompt_idx += 1
         results.append(result)
         if quiet:
@@ -165,17 +183,22 @@ def run_benchmark(base_url, api_key, model, prompt, max_tokens, runs, warmup, te
             elif (i + 1) % 10 == 0:
                 print(".", end="", flush=True)
         else:
-            print(f"  Run {i+1}: {result['tokens_per_sec']:.2f} t/s, "
-                  f"TTFT: {result['ttft_ms']:.1f}ms, "
-                  f"ITL: {result['itl_ms']:.2f}ms, "
-                  f"tokens: {result['tokens']}")
+            if stream:
+                print(f"  Run {i+1}: {result['tokens_per_sec']:.2f} t/s, "
+                      f"TTFT: {result['ttft_ms']:.1f}ms, "
+                      f"ITL: {result['itl_ms']:.2f}ms, "
+                      f"tokens: {result['tokens']}")
+            else:
+                print(f"  Run {i+1}: {result['tokens_per_sec']:.2f} t/s, "
+                      f"total: {result['total_time']*1000:.1f}ms, "
+                      f"tokens: {result['tokens']}")
     if quiet:
         print(f" done ({failed_count} failed)")
 
     return results
 
 
-def print_summary(results):
+def print_summary(results, stream=True):
     """Print summary statistics."""
     # Separate successful vs failed runs
     successful = [r for r in results if r["tokens"] > 0]
@@ -195,32 +218,47 @@ def print_summary(results):
 
     # Stats from successful runs only
     tps_values = [r["tokens_per_sec"] for r in successful]
-    ttft_values = [r["ttft_ms"] for r in successful]
-    itl_values = [r["itl_ms"] for r in successful if r["itl_ms"] > 0]
+    total_time_values = [r["total_time"] * 1000 for r in successful]
     token_counts = [r["tokens"] for r in successful]
 
     print(f"\nAvg tokens generated: {statistics.mean(token_counts):.1f}")
     print()
-    print(f"Tokens/sec (successful runs only):")
+    print(f"Tokens/sec:")
     print(f"  Mean:   {statistics.mean(tps_values):.2f}")
     print(f"  Median: {statistics.median(tps_values):.2f}")
     if len(tps_values) > 1:
         print(f"  StdDev: {statistics.stdev(tps_values):.2f}")
         print(f"  P5:     {sorted(tps_values)[int(len(tps_values)*0.05)]:.2f}")
         print(f"  P95:    {sorted(tps_values)[int(len(tps_values)*0.95)]:.2f}")
-    print()
-    print(f"Time to First Token (ms):")
-    print(f"  Mean:   {statistics.mean(ttft_values):.1f}")
-    print(f"  Median: {statistics.median(ttft_values):.1f}")
-    if len(ttft_values) > 1:
-        print(f"  P5:     {sorted(ttft_values)[int(len(ttft_values)*0.05)]:.1f}")
-        print(f"  P95:    {sorted(ttft_values)[int(len(ttft_values)*0.95)]:.1f}")
 
-    if itl_values:
+    if stream:
+        # Streaming-specific metrics
+        ttft_values = [r["ttft_ms"] for r in successful]
+        itl_values = [r["itl_ms"] for r in successful if r["itl_ms"] > 0]
+
         print()
-        print(f"Inter-Token Latency (ms):")
-        print(f"  Mean:   {statistics.mean(itl_values):.2f}")
-        print(f"  Median: {statistics.median(itl_values):.2f}")
+        print(f"Time to First Token (ms):")
+        print(f"  Mean:   {statistics.mean(ttft_values):.1f}")
+        print(f"  Median: {statistics.median(ttft_values):.1f}")
+        if len(ttft_values) > 1:
+            print(f"  P5:     {sorted(ttft_values)[int(len(ttft_values)*0.05)]:.1f}")
+            print(f"  P95:    {sorted(ttft_values)[int(len(ttft_values)*0.95)]:.1f}")
+
+        if itl_values:
+            print()
+            print(f"Inter-Token Latency (ms):")
+            print(f"  Mean:   {statistics.mean(itl_values):.2f}")
+            print(f"  Median: {statistics.median(itl_values):.2f}")
+    else:
+        # Non-streaming: show total time
+        print()
+        print(f"Total Time (ms):")
+        print(f"  Mean:   {statistics.mean(total_time_values):.1f}")
+        print(f"  Median: {statistics.median(total_time_values):.1f}")
+        if len(total_time_values) > 1:
+            print(f"  P5:     {sorted(total_time_values)[int(len(total_time_values)*0.05)]:.1f}")
+            print(f"  P95:    {sorted(total_time_values)[int(len(total_time_values)*0.95)]:.1f}")
+
     print("=" * 60)
 
 
@@ -257,8 +295,14 @@ Examples:
                         help="Number of warmup runs (default: 1)")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="Temperature (default: 0.7, use 1.0 for GPT-OSS)")
-    parser.add_argument("--top-p", type=float, default=1.0,
+    parser.add_argument("--top_p", type=float, default=1.0,
                         help="Top-p (default: 1.0)")
+    parser.add_argument("--top_k", type=int, default=None,
+                        help="Top-k sampling (default: None)")
+    parser.add_argument("--rep", type=float, default=None,
+                        help="Repetition penalty (default: None)")
+    parser.add_argument("--freq", type=float, default=None,
+                        help="Frequency penalty (default: None)")
     parser.add_argument("--unique-prompts", action="store_true",
                         help="Use unique prompts for each run to avoid cache issues")
     parser.add_argument("--quiet", "-q", action="store_true",
@@ -277,6 +321,7 @@ Examples:
     print()
     
     try:
+        stream = not args.nostream
         results = run_benchmark(
             args.base_url,
             args.api_key,
@@ -287,12 +332,15 @@ Examples:
             args.warmup,
             args.temperature,
             args.top_p,
-            args.unique_prompts,
-            args.quiet,
-            args.debug,
-            stream=not args.nostream,
+            top_k=args.top_k,
+            rep=args.rep,
+            freq=args.freq,
+            unique_prompts=args.unique_prompts,
+            quiet=args.quiet,
+            debug=args.debug,
+            stream=stream,
         )
-        print_summary(results)
+        print_summary(results, stream=stream)
     except Exception as e:
         print(f"Error: {e}")
         raise

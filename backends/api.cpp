@@ -46,6 +46,12 @@ ApiBackend::ApiBackend(size_t context_size, Session& session, EventCallback call
 	dout(1) << "ApiBackend created" << std::endl;
 }
 
+// Output through common filter (backticks, buffering)
+// API backends use this for streaming output to get consistent filtering
+bool ApiBackend::output(const char* text, size_t len) {
+    return filter(text, len);
+}
+
 void ApiBackend::parse_backend_config() {
     if (config->json.is_null() || config->json.empty()) {
         dout(1) << "ApiBackend::parse_backend_config: empty config, using defaults" << std::endl;
@@ -237,20 +243,21 @@ void ApiBackend::add_message(Session& session, Message::Role role, const std::st
                 }
 
                 if (!display_content.empty()) {
+                    // Route through output() for filtering (backticks, buffering)
                     output(display_content);
                     flush_output();
                 }
             }
 
-            // Send any structured tool calls from API
+            // Signal completion with finish reason
+            callback(CallbackEvent::STOP, resp.finish_reason, "", "");
+
+            // Send tool calls AFTER STOP - frontend handles immediately
             if (!resp.tool_calls.empty()) {
                 for (const auto& tc : resp.tool_calls) {
                     callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
                 }
             }
-
-            // Signal completion with finish reason
-            callback(CallbackEvent::STOP, resp.finish_reason, "", "");
             return;
         }
 
@@ -317,7 +324,7 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
 
     if (resp.success) {
         // If we have structured tool calls from API, use those exclusively
-        // (don't let output() also detect them from content, which causes duplicates)
+        // API backends get structured tool_calls from API response - no content filtering needed
         if (!resp.tool_calls.empty()) {
             // Output any text content that's NOT the tool call JSON
             // For Anthropic, resp.content is JSON array - extract text portions only
@@ -329,21 +336,16 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
                             output(block["text"].get<std::string>());
                         }
                     }
-                    flush_output();
                 }
             } catch (...) {
                 // Not JSON array, output as-is (but this shouldn't happen with tool calls)
                 output(resp.content);
-                flush_output();
             }
+            flush_output();
 
-            // Send structured tool calls
-            for (const auto& tc : resp.tool_calls) {
-                callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
-            }
+            // Tool calls will be sent AFTER STOP below
         } else if (!resp.content.empty()) {
-            // No structured tool calls - route through unified output filter
-            // (which may detect tool calls from content)
+            // No structured tool calls - output content through filter
             output(resp.content);
             flush_output();
         }
@@ -371,6 +373,11 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
         session.last_assistant_message_tokens = assistant_tokens;
 
         callback(CallbackEvent::STOP, resp.finish_reason, "", "");
+
+        // Send tool calls AFTER STOP - frontend handles immediately
+        for (const auto& tc : resp.tool_calls) {
+            callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
+        }
     } else {
         callback(CallbackEvent::ERROR, resp.error, "api_error", "");
         callback(CallbackEvent::STOP, "error", "", "");

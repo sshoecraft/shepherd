@@ -105,13 +105,14 @@ enum Role {
            └─→ Calls session.add_message(role, content, ...)
                └─→ Backend generates tokens
                    └─→ For each token: callback(CONTENT, delta, "", "")
-                   └─→ For tool call: callback(TOOL_CALL, json, name, id)
                    └─→ On error: callback(ERROR, message, type, "")
                    └─→ On complete: callback(STOP, finish_reason, "", "")
+                   └─→ For tool call: callback(TOOL_CALL, json, name, id)  ← AFTER STOP
+                       └─→ Frontend executes tool in callback
+                       └─→ Frontend calls session.add_message(TOOL_RESPONSE, ...)
+                           └─→ Recursive generation cycle
                └─→ Backend updates session with messages
-           └─→ add_message returns void
-       └─→ Frontend checks pending tool calls from callbacks
-           └─→ If tool call: execute, submit result, repeat
+           └─→ add_message returns (all tool chains complete)
 ```
 
 ### Callback Invocation Points
@@ -139,23 +140,25 @@ The callback is always called - streaming controls granularity:
 
 ```cpp
 // Backend callback set at construction
-Backend::EventCallback cb = [](CallbackEvent event, const std::string& content,
-                               const std::string& name, const std::string& id) {
+Backend::EventCallback cb = [&](CallbackEvent event, const std::string& content,
+                                const std::string& name, const std::string& id) {
     switch (event) {
         case CallbackEvent::CONTENT:
             tio.write(content);  // Live output
             break;
-        case CallbackEvent::TOOL_CALL:
-            queue_tool_call(content, name, id);
-            break;
         case CallbackEvent::STOP:
             // finish_reason in content: "stop", "tool_calls", "length", "error"
+            break;
+        case CallbackEvent::TOOL_CALL:
+            // Fires AFTER STOP - execute immediately
+            ToolResult result = execute_tool(tools, name, content, id);
+            session.add_message(Message::TOOL_RESPONSE, result.content, name, id);
             break;
     }
     return true;
 };
 
-// add_message returns void - all output via callback
+// add_message returns after all tool chains complete
 session.add_message(Message::USER, prompt);
 ```
 
@@ -260,29 +263,72 @@ Runs LLM generation in background thread:
 
 ## Tool Execution
 
-Tools are executed by the frontend, not the backend:
+Tools are executed by the frontend via callback. TOOL_CALL events fire AFTER STOP:
 
 ```
-Backend generates response
+session.add_message(USER, "read file X")
     │
-    └─→ Response contains tool_calls or parsed tool call markers
+    └─→ backend->add_message() → generate_from_session()
         │
-        └─→ Frontend extracts tool call
+        ├─→ CONTENT events (streaming text to user)
+        ├─→ Backend detects tool call, records it
+        ├─→ Generation complete, assistant message stored
+        ├─→ callback(STOP, finish_reason, "", "")
+        │
+        └─→ callback(TOOL_CALL, params_json, tool_name, tool_id)
             │
-            └─→ Frontend executes tool via Tools class
-                │
-                └─→ Frontend submits tool result back to session
+            └─→ Frontend callback handler:
+                ├─→ Display tool call to user
+                ├─→ Execute tool via Tools class
+                ├─→ Display result summary
+                └─→ session.add_message(TOOL_RESPONSE, result, ...)
                     │
-                    └─→ Repeat until no more tool calls
+                    └─→ Recursive: triggers another generation
+                        │
+                        └─→ If more tool calls: repeat
+                        └─→ If no tool calls: returns
+    │
+    └─→ Original add_message returns (all tool calls complete)
+```
+
+Key design decisions:
+- **TOOL_CALL after STOP**: Generation is complete before frontend handles tool
+- **No queue needed**: Frontend executes immediately in callback
+- **Blocking recursive flow**: add_message doesn't return until all tools done
+- **Callbacks still stream**: Content events display in real-time during blocking
+
+### Tool Call Flow in Callback
+
+```cpp
+callback = [&](CallbackEvent type, const std::string& content,
+               const std::string& tool_name, const std::string& tool_id) -> bool {
+    switch (type) {
+        case CallbackEvent::CONTENT:
+            display(content);  // Stream to user
+            break;
+        case CallbackEvent::STOP:
+            // Generation complete
+            break;
+        case CallbackEvent::TOOL_CALL:
+            // Fires AFTER STOP - execute immediately
+            show_tool_call(tool_name, content);
+            ToolResult result = execute_tool(tools, tool_name, content, tool_id);
+            show_tool_result(result);
+            // Triggers recursive generation
+            session.add_message(Message::TOOL_RESPONSE, result.content, tool_name, tool_id);
+            break;
+    }
+    return true;
+};
 ```
 
 ### Tool Call Filtering
 
 During streaming, tool call syntax (JSON/XML) is filtered from display:
-- Filtering happens in `TerminalIO::write()`
+- Filtering happens in `Backend::output()`
 - Uses state machine to detect markers
 - Accumulates tool call content silently
-- Shows formatted version after completion
+- Records in `accumulated_tool_calls` for emission after STOP
 
 ## Input Handling (v2.13.0)
 

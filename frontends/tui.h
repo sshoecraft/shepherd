@@ -18,12 +18,6 @@
 // Callback type for when user submits input
 using InputCallback = std::function<void(const std::string&)>;
 
-// Pending tool call structure (same as CLI)
-struct TUIPendingToolCall {
-    std::string name;
-    std::string args;
-    std::string tool_call_id;
-};
 
 // TUI - Full ncurses TUI Frontend
 // Output at top, pending queue, input box, status line at bottom
@@ -95,9 +89,7 @@ public:
 
     // Public state for run() access
     bool piped_eof = false;
-
-    // Pending tool calls (filled by callback, processed by main loop)
-    std::queue<TUIPendingToolCall> pending_tool_calls;
+    bool no_tools = false;  // --notools flag
 
     // Input queue for async input
     struct QueuedInput {

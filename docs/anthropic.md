@@ -19,7 +19,7 @@ The `AnthropicBackend` class provides integration with Anthropic's Claude API. I
 The `add_message()` method provides streaming when `config->streaming` is enabled. It:
 1. Adds `"stream": true` to the request
 2. Uses `http_client->post_stream_cancellable()` with SSE parsing
-3. Routes content through `process_output()` for filtering
+3. Routes content through `output()` for filtering
 4. Handles tool_use blocks with partial JSON accumulation
 5. Updates session with messages and token counts
 

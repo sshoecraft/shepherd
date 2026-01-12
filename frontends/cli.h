@@ -7,20 +7,12 @@
 #include "message.h"
 #include <string>
 #include <memory>
-#include <queue>
 #include <deque>
 #include <termios.h>
 #include <vector>
 
 // Forward declaration
 typedef struct Replxx Replxx;
-
-// Pending tool call structure
-struct PendingToolCall {
-    std::string name;
-    std::string args;
-    std::string tool_call_id;
-};
 
 // CLI class handles user interaction and tool execution
 class CLI : public Frontend {
@@ -49,13 +41,16 @@ public:
     bool eof_received = false;
     bool generation_cancelled = false;
 
+    // Escape key handling for cancellation
+    bool check_escape_key();
+    void enter_generation_mode();
+    void exit_generation_mode();
+
     // Terminal state
     bool interactive_mode = false;
     bool colors_enabled = false;
     bool at_line_start = true;  // For indentation tracking
-
-    // Pending tool calls (filled by callback, processed by main loop)
-    std::queue<PendingToolCall> pending_tool_calls;
+    bool no_tools = false;  // --notools flag
 
     // Piped input support
     std::deque<std::string> piped_input_queue;

@@ -31,7 +31,7 @@ set(SHEPHERD_TEST_SOURCES
     ${CMAKE_SOURCE_DIR}/backends/models.cpp
     ${CMAKE_SOURCE_DIR}/backends/factory.cpp
     ${CMAKE_SOURCE_DIR}/backends/cli_client.cpp
-    ${CMAKE_SOURCE_DIR}/backends/channel_parser.cpp
+    ${CMAKE_SOURCE_DIR}/backends/harmony.cpp
     ${CMAKE_SOURCE_DIR}/tools/tool.cpp
     ${CMAKE_SOURCE_DIR}/tools/tools.cpp
     ${CMAKE_SOURCE_DIR}/tools/tool_parser.cpp
@@ -51,12 +51,18 @@ if(ENABLE_API_BACKENDS)
     )
 endif()
 
+# Add GPU backend base class if either GPU backend is enabled
+if(ENABLE_LLAMACPP OR ENABLE_TENSORRT)
+    list(APPEND SHEPHERD_TEST_SOURCES
+        ${CMAKE_SOURCE_DIR}/backends/gpu.cpp
+        ${CMAKE_SOURCE_DIR}/backends/chat_template.cpp
+    )
+endif()
+
 # Add llama.cpp sources if enabled
 if(ENABLE_LLAMACPP)
     list(APPEND SHEPHERD_TEST_SOURCES
         ${CMAKE_SOURCE_DIR}/backends/llamacpp.cpp
-        ${CMAKE_SOURCE_DIR}/backends/chat_template.cpp
-        ${CMAKE_SOURCE_DIR}/backends/channel_parser.cpp
     )
 endif()
 
@@ -129,7 +135,7 @@ add_executable(test_unit
     unit/test_auth.cpp
     unit/test_models.cpp
     unit/test_chat_template.cpp
-    unit/test_channel_parser.cpp
+    unit/test_harmony.cpp
 )
 
 target_include_directories(test_unit PRIVATE

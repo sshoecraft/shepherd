@@ -71,13 +71,29 @@ int g_debug_level = 0;
 // Null stream for discarding debug output when level not met
 static std::ofstream null_stream("/dev/null");
 
-// Debug output stream
+// Get timestamp string for debug output
+static std::string get_timestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "[%02d:%02d:%02d.%03d] ",
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms.count()));
+    return std::string(buf);
+}
+
+// Debug output stream with timestamp
 std::ostream& dout(int level) {
-    return (g_debug_level >= level) ? std::cerr : null_stream;
+    if (g_debug_level >= level) {
+        std::cerr << get_timestamp();
+        return std::cerr;
+    }
+    return null_stream;
 }
 #endif
 
-bool g_show_thinking = false;
+// g_show_thinking removed - use config->thinking instead
 
 // Global config instance
 std::unique_ptr<Config> config;
@@ -786,7 +802,7 @@ int main(int argc, char** argv) {
 	if (override.thinking) {
 		config->thinking = true;
 	}
-	g_show_thinking = config->thinking;
+
 	if (override.stats) {
 		config->stats = true;
 	}

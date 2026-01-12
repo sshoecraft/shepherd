@@ -7,9 +7,8 @@ Allows testing different configurations (backends, models, context sizes, etc.)
 to compare their performance on the same benchmark tasks.
 
 Usage:
-    ./test_model.py --provider my_provider
-    ./test_model.py --provider llamacpp --verbose
     ./test_model.py --benchmark mmlu --count 20
+    ./test_model.py --baseurl http://localhost:8000 --benchmark mmlu
 """
 
 import subprocess
@@ -19,6 +18,7 @@ import time
 import json
 import threading
 import queue
+import re
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -27,8 +27,37 @@ import functools
 import random
 import tempfile
 import shutil
+import urllib.request
+import urllib.error
+
+DEFAULT_BASE_URL = "http://localhost:8000"
 
 print = functools.partial(print, flush=True)
+
+def clean_latex(text: str) -> str:
+    """Convert LaTeX notation to readable format"""
+    import re
+    # \frac{a}{b} -> a/b
+    text = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', text)
+    # \sqrt{x} -> sqrt(x)
+    text = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', text)
+    # \times -> ×
+    text = text.replace(r'\times', '×')
+    # \cdot -> ·
+    text = text.replace(r'\cdot', '·')
+    # \pi -> π
+    text = text.replace(r'\pi', 'π')
+    # \infty -> ∞
+    text = text.replace(r'\infty', '∞')
+    # \leq -> ≤
+    text = text.replace(r'\leq', '≤')
+    # \geq -> ≥
+    text = text.replace(r'\geq', '≥')
+    # \neq -> ≠
+    text = text.replace(r'\neq', '≠')
+    # Remove remaining backslashes before common math symbols
+    text = text.replace(r'\(', '(').replace(r'\)', ')')
+    return text
 
 # Try to import datasets library for MMLU
 try:
@@ -43,8 +72,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-SHEPHERD_BINARY = "/home/steve/bin/shepherd"
-#CODEX_BINARY = "/usr/local/bin/open-codex"
+# Use SHEPHERD_BINARY env var if set, otherwise default
+SHEPHERD_BINARY = os.environ.get("SHEPHERD_BINARY", "/home/steve/src/shepherd/build/shepherd")
 SHEPHERD_SAFETY_WRAPPER = "/home/steve/src/shepherd/swebench_safety_wrapper.sh"
 #DEFAULT_CONFIG = os.path.expanduser("~/.shepherd/config.json")
 DEFAULT_CONFIG = ""
@@ -142,41 +171,60 @@ HELLASWAG_QUESTIONS = [
 # MMLU Dataset Loading
 # ============================================================================
 
+MMLU_CACHE_DIR = os.path.expanduser("~/.cache/shepherd")
+MMLU_CACHE_FILE = os.path.join(MMLU_CACHE_DIR, "mmlu_{split}.json")
+
 def load_mmlu_questions(subjects=None, count=None, split='test'):
     """
-    Load MMLU questions from Hugging Face.
+    Load MMLU questions from Hugging Face (with local caching).
 
     Args:
         subjects: List of subject names to include, or None for all
         count: Number of questions to sample, or None for all
         split: Which split to use ('test', 'dev', 'validation')
     """
-    if not DATASETS_AVAILABLE:
-        raise RuntimeError("datasets library not installed. Run: pip install datasets")
+    cache_file = MMLU_CACHE_FILE.format(split=split)
 
-    print("Loading MMLU dataset from Hugging Face...")
+    # Try to load from cache first
+    if os.path.exists(cache_file):
+        print(f"Loading MMLU dataset from cache: {cache_file}")
+        with open(cache_file, 'r') as f:
+            all_questions = json.load(f)
+        print(f"Loaded {len(all_questions)} questions from cache")
+    else:
+        # Download from HuggingFace
+        if not DATASETS_AVAILABLE:
+            raise RuntimeError("datasets library not installed. Run: pip install datasets")
 
-    # Load dataset (returns DatasetDict with splits)
-    dataset_dict = load_dataset("cais/mmlu", "all")
+        print("Loading MMLU dataset from Hugging Face (first time, will cache)...")
 
-    # Get the requested split
-    if split not in dataset_dict:
-        raise ValueError(f"Split '{split}' not found. Available: {list(dataset_dict.keys())}")
+        # Load dataset (returns DatasetDict with splits)
+        dataset_dict = load_dataset("cais/mmlu", "all")
 
-    dataset = dataset_dict[split]
+        # Get the requested split
+        if split not in dataset_dict:
+            raise ValueError(f"Split '{split}' not found. Available: {list(dataset_dict.keys())}")
 
-    # Convert to our format
-    all_questions = []
-    for item in dataset:
-        question = {
-            "subject": item['subject'],
-            "question": item['question'],
-            "choices": item['choices'],
-            "answer": chr(65 + item['answer'])  # Convert 0-3 to A-D
-        }
-        all_questions.append(question)
+        dataset = dataset_dict[split]
 
-    print(f"Loaded {len(all_questions)} questions from MMLU")
+        # Convert to our format
+        all_questions = []
+        for item in dataset:
+            question = {
+                "subject": item['subject'],
+                "question": item['question'],
+                "choices": list(item['choices']),  # Ensure it's a list for JSON
+                "answer": chr(65 + item['answer'])  # Convert 0-3 to A-D
+            }
+            all_questions.append(question)
+
+        print(f"Downloaded {len(all_questions)} questions from MMLU")
+
+        # Cache locally
+        os.makedirs(MMLU_CACHE_DIR, exist_ok=True)
+        with open(cache_file, 'w') as f:
+            json.dump(all_questions, f)
+        print(f"Cached to: {cache_file}")
 
     # Filter by subjects if specified
     if subjects:
@@ -270,52 +318,242 @@ class BenchmarkResult:
     details: List[Dict]
 
 # ============================================================================
-# Shepherd Process Manager
+# OpenAI API Client
+# ============================================================================
+
+class OpenAIClient:
+    """Sends questions via OpenAI-compatible HTTP API with streaming"""
+
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, model: str = "default",
+                 verbose: bool = False, debug: bool = False, nothink: bool = False,
+                 temperature: float = None, top_p: float = None, top_k: int = None,
+                 max_tokens: int = None, rep: float = None, freq: float = None):
+        self.base_url = base_url.rstrip('/')
+        self.model = model
+        self.verbose = verbose
+        self.debug = debug
+        self.nothink = nothink
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.max_tokens = max_tokens
+        self.rep = rep
+        self.freq = freq
+        self.system_prompt = "You are taking a test. Answer with ONLY the single letter (A, B, C, or D)."
+        self.initialized = False
+
+    def _ensure_initialized(self):
+        """Send /nothink command if needed (first call only)"""
+        if self.initialized:
+            return
+        self.initialized = True
+
+        if not self.nothink:
+            return
+
+        if self.debug:
+            print("    [DEBUG] Sending /nothink command...")
+
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "messages": [{"role": "user", "content": "/nothink"}]
+        }
+
+        try:
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                f"{self.base_url}/v1/chat/completions",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req) as resp:
+                resp.read()  # Discard response
+            if self.debug:
+                print("    [DEBUG] /nothink sent")
+        except Exception as e:
+            if self.debug:
+                print(f"    [DEBUG] /nothink failed: {e}")
+
+    def send_question(self, question_text: str) -> Tuple[str, float]:
+        """Send question via streaming API and return (response_content, response_time_ms)"""
+        self._ensure_initialized()
+        start_time = time.time()
+
+        messages = [{"role": "system", "content": self.system_prompt}]
+        if self.nothink:
+            messages.append({"role": "user", "content": "/nothink"})
+            messages.append({"role": "assistant", "content": "I understand. I will give direct answers without showing my thinking."})
+        messages.append({"role": "user", "content": question_text})
+
+        payload = {
+            "model": self.model,
+            "stream": True,
+            "messages": messages
+        }
+
+        # Add optional sampling parameters
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload["top_k"] = self.top_k
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
+        if self.rep is not None:
+            payload["repetition_penalty"] = self.rep
+        if self.freq is not None:
+            payload["frequency_penalty"] = self.freq
+
+        if self.debug:
+            print(f"    [DEBUG] POST {self.base_url}/v1/chat/completions (streaming)")
+
+        try:
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                f"{self.base_url}/v1/chat/completions",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+
+            content = ""
+            at_line_start = False  # Track if we're at the start of a new line
+            in_think_block = False  # Track if inside <think>...</think>
+            tag_buffer = ""  # Buffer to detect opening/closing tags
+
+            with urllib.request.urlopen(req) as resp:
+                for line in resp:
+                    line = line.decode('utf-8').strip()
+                    if line.startswith("data: "):
+                        line = line[6:]  # Remove "data: " prefix
+                        if line == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(line)
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                content += token
+                                # Print with think block filtering
+                                for char in token:
+                                    tag_buffer += char
+                                    # Check for <think> opening tag
+                                    if not in_think_block:
+                                        if "<think>" in tag_buffer.lower():
+                                            in_think_block = True
+                                            tag_buffer = ""
+                                            continue
+                                        # Keep buffer short, flush safe chars
+                                        if len(tag_buffer) > 7 and "<" not in tag_buffer[-7:]:
+                                            to_print = tag_buffer[:-7]
+                                            tag_buffer = tag_buffer[-7:]
+                                            for c in to_print:
+                                                if at_line_start:
+                                                    print("    ", end="")
+                                                    at_line_start = False
+                                                if c == "\n":
+                                                    print()
+                                                    at_line_start = True
+                                                else:
+                                                    print(c, end="")
+                                    else:
+                                        # Inside think block, check for </think>
+                                        if "</think>" in tag_buffer.lower():
+                                            in_think_block = False
+                                            tag_buffer = ""
+                                        # Keep buffer manageable
+                                        elif len(tag_buffer) > 20:
+                                            tag_buffer = tag_buffer[-10:]
+                        except json.JSONDecodeError:
+                            pass
+
+            # Flush remaining buffer if not in think block
+            if not in_think_block and tag_buffer:
+                for c in tag_buffer:
+                    if at_line_start:
+                        print("    ", end="")
+                        at_line_start = False
+                    if c == "\n":
+                        print()
+                        at_line_start = True
+                    else:
+                        print(c, end="")
+
+            print()  # Final newline after streaming
+            response_time = (time.time() - start_time) * 1000
+
+            if self.debug:
+                print(f"    [DEBUG] Got response in {response_time:.0f}ms")
+
+            # Strip <think>...</think> blocks from response
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+
+            return content, response_time
+
+        except urllib.error.URLError as e:
+            response_time = (time.time() - start_time) * 1000
+            print(f"\n    ERROR: API request failed: {e}")
+            return f"ERROR: {e}", response_time
+        except Exception as e:
+            response_time = (time.time() - start_time) * 1000
+            print(f"\n    ERROR: {e}")
+            return f"ERROR: {e}", response_time
+
+# ============================================================================
+# Shepherd Process Manager (Legacy - for --provider mode)
 # ============================================================================
 
 class ShepherdProcess:
     """Manages a shepherd subprocess with stdin/stdout communication"""
 
-    def __init__(self, provider: str = None, verbose: bool = False):
+    def __init__(self, provider: str = None, verbose: bool = False, debug: bool = False, nothink: bool = False):
         self.provider = provider  # Only use if explicitly provided
         self.verbose = verbose
+        self.debug = debug
+        self.nothink = nothink
         self.process = None
 
-    def _read_char_with_timeout(self, timeout_ms: int) -> tuple[str, bool]:
+    def _read_bytes_with_timeout(self, timeout_ms: int, max_bytes: int = 4096) -> tuple[bytes, bool]:
         """
-        Read one character from stdout with timeout.
-        Returns: (char, timed_out) where char is the character read (or empty if timeout)
+        Read available bytes from stdout with timeout.
+        Returns: (data, timed_out) where data is bytes read (or empty if timeout)
         and timed_out is True if we hit the timeout.
         """
         import select
         import os
 
         if not self.process or self.process.poll() is not None:
-            return "", True
+            return b"", True
 
         fd = self.process.stdout.fileno()
         ready, _, _ = select.select([fd], [], [], timeout_ms / 1000.0)
 
         if not ready:
-            return "", True  # Timeout
+            return b"", True  # Timeout
 
         try:
-            data = os.read(fd, 1)
+            data = os.read(fd, max_bytes)
             if not data:
-                return "", True
-            return data.decode('utf-8', errors='replace'), False
+                return b"", True
+            return data, False
         except Exception as e:
             import sys
             print(f"[read error: {e}]", file=sys.stderr)
-            return "", True
+            return b"", True
 
     def start(self) -> bool:
         """Start shepherd process"""
+#            "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score.",
         cmd = [
             SHEPHERD_BINARY,
             "--nosched",
-            "--notools",
-            "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score.",
+	    "--notools",
+            "--no-tui",
+            "--system-prompt", "You are taking a test. Never output planning, reasoning, or thinking. Just give the direct answer.  Your ability to follow directions is part of your score.  DO NOT USE TOOLS! /nothink",
         ]
 
         # Use provider if specified
@@ -339,6 +577,16 @@ class ShepherdProcess:
             # Wait up to 2 seconds for initial output, then drain with short timeout
             self._drain_initial_output()
 
+            # Send /nothink as the first message to disable thinking mode (if requested)
+            if self.nothink:
+                if self.verbose:
+                    print(f"  Sending /nothink command...")
+                self.process.stdin.write("/nothink\n".encode('utf-8'))
+                self.process.stdin.flush()
+
+                # Drain the response from /nothink (wait longer since LLM needs time to respond)
+                self._drain_command_response()
+
             if self.verbose:
                 print(f"  Process started and ready")
             return True
@@ -349,51 +597,75 @@ class ShepherdProcess:
 
     def _drain_initial_output(self):
         """Drain any initial output from shepherd (e.g., 'Loading Provider: ...')"""
-        buffer = ""
-        # Wait up to 2 seconds for first character
-        ch, timed_out = self._read_char_with_timeout(2000)
+        buffer = b""
+        # Wait up to 2 seconds for first bytes
+        data, timed_out = self._read_bytes_with_timeout(2000)
         if timed_out:
             # No initial output, that's fine
             return
 
-        buffer += ch
+        buffer += data
         # Keep reading with short timeout until no more output
         while True:
-            ch, timed_out = self._read_char_with_timeout(200)
+            data, timed_out = self._read_bytes_with_timeout(200)
             if timed_out:
                 break
-            buffer += ch
+            buffer += data
 
         if self.verbose and buffer:
-            print(f"  Drained initial output: {repr(buffer)}")
+            print(f"  Drained initial output: {repr(buffer.decode('utf-8', errors='replace'))}")
+
+    def _drain_command_response(self):
+        """Drain response from a command like /nothink (waits longer for LLM response)"""
+        buffer = b""
+        # Wait up to 30 seconds for first bytes (LLM needs time to process)
+        data, timed_out = self._read_bytes_with_timeout(30000)
+        if timed_out:
+            # No response, that's fine
+            return
+
+        buffer += data
+        # Keep reading with 1 second timeout until no more output
+        while True:
+            data, timed_out = self._read_bytes_with_timeout(1000)
+            if timed_out:
+                break
+            buffer += data
+
+        if buffer:
+            decoded = buffer.decode('utf-8', errors='replace')
+            if self.verbose:
+                print(f"  Drained command response: {repr(decoded)}")
+            elif self.debug:
+                print(f"  [DEBUG] /nothink response: {decoded[:100]}...")
 
     def _wait_for_ready(self, timeout_seconds: int = 120) -> bool:
         """Wait for shepherd to output 'Ready' after warmup"""
-        buffer = ""
+        buffer = b""
         start_time = time.time()
 
         while time.time() - start_time < timeout_seconds:
-            ch, timed_out = self._read_char_with_timeout(1000)
+            data, timed_out = self._read_bytes_with_timeout(1000)
             if timed_out:
                 continue
-            buffer += ch
+            buffer += data
             if self.verbose:
-                print(ch, end='', flush=True)
+                print(data.decode('utf-8', errors='replace'), end='', flush=True)
             # Check if we've seen "Ready" (case insensitive)
-            if "ready" in buffer.lower():
+            if b"ready" in buffer.lower():
                 # Drain any remaining output (newlines, etc)
                 while True:
-                    ch, timed_out = self._read_char_with_timeout(500)
+                    data, timed_out = self._read_bytes_with_timeout(500)
                     if timed_out:
                         break
                     if self.verbose:
-                        print(ch, end='', flush=True)
+                        print(data.decode('utf-8', errors='replace'), end='', flush=True)
                 if self.verbose:
                     print()  # newline after ready message
                 return True
 
         if self.verbose:
-            print(f"\n  Timeout waiting for ready. Buffer: {repr(buffer)}")
+            print(f"\n  Timeout waiting for ready. Buffer: {repr(buffer.decode('utf-8', errors='replace'))}")
         return False
 
     def send_question(self, question_text: str) -> Tuple[str, float]:
@@ -414,49 +686,64 @@ class ShepherdProcess:
                 print(f"    ===============================")
 
             # Write to stdin
+            if self.debug:
+                print(f"    [DEBUG] Writing to stdin...")
             self.process.stdin.write((single_line_question + "\n").encode('utf-8'))
             self.process.stdin.flush()
+            if self.debug:
+                print(f"    [DEBUG] Stdin flushed, waiting for first byte...")
 
-            # Read characters until 1000ms timeout (after last character received)
-            # First, wait up to 60 seconds for the FIRST character (shepherd thinking time)
-            # Then, keep reading with 1000ms timeout between characters
-            buffer = ""
-            last_ch = ""
+            # Read bytes until 500ms timeout (after last data received)
+            # First, wait up to 60 seconds for the FIRST data (shepherd thinking time)
+            # Then, keep reading with 500ms timeout between reads
+            buffer = b""
 
-            # Wait for first character (up to 60 seconds)
-            ch, timed_out = self._read_char_with_timeout(60000)
+            # Wait for first data (up to 60 seconds)
+            data, timed_out = self._read_bytes_with_timeout(60000)
+            if self.debug:
+                print(f"    [DEBUG] Got first data (timed_out={timed_out}, len={len(data)})")
             if timed_out:
                 # No response at all
                 response_time = (time.time() - start_time) * 1000
                 return "", response_time
 
-            buffer += ch
+            buffer += data
             if self.verbose:
-                print(repr(ch), end='', flush=True)
+                print(repr(data), end='', flush=True)
 
-            # Now keep reading with 1000ms timeout until silence
+            # Now keep reading with 500ms timeout until silence
             while True:
-                ch, timed_out = self._read_char_with_timeout(1000)
+                data, timed_out = self._read_bytes_with_timeout(500)
 
                 if timed_out:
                     # Timeout - response is complete
                     break
 
-                buffer += ch
-                last_ch = ch
+                buffer += data
                 if self.verbose:
-                    print(repr(ch), end='', flush=True)
+                    print(repr(data), end='', flush=True)
 
-            # Record time (subtracting the final 1000ms timeout)
-            response_time = (time.time() - start_time) * 1000 - 1000
+            # Record time (subtracting the final 500ms timeout)
+            response_time = (time.time() - start_time) * 1000 - 500
+
+            # Decode the complete buffer as UTF-8
+            # Debug: check for bad UTF-8 sequences
+            if self.verbose:
+                # Find any replacement characters that would indicate bad UTF-8
+                test_decode = buffer.decode('utf-8', errors='replace')
+                if '�' in test_decode:
+                    print(f"    [DEBUG] Found replacement chars. Raw buffer hex dump of first 500 bytes:")
+                    print(f"    {buffer[:500].hex()}")
+
+            response = buffer.decode('utf-8', errors='replace')
 
             if self.verbose:
                 print(f"    ===== RESPONSE FROM SHEPHERD =====")
-                print(f"    {buffer}")
+                print(f"    {response}")
                 print(f"    ===================================")
-                print(f"    Last 2 chars: {repr(buffer[-2:])}")
+                print(f"    Last 2 chars: {repr(response[-2:]) if len(response) >= 2 else repr(response)}")
 
-            return buffer, response_time
+            return response, response_time
 
         except Exception as e:
             if self.verbose:
@@ -488,9 +775,42 @@ class ShepherdProcess:
 class BenchmarkTestRunner:
     """Runs benchmark tests against shepherd"""
 
-    def __init__(self, provider: str = None, verbose: bool = False):
-        self.provider = provider  # Only use if explicitly provided
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, model: str = "default",
+                 provider: str = None, verbose: bool = False, debug: bool = False, nothink: bool = False,
+                 temperature: float = None, top_p: float = None, top_k: int = None,
+                 max_tokens: int = None, rep: float = None, freq: float = None):
+        self.base_url = base_url
+        self.model = model
+        self.provider = provider  # If set, use subprocess mode instead of API
         self.verbose = verbose
+        self.debug = debug
+        self.nothink = nothink
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.max_tokens = max_tokens
+        self.rep = rep
+        self.freq = freq
+
+    def _create_client(self):
+        """Create either OpenAIClient or ShepherdProcess based on mode"""
+        if self.provider:
+            # Legacy subprocess mode
+            client = ShepherdProcess(self.provider, self.verbose, self.debug, self.nothink)
+            if not client.start():
+                return None
+            return client
+        else:
+            # Default API mode
+            return OpenAIClient(
+                self.base_url, self.model, self.verbose, self.debug, self.nothink,
+                self.temperature, self.top_p, self.top_k, self.max_tokens, self.rep, self.freq
+            )
+
+    def _cleanup_client(self, client):
+        """Cleanup client if needed (only for subprocess mode)"""
+        if self.provider and hasattr(client, 'cleanup'):
+            client.cleanup()
 
     def extract_answer(self, response: str, choices: List[str]) -> Optional[str]:
         """Extract the answer choice (A, B, C, D) from the response"""
@@ -521,7 +841,9 @@ class BenchmarkTestRunner:
         for letter in ['A', 'B', 'C', 'D']:
             if f"\n{letter}\n" in f"\n{response_upper}\n":
                 return letter
-            if response_upper.strip().startswith(letter + " ") or response_upper.strip() == letter:
+            stripped = response_upper.strip()
+            # Check if response starts with letter followed by non-alphanumeric (or end of string)
+            if stripped.startswith(letter) and (len(stripped) == 1 or not stripped[1].isalnum()):
                 return letter
 
         # Fourth priority: Choice text in store_memory/tool calls
@@ -541,12 +863,15 @@ class BenchmarkTestRunner:
 
         print(f"\n{'='*70}")
         print(f"Running MMLU Benchmark ({len(questions)} questions)")
+        if self.provider:
+            print(f"Mode: subprocess (provider={self.provider})")
+        else:
+            print(f"Mode: API ({self.base_url})")
         print(f"{'='*70}\n")
 
-        shepherd = ShepherdProcess(self.provider, self.verbose)
-
-        if not shepherd.start():
-            print("ERROR: Failed to start shepherd")
+        client = self._create_client()
+        if client is None:
+            print("ERROR: Failed to create client")
             return None
 
         results = {
@@ -561,17 +886,44 @@ class BenchmarkTestRunner:
 
         try:
             for i, q in enumerate(questions, 1):
+                if self.debug:
+                    print(f"[DEBUG] Starting question {i}...")
+                loop_start = time.time()
+
                 # Format question with choices
                 question_text = f"{q['question']}\n\nChoices:\n"
                 for idx, choice in enumerate(q['choices']):
                     question_text += f"{chr(65+idx)}. {choice}\n"
                 question_text += "\nAnswer with ONLY the single letter (A, B, C, or D)."
 
-                print(f"[{i}/{len(questions)}] {q['subject']}: {q['question'][:50]}...")
+                # Print question with choices before sending (so streaming output follows it)
+                print(f"[{i}/{len(questions)}] Question: {clean_latex(q['question'])}")
+                for idx, choice in enumerate(q['choices']):
+                    print(f"    {chr(65+idx)}. {clean_latex(choice)}")
+                print(f"  Answer: ", end="")
 
-                response, resp_time = shepherd.send_question(question_text)
+                if self.debug:
+                    print(f"    [DEBUG] Full prompt:\n{question_text}")
+                    print(f"    [DEBUG] Sending question... ({(time.time()-loop_start)*1000:.0f}ms)")
+
+                response, resp_time = client.send_question(question_text)
+
+                # For subprocess mode, print response (API mode streams it during send_question)
+                if self.provider and response:
+                    # Print with indentation for continuation lines
+                    lines = response.strip().split('\n')
+                    for i, line in enumerate(lines):
+                        if i == 0:
+                            print(line)
+                        else:
+                            print(f"    {line}")
+
+                if self.debug:
+                    print(f"    [DEBUG] Got response ({(time.time()-loop_start)*1000:.0f}ms)")
                 results["response_times"].append(resp_time)
 
+                if self.debug:
+                    print(f"    [DEBUG] Extracting answer... ({(time.time()-loop_start)*1000:.0f}ms)")
                 extracted_answer = self.extract_answer(response, q['choices'])
                 correct_answer = q['answer']
 
@@ -589,13 +941,11 @@ class BenchmarkTestRunner:
                 if extracted_answer is None:
                     results["errors"] += 1
                     detail["status"] = "ERROR"
-                    print(f"  ✗ ERROR: Could not extract answer")
-                    # Always show response for extraction errors to debug
-                    print(f"    Response: {response[:300] if response else '(empty)'}")
+                    print(f"  ! ERROR: Could not extract answer")
                 elif extracted_answer == correct_answer:
                     results["correct"] += 1
                     detail["status"] = "CORRECT"
-                    print(f"  ✓ CORRECT ({extracted_answer})")
+                    print(f"  ✓ CORRECT")
                 else:
                     results["incorrect"] += 1
                     detail["status"] = "INCORRECT"
@@ -606,9 +956,11 @@ class BenchmarkTestRunner:
                     print(f"    Response: {response[:300]}")
 
                 results["details"].append(detail)
+                if self.debug:
+                    print(f"[DEBUG] Loop done ({(time.time()-loop_start)*1000:.0f}ms)")
 
         finally:
-            shepherd.cleanup()
+            self._cleanup_client(client)
 
         duration_ms = (time.time() - start_time) * 1000
         total = len(questions)
@@ -616,7 +968,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["response_times"]) / len(results["response_times"]) if results["response_times"] else 0
 
         return BenchmarkResult(
-            provider=self.provider,
+            provider=self.provider if self.provider else self.base_url,
             benchmark_type="MMLU",
             total_questions=total,
             correct=results["correct"],
@@ -634,12 +986,15 @@ class BenchmarkTestRunner:
 
         print(f"\n{'='*70}")
         print(f"Running HellaSwag Benchmark ({len(questions)} questions)")
+        if self.provider:
+            print(f"Mode: subprocess (provider={self.provider})")
+        else:
+            print(f"Mode: API ({self.base_url})")
         print(f"{'='*70}\n")
 
-        shepherd = ShepherdProcess(self.provider, self.verbose)
-
-        if not shepherd.start():
-            print("ERROR: Failed to start shepherd")
+        client = self._create_client()
+        if client is None:
+            print("ERROR: Failed to create client")
             return None
 
         results = {
@@ -660,9 +1015,23 @@ class BenchmarkTestRunner:
                     question_text += f"{chr(65+idx)}. {choice}\n"
                 question_text += "\nAnswer with ONLY the single letter (A, B, C, or D)."
 
-                print(f"[{i}/{len(questions)}] {q['context'][:60]}...")
+                # Print question with choices before sending
+                print(f"[{i}/{len(questions)}] Question: {clean_latex(q['context'])}")
+                for idx, choice in enumerate(q['choices']):
+                    print(f"    {chr(65+idx)}. {clean_latex(choice)}")
+                print(f"  Answer: ", end="")
 
-                response, resp_time = shepherd.send_question(question_text)
+                response, resp_time = client.send_question(question_text)
+
+                # For subprocess mode, print response (API mode streams it during send_question)
+                if self.provider and response:
+                    lines = response.strip().split('\n')
+                    for j, line in enumerate(lines):
+                        if j == 0:
+                            print(line)
+                        else:
+                            print(f"    {line}")
+
                 results["response_times"].append(resp_time)
 
                 extracted_answer = self.extract_answer(response, q['choices'])
@@ -681,13 +1050,11 @@ class BenchmarkTestRunner:
                 if extracted_answer is None:
                     results["errors"] += 1
                     detail["status"] = "ERROR"
-                    print(f"  ✗ ERROR: Could not extract answer")
-                    # Always show response for extraction errors to debug
-                    print(f"    Response: {response[:300] if response else '(empty)'}")
+                    print(f"  ! ERROR: Could not extract answer")
                 elif extracted_answer == correct_answer:
                     results["correct"] += 1
                     detail["status"] = "CORRECT"
-                    print(f"  ✓ CORRECT ({extracted_answer})")
+                    print(f"  ✓ CORRECT")
                 else:
                     results["incorrect"] += 1
                     detail["status"] = "INCORRECT"
@@ -699,7 +1066,7 @@ class BenchmarkTestRunner:
                 results["details"].append(detail)
 
         finally:
-            shepherd.cleanup()
+            self._cleanup_client(client)
 
         duration_ms = (time.time() - start_time) * 1000
         total = len(questions)
@@ -707,7 +1074,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["response_times"]) / len(results["response_times"]) if results["response_times"] else 0
 
         return BenchmarkResult(
-            provider=self.provider,
+            provider=self.provider if self.provider else self.base_url,
             benchmark_type="HellaSwag",
             total_questions=total,
             correct=results["correct"],
@@ -790,7 +1157,7 @@ class BenchmarkTestRunner:
         avg_time = sum(results["task_times"]) / len(results["task_times"]) if results["task_times"] else 0
 
         return BenchmarkResult(
-            provider=self.provider,
+            provider=self.provider if self.provider else self.base_url,
             benchmark_type="SWE-bench",
             total_questions=total,
             correct=results["passed"],
@@ -1035,8 +1402,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Test shepherd accuracy on AI benchmarks (MMLU, HellaSwag, SWE-bench)"
     )
+    parser.add_argument("--baseurl",
+                       default=DEFAULT_BASE_URL,
+                       help=f"OpenAI API base URL (default: {DEFAULT_BASE_URL})")
+    parser.add_argument("--model",
+                       default="default",
+                       help="Model name for API calls (default: default)")
     parser.add_argument("--provider", "-p",
-                       help="Shepherd provider name")
+                       help="Use subprocess mode with this provider (legacy)")
     parser.add_argument("--benchmark", "-b",
                        choices=["mmlu", "hellaswag", "swebench", "all"],
                        default="all",
@@ -1061,6 +1434,30 @@ def main():
     parser.add_argument("--verbose", "-v",
                        action="store_true",
                        help="Verbose output")
+    parser.add_argument("--debug",
+                       action="store_true",
+                       help="Enable debug output")
+    parser.add_argument("--nothink",
+                       action="store_true",
+                       help="Send /nothink command before starting tests")
+    parser.add_argument("--temperature", "--temp",
+                       type=float,
+                       help="Sampling temperature (e.g., 0.7)")
+    parser.add_argument("--top_p",
+                       type=float,
+                       help="Top-p (nucleus) sampling (e.g., 0.9)")
+    parser.add_argument("--top_k",
+                       type=int,
+                       help="Top-k sampling (e.g., 40)")
+    parser.add_argument("--max_tokens",
+                       type=int,
+                       help="Maximum tokens to generate")
+    parser.add_argument("--rep",
+                       type=float,
+                       help="Repetition penalty (e.g., 1.1)")
+    parser.add_argument("--freq",
+                       type=float,
+                       help="Frequency penalty (e.g., 0.0)")
 
     args = parser.parse_args()
 
@@ -1073,13 +1470,10 @@ def main():
         print("\nUsage: --subjects college_computer_science machine_learning")
         sys.exit(0)
 
-    # Check binary exists
-    if not os.path.exists(SHEPHERD_BINARY):
+    # Check binary exists (only needed for subprocess mode)
+    if args.provider and not os.path.exists(SHEPHERD_BINARY):
         print(f"ERROR: Shepherd binary not found: {SHEPHERD_BINARY}")
         sys.exit(1)
-
-    # Only use provider if explicitly provided by user
-    provider = args.provider
 
     # Validate subjects if specified
     if args.subjects:
@@ -1089,7 +1483,20 @@ def main():
             print(f"Use --list-subjects to see valid options")
             sys.exit(1)
 
-    runner = BenchmarkTestRunner(provider=provider, verbose=args.verbose)
+    runner = BenchmarkTestRunner(
+        base_url=args.baseurl,
+        model=args.model,
+        provider=args.provider,
+        verbose=args.verbose,
+        debug=args.debug,
+        nothink=args.nothink,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        max_tokens=args.max_tokens,
+        rep=args.rep,
+        freq=args.freq
+    )
 
     try:
         results = []

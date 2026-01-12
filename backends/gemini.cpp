@@ -681,8 +681,8 @@ void GeminiBackend::add_message(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Route through unified output filter (includes channel parsing)
-                                    if (!process_output(delta_text)) {
+                                    // Route through output() for filtering (backticks, buffering)
+                                    if (!output(delta_text)) {
                                         stream_complete = true;
                                         return false;
                                     }
@@ -816,12 +816,13 @@ void GeminiBackend::add_message(Session& session,
                   ", completion_tokens=" + std::to_string(accumulated_resp.completion_tokens) +
                   ", finish_reason=" + accumulated_resp.finish_reason << std::endl;
 
-        // Send tool calls via callback before STOP
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", "");
+
+        // Send tool calls AFTER STOP - frontend handles immediately
         for (const auto& tc : accumulated_resp.tool_calls) {
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
-
-        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
+        return;
     }
 
     // Max retries reached
@@ -833,7 +834,7 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
     // Always use streaming for generate_from_session - the callback mechanism
     // works the same whether the API server client requested stream or not
     reset_output_state();
-    pending_tool_calls.clear();  // Clear any previous tool calls
+    clear_tool_calls();  // Clear any previous tool calls
 
     dout(1) << "GeminiBackend::generate_from_session (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
 
@@ -884,9 +885,8 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
                                 std::string delta_text = parts[0]["text"].get<std::string>();
                                 accumulated_content += delta_text;
 
-                                // Route through unified output filter
-                                // (in server mode, process_output sends raw content)
-                                if (!process_output(delta_text)) {
+                                // Route through output() for filtering (backticks, buffering)
+                                if (!output(delta_text)) {
                                     stream_complete = true;
                                     return false;
                                 }
@@ -895,31 +895,15 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
                             // Handle function calls
                             if (!parts.empty() && parts[0].contains("functionCall")) {
                                 const auto& fc = parts[0]["functionCall"];
-                                ToolParser::ToolCall tool_call;
-                                tool_call.name = fc.value("name", "");
-                                if (fc.contains("args")) {
-                                    tool_call.raw_json = fc["args"].dump();
-                                    // Parse args into parameters map
-                                    try {
-                                        json args = json::parse(tool_call.raw_json);
-                                        for (auto it = args.begin(); it != args.end(); ++it) {
-                                            if (it.value().is_string()) {
-                                                tool_call.parameters[it.key()] = it.value().get<std::string>();
-                                            } else {
-                                                tool_call.parameters[it.key()] = it.value().dump();
-                                            }
-                                        }
-                                    } catch (...) {}
-                                }
-                                tool_call.tool_call_id = "gemini_" + std::to_string(pending_tool_calls.size());
-                                // Add to pending_tool_calls for API server to find
-                                pending_tool_calls.push_back(tool_call);
-                                dout(1) << "generate_from_session: got functionCall name=" + tool_call.name << std::endl;
+                                std::string tool_name = fc.value("name", "");
+                                std::string params_json = fc.contains("args") ? fc["args"].dump() : "{}";
+                                static int gemini_tool_counter = 0;
+                                std::string tool_id = "gemini_" + std::to_string(++gemini_tool_counter);
 
-                                // Emit TOOL_CALL event via callback
-                                if (callback) {
-                                    callback(CallbackEvent::TOOL_CALL, tool_call.raw_json, tool_call.name, tool_call.tool_call_id);
-                                }
+                                // Record for emission after STOP (don't emit here)
+                                record_tool_call(tool_name, params_json, tool_id);
+
+                                dout(1) << "generate_from_session: got functionCall name=" + tool_name << std::endl;
                             }
                         }
                     }
@@ -964,10 +948,18 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
         session.last_assistant_message_tokens = completion_tokens;
     }
 
-    // Adjust finish reason for tool calls (pending_tool_calls is checked by API server)
-    if (!pending_tool_calls.empty()) {
+    // Adjust finish reason for tool calls
+    if (!accumulated_tool_calls.empty()) {
         finish_reason = "tool_calls";
     }
 
     callback(CallbackEvent::STOP, finish_reason, "", "");
+
+    // Emit tool calls AFTER STOP - frontend handles immediately
+    for (const auto& tc : accumulated_tool_calls) {
+        std::string name = tc["function"]["name"];
+        std::string args = tc["function"]["arguments"];
+        std::string id = tc["id"];
+        callback(CallbackEvent::TOOL_CALL, args, name, id);
+    }
 }

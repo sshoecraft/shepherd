@@ -342,34 +342,37 @@ void APIServer::register_endpoints() {
                 max_tokens = request["max_tokens"];
             }
 
-            // Parse sampling parameters from request (OpenAI-compatible)
-            if (request.contains("temperature")) {
-                request_session.temperature = request["temperature"].get<float>();
-            }
-            if (request.contains("top_p")) {
-                request_session.top_p = request["top_p"].get<float>();
-            }
-            if (request.contains("top_k")) {
-                request_session.top_k = request["top_k"].get<int>();
-            }
-            if (request.contains("min_p")) {
-                request_session.min_p = request["min_p"].get<float>();
-            }
-            if (request.contains("repetition_penalty")) {
-                request_session.repetition_penalty = request["repetition_penalty"].get<float>();
-            }
-            if (request.contains("presence_penalty")) {
-                request_session.presence_penalty = request["presence_penalty"].get<float>();
-            }
-            if (request.contains("frequency_penalty")) {
-                request_session.frequency_penalty = request["frequency_penalty"].get<float>();
-            }
+            // Parse sampling parameters from request (OpenAI-compatible + llama.cpp extensions)
+            auto& sp = request_session.sampling;
+            if (request.contains("temperature")) sp.temperature = request["temperature"].get<float>();
+            if (request.contains("top_p")) sp.top_p = request["top_p"].get<float>();
+            if (request.contains("top_k")) sp.top_k = request["top_k"].get<int>();
+            if (request.contains("min_p")) sp.min_p = request["min_p"].get<float>();
+            if (request.contains("typical_p")) sp.typ_p = request["typical_p"].get<float>();
+            if (request.contains("top_n_sigma")) sp.top_n_sigma = request["top_n_sigma"].get<float>();
+            if (request.contains("repetition_penalty")) sp.repetition_penalty = request["repetition_penalty"].get<float>();
+            if (request.contains("presence_penalty")) sp.presence_penalty = request["presence_penalty"].get<float>();
+            if (request.contains("frequency_penalty")) sp.frequency_penalty = request["frequency_penalty"].get<float>();
+            if (request.contains("penalty_last_n")) sp.penalty_last_n = request["penalty_last_n"].get<int>();
+            if (request.contains("dynatemp_range")) sp.dynatemp_range = request["dynatemp_range"].get<float>();
+            if (request.contains("dynatemp_exponent")) sp.dynatemp_exponent = request["dynatemp_exponent"].get<float>();
+            if (request.contains("dry_multiplier")) sp.dry_multiplier = request["dry_multiplier"].get<float>();
+            if (request.contains("dry_base")) sp.dry_base = request["dry_base"].get<float>();
+            if (request.contains("dry_allowed_length")) sp.dry_allowed_length = request["dry_allowed_length"].get<int>();
+            if (request.contains("dry_penalty_last_n")) sp.dry_penalty_last_n = request["dry_penalty_last_n"].get<int>();
+            if (request.contains("xtc_probability")) sp.xtc_probability = request["xtc_probability"].get<float>();
+            if (request.contains("xtc_threshold")) sp.xtc_threshold = request["xtc_threshold"].get<float>();
+            if (request.contains("mirostat")) sp.mirostat = request["mirostat"].get<int>();
+            if (request.contains("mirostat_tau")) sp.mirostat_tau = request["mirostat_tau"].get<float>();
+            if (request.contains("mirostat_eta")) sp.mirostat_eta = request["mirostat_eta"].get<float>();
+            if (request.contains("seed")) sp.seed = request["seed"].get<uint32_t>();
+            if (request.contains("min_keep")) sp.min_keep = request["min_keep"].get<int>();
 
-            dout(1) << "Session sampling params: temp=" + std::to_string(request_session.temperature) +
-                     " top_p=" + std::to_string(request_session.top_p) +
-                     " rep_penalty=" + std::to_string(request_session.repetition_penalty) +
-                     " freq_penalty=" + std::to_string(request_session.frequency_penalty) +
-                     " pres_penalty=" + std::to_string(request_session.presence_penalty) << std::endl;
+            dout(1) << "Session sampling params: temp=" + std::to_string(sp.temperature) +
+                     " top_p=" + std::to_string(sp.top_p) +
+                     " rep_penalty=" + std::to_string(sp.repetition_penalty) +
+                     " freq_penalty=" + std::to_string(sp.frequency_penalty) +
+                     " pres_penalty=" + std::to_string(sp.presence_penalty) << std::endl;
 
             dout(1) << "Calling generate_from_session with " + std::to_string(request_session.messages.size()) +
                      " messages and " + std::to_string(request_session.tools.size()) + " tools (stream=" +
@@ -382,7 +385,7 @@ void APIServer::register_endpoints() {
                 std::string request_id = generate_id();
                 std::string model_name = request.value("model", "shepherd");
 
-                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Content-Type", "text/event-stream; charset=utf-8");
                 res.set_header("Cache-Control", "no-cache");
                 res.set_header("X-Accel-Buffering", "no");
 
@@ -430,6 +433,8 @@ void APIServer::register_endpoints() {
                         // Note: For channel-based models (has_channels=true), the backend's
                         // process_output() handles channel parsing before calling this callback
                         bool in_thinking = false;
+                        bool in_code_block_for_sse = false;  // Track code block state for SSE output
+                        bool in_thinking_block = false;  // Track <think> block state for channel-based models
                         std::string pending_buffer;
 
                         // Helper to send an SSE content chunk
@@ -474,12 +479,44 @@ void APIServer::register_endpoints() {
                                 return true;
                             }
 
-                            dout(2) << "API callback received: type=" << static_cast<int>(type) << " content=[" << content.substr(0, 50) << "] len=" << content.length() << std::endl;
+                            dout(3) << "API callback received: type=" << static_cast<int>(type) << " content=[" << content.substr(0, 50) << "] len=" << content.length() << std::endl;
 
-                            // For channel-based models: backend's process_output() already filtered
-                            // the content through ChannelParser, so we receive clean content here
+                            // For channel-based models: backend's HarmonyParser separates
+                            // reasoning (THINKING) from content (CONTENT). Backend only sends
+                            // THINKING events when show_thinking is enabled.
+                            // Wrap THINKING in <think></think> blocks so clients can parse them.
                             if (has_channels) {
-                                return send_content_chunk(content);
+                                // Handle THINKING events - wrap in <think></think>
+                                if (type == CallbackEvent::THINKING) {
+                                    if (!in_thinking_block) {
+                                        in_thinking_block = true;
+                                        if (!send_content_chunk("<think>\n")) return false;
+                                    }
+                                    return send_content_chunk(content);
+                                }
+
+                                // Close thinking block when switching to other event types
+                                if (in_thinking_block) {
+                                    in_thinking_block = false;
+                                    if (!send_content_chunk("</think>\n")) return false;
+                                }
+
+                                // CODEBLOCK events need to be wrapped in ``` for SSE clients
+                                if (type == CallbackEvent::CODEBLOCK) {
+                                    // Track code block state to emit opening/closing ```
+                                    if (!in_code_block_for_sse) {
+                                        in_code_block_for_sse = true;
+                                        if (!send_content_chunk("```\n")) return false;
+                                    }
+                                    return send_content_chunk(content);
+                                } else {
+                                    // Close code block if we were in one
+                                    if (in_code_block_for_sse) {
+                                        in_code_block_for_sse = false;
+                                        if (!send_content_chunk("```\n")) return false;
+                                    }
+                                    return send_content_chunk(content);
+                                }
                             }
 
                             // For non-channel models: use existing thinking block filter
@@ -546,10 +583,14 @@ void APIServer::register_endpoints() {
                         backend_ptr->generate_from_session(request_session, max_tokens);
                         request_handler = nullptr;  // Clear after request
 
-                        // Check for pending tool calls (for channel-based models like GPT-OSS)
+                        // Check for accumulated tool calls (for channel-based models like GPT-OSS)
                         // These are captured by the channel parser during streaming
-                        if (!backend_ptr->pending_tool_calls.empty()) {
-                            const auto& tc = backend_ptr->pending_tool_calls[0];
+                        if (!backend_ptr->accumulated_tool_calls.empty()) {
+                            const auto& tc = backend_ptr->accumulated_tool_calls[0];
+                            std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
+                            std::string tc_name = tc["function"].value("name", "");
+                            std::string tc_args = tc["function"].value("arguments", "{}");
+
                             json tool_chunk = {
                                 {"id", request_id},
                                 {"object", "chat.completion.chunk"},
@@ -560,11 +601,11 @@ void APIServer::register_endpoints() {
                                     {"delta", {
                                         {"tool_calls", json::array({{
                                             {"index", 0},
-                                            {"id", tc.tool_call_id.empty() ? "call_" + std::to_string(std::time(nullptr)) : tc.tool_call_id},
+                                            {"id", tc_id},
                                             {"type", "function"},
                                             {"function", {
-                                                {"name", tc.name},
-                                                {"arguments", tc.raw_json}
+                                                {"name", tc_name},
+                                                {"arguments", tc_args}
                                             }}
                                         }})}
                                     }},
@@ -575,7 +616,7 @@ void APIServer::register_endpoints() {
                             std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
                             sink.write(tool_data.c_str(), tool_data.size());
                             finish_reason = "tool_calls";
-                            dout(1) << "Streaming: sent pending_tool_call: " << tc.name << std::endl;
+                            dout(1) << "Streaming: sent tool_call: " << tc_name << std::endl;
                         }
 
                         // Send final chunk with finish_reason (vLLM compatible)
@@ -656,7 +697,7 @@ void APIServer::register_endpoints() {
             // Build Response from accumulated content
             Response resp;
             bool has_content = !accumulated_content.empty();
-            bool has_tool_calls = !backend->pending_tool_calls.empty();
+            bool has_tool_calls = !backend->accumulated_tool_calls.empty();
             if (error_message.empty() && (has_content || has_tool_calls)) {
                 resp.success = true;
                 resp.content = accumulated_content;
@@ -708,37 +749,6 @@ void APIServer::register_endpoints() {
             stripped_resp.content = response_content;
             auto tool_call_opt = extract_tool_call(stripped_resp, backend.get());
 
-            // Also check backend's pending_tool_calls (for channel-based models like GPT-OSS)
-            // These are captured by the channel parser during streaming
-            if (!tool_call_opt.has_value() && !backend->pending_tool_calls.empty()) {
-                const auto& tc = backend->pending_tool_calls[0];
-                ToolParser::ToolCall parsed_tc;
-                parsed_tc.name = tc.name;
-                parsed_tc.tool_call_id = tc.tool_call_id;
-                parsed_tc.raw_json = tc.raw_json;
-                // Parse raw_json into parameters
-                try {
-                    auto args_json = nlohmann::json::parse(tc.raw_json);
-                    for (auto it = args_json.begin(); it != args_json.end(); ++it) {
-                        if (it.value().is_string()) {
-                            parsed_tc.parameters[it.key()] = it.value().get<std::string>();
-                        } else if (it.value().is_number_integer()) {
-                            parsed_tc.parameters[it.key()] = it.value().get<int>();
-                        } else if (it.value().is_number_float()) {
-                            parsed_tc.parameters[it.key()] = it.value().get<double>();
-                        } else if (it.value().is_boolean()) {
-                            parsed_tc.parameters[it.key()] = it.value().get<bool>();
-                        } else {
-                            parsed_tc.parameters[it.key()] = it.value().dump();
-                        }
-                    }
-                } catch (...) {
-                    // If parsing fails, leave parameters empty
-                }
-                tool_call_opt = parsed_tc;
-                dout(1) << "Using pending_tool_call from channel parser: " << tc.name << std::endl;
-            }
-
             // Build OpenAI-compatible response
             json choice = {
                 {"index", 0},
@@ -754,6 +764,7 @@ void APIServer::register_endpoints() {
                 choice["message"]["reasoning_content"] = sanitize_utf8(reasoning_content);
             }
 
+            // Check for tool calls from text parsing or accumulated_tool_calls
             if (tool_call_opt.has_value()) {
                 auto tool_call = tool_call_opt.value();
                 choice["message"]["content"] = sanitize_utf8(tool_call.content);
@@ -788,6 +799,11 @@ void APIServer::register_endpoints() {
 
                 tc["function"] = function_obj;
                 choice["message"]["tool_calls"] = json::array({tc});
+            } else if (!backend->accumulated_tool_calls.empty()) {
+                // Use accumulated_tool_calls from channel parser (already in OpenAI format)
+                choice["message"]["tool_calls"] = backend->accumulated_tool_calls;
+                choice["finish_reason"] = "tool_calls";
+                dout(1) << "Using accumulated_tool_calls from channel parser" << std::endl;
             } else {
                 // No tool call - regular response
                 choice["message"]["content"] = sanitize_utf8(response_content);

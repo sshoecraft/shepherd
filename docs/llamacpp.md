@@ -244,6 +244,60 @@ This is critical for prefix caching in server mode. The condition checks `last_a
 - Next request's prefix matching doesn't detect divergence (backend_session doesn't have these tokens)
 - Next generation continues from stale KV cache state, causing alternating success/failure patterns
 
+## O(1) Message Formatting Optimization
+
+The `format_and_decode_message()` function uses an O(1) approach for formatting messages, avoiding the O(n²) overhead of rendering the entire conversation for each new message.
+
+### Message Type Handling
+
+| Message Type | Strategy | Complexity |
+|-------------|----------|------------|
+| SYSTEM | Use pre-formatted content directly | O(1) |
+| USER | `format_message(msg)` single-message render | O(1) |
+| ASSISTANT (simple) | Use raw content directly | O(1) |
+| ASSISTANT (tool_calls) | 2-element vector `[prev, current]` | O(1) |
+| TOOL_RESPONSE | 2-element vector `[prev, current]` | O(1) |
+| Harmony/Channels | 2-element vector `[prev, current]` | O(1) |
+
+### 2-Element Vector Technique
+
+For messages requiring template state (e.g., `loop.previtem` in Qwen, `ns.is_tool` in DeepSeek), we pass a 2-element vector containing just the previous message and current message:
+
+```cpp
+if (target_index > 0) {
+    std::vector<Message> two_msgs = {all_messages[target_index - 1], msg};
+    rendered_msg = chat_template->format_message_incremental(two_msgs, 1, tools, false);
+}
+```
+
+This works because:
+- Template processes prev message first (sets state variables)
+- Template processes current message with correct state
+- `format_message_incremental` extracts just the current message's output
+- All template state dependencies only need the PREVIOUS message
+
+### Templates Verified
+
+- **Qwen3-Coder**: `loop.previtem` for tool responses ✓
+- **DeepSeek-R1**: `ns.is_tool`, `ns.is_output_first` state vars ✓
+- **TinyLlama**: Simple wrapping ✓
+- **Qwen2.5**: `loop.first` for system ✓
+- **GPT-OSS (Harmony)**: Channel wrapping ✓
+
+## Special Token Rendering
+
+When extracting EOS/BOS tokens from the vocabulary for template rendering, the `special` parameter to `llama_token_to_piece()` must be `true`. This ensures special tokens like `<｜begin▁of▁sentence｜>` are rendered as text strings rather than empty or garbage output.
+
+```cpp
+// Correct - renders special tokens as text
+int len = llama_token_to_piece(vocab, bos_id, buf, sizeof(buf), 0, true);
+
+// Wrong - may return empty or garbage for special tokens
+int len = llama_token_to_piece(vocab, bos_id, buf, sizeof(buf), 0, false);
+```
+
+This is critical for models like DeepSeek-R1 that use fullwidth Unicode characters in their special tokens.
+
 ## Template Rendering Fallback
 
 The `render_message()` function wraps template rendering in a try-catch to handle templates with unsupported features:
@@ -297,8 +351,40 @@ From provider config JSON:
 | `n_batch` | int | 512 | Logical batch size for prompt processing |
 | `ubatch` / `n_ubatch` | int | 512 | Physical micro-batch size (must be ≤ n_batch) |
 
+## Harmony Parser Integration (GPT-OSS Models)
+
+For models using OpenAI's Harmony format (channel-based output), the backend integrates a Rust-based token parser via FFI.
+
+### Parser Initialization
+
+The Rust parser is created at the start of `run_inference()` and needs to be pre-seeded with the generation prompt tokens:
+
+```cpp
+// Pre-feed generation prompt tokens to parser
+// The generation prompt (e.g., "<|start|>assistant") is already in KV cache
+// but the parser needs to see these tokens to be in the correct state
+for (llama_token token : generation_prompt_tokens) {
+    rust_harmony_parser->process(static_cast<uint32_t>(token), nullptr);
+}
+```
+
+This is critical because:
+1. The generation prompt (`<|start|>assistant`) is decoded into KV cache before generation
+2. The model continues from that point, generating channel markers like `<|channel|>`
+3. The parser expects to see `<|start|>` first to transition from ExpectStart state
+4. Without pre-seeding, the parser errors on the first generated token
+
+### Stop Token Handling
+
+The parser uses different stop tokens for different purposes:
+- **Generation stopping** (C FFI): `<|return|>` and `<|call|>` only
+- **Internal message parsing**: `<|return|>`, `<|call|>`, and `<|end|>`
+
+This allows `<|end|>` to end a channel without stopping generation, enabling multi-channel responses.
+
 ## Key Files
 
 - `llamacpp.cpp` - Main backend implementation
 - `llamacpp.h` - Header with class definition
 - `llama.cpp/` - Submodule with llama.cpp library
+- `harmony_rust.cpp/h` - C++ wrapper for Rust FFI

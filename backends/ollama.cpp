@@ -657,8 +657,8 @@ void OllamaBackend::add_message(Session& session,
                             accumulated_content += delta_text;
                             accumulated_resp.content = accumulated_content;
 
-                            // Route through unified output filter (includes channel parsing)
-                            if (!process_output(delta_text)) {
+                            // Route through output() for filtering (backticks, buffering)
+                            if (!output(delta_text)) {
                                 stream_complete = true;
                                 return true;
                             }

@@ -92,3 +92,4 @@ For context overflow errors, the backend parses various error message formats to
 
 - v2.5.1: Added support for TRT-LLM/vLLM error message format (root-level "message")
 - v2.5.2: Added OAuth 2.0 authentication, Azure OpenAI support (deployment-based URLs, api-version parameter), SSL configuration, removed repetition_penalty for Azure compatibility
+- v2.11.x: Fixed non-streaming mode accumulation bug with vLLM harmony models. Empty `tool_calls:[]` arrays were being persisted and resent, confusing vLLM's harmony parser and causing models to output accumulated responses across turns. Fix: Only store tool_calls_json when the array is non-empty.

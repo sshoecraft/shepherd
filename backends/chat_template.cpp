@@ -65,17 +65,6 @@ ModelFamily ChatMLTemplate::get_family() const {
 // ==================== Qwen3ThinkingTemplate Implementation ====================
 
 std::string Qwen3ThinkingTemplate::get_generation_prompt() const {
-    // When thinking is disabled (config->thinking == false), add empty think block
-    // to tell the model "thinking is done, just respond"
-    // This matches llama-server behavior with --reasoning-format auto
-    if (config && !config->thinking) {
-        dout(2) << "Qwen3ThinkingTemplate: thinking disabled, returning empty think block" << std::endl;
-        return "<|im_start|>assistant\n<think>\n\n</think>\n\n";
-    }
-    // When thinking is enabled, let the model do its thinking
-    dout(2) << "Qwen3ThinkingTemplate: thinking enabled (config=" + std::string(config ? "valid" : "null") +
-                 ", thinking=" + std::string(config ? (config->thinking ? "true" : "false") : "n/a") + "" << std::endl;
-
     return "<|im_start|>assistant\n";
 }
 
@@ -414,12 +403,25 @@ std::string MinjaTemplate::get_generation_prompt() const {
     std::string with_prompt = (*template_ptr)->render(context_with);
 
     // The generation prompt is the additional text
+    std::string gen_prompt;
     if (with_prompt.length() > without_prompt.length() &&
         with_prompt.substr(0, without_prompt.length()) == without_prompt) {
-        return with_prompt.substr(without_prompt.length());
+        gen_prompt = with_prompt.substr(without_prompt.length());
+    } else {
+        throw std::runtime_error("MinjaTemplate::get_generation_prompt() failed to extract generation prompt from template");
     }
 
-    throw std::runtime_error("MinjaTemplate::get_generation_prompt() failed to extract generation prompt from template");
+    // Thinking suppression: inject empty think block to skip thinking phase
+    // Model sees <think>\n\n</think> and believes it already "thought", continues from there
+    if (config && !config->thinking && template_text.find("</think>") != std::string::npos) {
+        gen_prompt += "<think>\n\n</think>\n\n";
+        dout(1) << "Injected empty <think> block into generation prompt to suppress thinking" << std::endl;
+    }
+
+    // Harmony/GPT-OSS: reasoning controlled via reasoning_effort parameter, not injection
+    // See: https://huggingface.co/blog/welcome-openai-gpt-oss#system-and-developer-messages
+
+    return gen_prompt;
 }
 
 std::string MinjaTemplate::get_assistant_end_tag() const {
@@ -535,14 +537,26 @@ std::string MinjaTemplate::render_via_minja(
 
                             if (tc["function"].contains("arguments")) {
                                 std::string args_str = tc["function"]["arguments"].get<std::string>();
-                                func_obj.set("arguments", minja::Value(args_str));
 
                                 // Parse arguments string as JSON and convert to minja Value
-                                // Use ordered_json to avoid ambiguous constructor issues
+                                // IMPORTANT: Set parsed object on BOTH func_obj AND tc_obj
+                                // Some templates (like Qwen) do: {%- set tool_call = tool_call.function %}
+                                // which means tool_call.arguments accesses function.arguments
                                 try {
-                                    args_obj = minja::Value(nlohmann::ordered_json::parse(args_str));
-                                } catch (...) {
-                                    // If args_str isn't valid JSON, keep empty object
+                                    auto parsed = nlohmann::ordered_json::parse(args_str);
+                                    if (parsed.is_object()) {
+                                        args_obj = minja::Value(parsed);
+                                        // Set on BOTH locations for template compatibility
+                                        func_obj.set("arguments", args_obj);
+                                        dout(2) << "Parsed tool arguments as object: " << args_str << std::endl;
+                                    } else {
+                                        // Non-object JSON (array, primitive) - keep as string
+                                        func_obj.set("arguments", minja::Value(args_str));
+                                    }
+                                } catch (const std::exception& e) {
+                                    // Parse failed - keep as string
+                                    func_obj.set("arguments", minja::Value(args_str));
+                                    dout(2) << "Tool arguments kept as string: " << args_str << std::endl;
                                 }
                             }
                             tc_obj.set("arguments", args_obj);
@@ -571,6 +585,18 @@ std::string MinjaTemplate::render_via_minja(
     context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(add_generation_prompt));
 
+    // Pass thinking parameters to template - different models use different names
+    // Qwen3 uses "enable_thinking", DeepSeek uses "thinking"
+    bool thinking_enabled = config ? config->thinking : true;
+    context->set("enable_thinking", minja::Value(thinking_enabled));
+    context->set("thinking", minja::Value(thinking_enabled));
+
+    // GPT-OSS reasoning_effort: high when thinking enabled, low when disabled
+    // From: https://huggingface.co/blog/welcome-openai-gpt-oss#system-and-developer-messages
+    std::string reasoning_effort = thinking_enabled ? "high" : "low";
+    context->set("reasoning_effort", minja::Value(reasoning_effort));
+    dout(1) << "GPT-OSS reasoning_effort set to: " << reasoning_effort << std::endl;
+
     // Add tools if present
     if (!tools.empty()) {
         auto tools_array = minja::Value::array();
@@ -591,6 +617,20 @@ std::string MinjaTemplate::render_via_minja(
 
     // Render through template
     std::string rendered = (*template_ptr)->render(context);
+
+    // Thinking suppression: inject end marker to skip thinking phase
+    // If template references </think>, this model supports thinking mode
+    dout(1) << "Thinking check: add_gen=" << add_generation_prompt
+            << ", config=" << (config ? "yes" : "null")
+            << ", thinking=" << (config ? (config->thinking ? "true" : "false") : "n/a") << std::endl;
+    if (add_generation_prompt && config && !config->thinking) {
+        if (template_text.find("</think>") != std::string::npos) {
+            // Append </think> to signal "thinking done, respond directly"
+            rendered += "</think>";
+            dout(1) << "Injected </think> to suppress thinking mode" << std::endl;
+        }
+    }
+
     return rendered;
 }
 
@@ -664,7 +704,12 @@ std::string MinjaTemplate::format_conversation(
         render_tools = tools;
     }
 
-    return render_via_minja(adjusted_messages, render_tools, add_generation_prompt);
+    try {
+        return render_via_minja(adjusted_messages, render_tools, add_generation_prompt);
+    } catch (const std::exception& e) {
+        dout(1) << "MinjaTemplate::format_conversation exception: " << e.what() << std::endl;
+        throw std::runtime_error("Template rendering failed: " + std::string(e.what()));
+    }
 }
 
 std::string MinjaTemplate::format_message_incremental(
@@ -822,6 +867,87 @@ void MinjaTemplate::probe_capabilities() {
 
         if (!caps.has_channels) {
             dout(1) << "  has_channels: false" << std::endl;
+        }
+    }
+
+    // Test enable_thinking support by rendering with both values
+    // Also extract the base generation prompt for potential injection
+    {
+        caps.supports_enable_thinking = false;
+        caps.generation_prompt_base.clear();
+
+        if (!template_node) {
+            dout(1) << "  supports_enable_thinking: false (no template node)" << std::endl;
+        } else {
+            auto template_ptr = static_cast<std::shared_ptr<minja::TemplateNode>*>(template_node);
+
+            // Build minimal context for probing
+            auto messages = minja::Value::array();
+            auto msg_obj = minja::Value::object();
+            msg_obj.set("role", minja::Value("user"));
+            msg_obj.set("content", minja::Value("test"));
+            messages.push_back(msg_obj);
+
+            auto context_without = minja::Context::make(minja::Value::object());
+            auto context_with = minja::Context::make(minja::Value::object());
+
+            // Add strftime_now for templates that use it (like GPT-OSS)
+            auto strftime_now = minja::Value::callable([](const std::shared_ptr<minja::Context>&, minja::ArgumentsValue& args) -> minja::Value {
+                std::string format = args.args.empty() ? "%Y-%m-%d" : args.args[0].get<std::string>();
+                std::time_t now = std::time(nullptr);
+                std::tm* tm_info = std::localtime(&now);
+                char buffer[128];
+                strftime(buffer, sizeof(buffer), format.c_str(), tm_info);
+                return minja::Value(std::string(buffer));
+            });
+
+            context_without->set("messages", messages);
+            context_without->set("bos_token", minja::Value(bos_token));
+            context_without->set("eos_token", minja::Value(eos_token));
+            context_without->set("add_generation_prompt", minja::Value(true));
+            context_without->set("enable_thinking", minja::Value(false));
+            context_without->set("thinking", minja::Value(false));  // DeepSeek uses "thinking"
+            context_without->set("strftime_now", strftime_now);
+
+            context_with->set("messages", messages);
+            context_with->set("bos_token", minja::Value(bos_token));
+            context_with->set("eos_token", minja::Value(eos_token));
+            context_with->set("add_generation_prompt", minja::Value(true));
+            context_with->set("enable_thinking", minja::Value(true));
+            context_with->set("thinking", minja::Value(true));  // DeepSeek uses "thinking"
+            context_with->set("strftime_now", strftime_now);
+
+            try {
+                std::string rendered_without = (*template_ptr)->render(context_without);
+                std::string rendered_with = (*template_ptr)->render(context_with);
+
+                // Template supports enable_thinking if outputs differ
+                caps.supports_enable_thinking = (rendered_without != rendered_with);
+
+                // Extract generation prompt for potential injection
+                // Render without generation prompt to get base, then with to get full
+                auto context_no_gen = minja::Context::make(minja::Value::object());
+                context_no_gen->set("messages", messages);
+                context_no_gen->set("bos_token", minja::Value(bos_token));
+                context_no_gen->set("eos_token", minja::Value(eos_token));
+                context_no_gen->set("add_generation_prompt", minja::Value(false));
+                context_no_gen->set("enable_thinking", minja::Value(true));
+                context_no_gen->set("thinking", minja::Value(true));  // DeepSeek uses "thinking"
+                context_no_gen->set("strftime_now", strftime_now);
+
+                std::string without_gen = (*template_ptr)->render(context_no_gen);
+                if (rendered_with.length() > without_gen.length() &&
+                    rendered_with.substr(0, without_gen.length()) == without_gen) {
+                    caps.generation_prompt_base = rendered_with.substr(without_gen.length());
+                }
+
+                dout(1) << "  supports_enable_thinking: " + std::string(caps.supports_enable_thinking ? "true" : "false") << std::endl;
+                if (!caps.generation_prompt_base.empty()) {
+                    dout(1) << "  generation_prompt_base: " + caps.generation_prompt_base.substr(0, 50) + "..." << std::endl;
+                }
+            } catch (const std::exception& e) {
+                throw std::runtime_error("Chat template error during capability probing: " + std::string(e.what()));
+            }
         }
     }
 

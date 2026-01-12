@@ -11,6 +11,49 @@
 class Backend;
 struct Response;
 
+/// Sampling parameters - unified across all backends
+/// Values of -1 (or -999 for penalties) mean "use backend default"
+struct SamplingParams {
+    // Basic sampling
+    float temperature = -1.0f;      // <= 0 = greedy
+    float top_p = -1.0f;            // 1.0 = disabled
+    int top_k = -1;                 // <= 0 = disabled
+    float min_p = -1.0f;            // 0.0 = disabled (llama.cpp default: 0.05)
+    float typ_p = -1.0f;            // typical_p, 1.0 = disabled
+    float top_n_sigma = -1.0f;      // -1.0 = disabled
+
+    // Dynamic temperature
+    float dynatemp_range = -1.0f;   // 0.0 = disabled
+    float dynatemp_exponent = -1.0f;
+
+    // Repetition penalties
+    float repetition_penalty = -1.0f;   // 1.0 = disabled (llama calls this penalty_repeat)
+    float presence_penalty = -999.0f;   // 0.0 = disabled
+    float frequency_penalty = -999.0f;  // 0.0 = disabled
+    int penalty_last_n = -1;            // tokens to consider for penalties
+
+    // DRY (Don't Repeat Yourself) sampler
+    float dry_multiplier = -1.0f;   // 0.0 = disabled
+    float dry_base = -1.0f;
+    int dry_allowed_length = -1;
+    int dry_penalty_last_n = -1;
+
+    // XTC sampler
+    float xtc_probability = -1.0f;  // 0.0 = disabled
+    float xtc_threshold = -1.0f;
+
+    // Mirostat
+    int mirostat = -1;              // 0 = disabled, 1 = v1, 2 = v2
+    float mirostat_tau = -1.0f;
+    float mirostat_eta = -1.0f;
+
+    // Other
+    uint32_t seed = 0;              // 0 = random
+    int min_keep = -1;              // minimum tokens to keep after sampling
+    float length_penalty = -999.0f; // length penalty for beam search
+    int no_repeat_ngram_size = -1;  // prevent repetition of n-grams
+};
+
 class Session {
 public:
 	Backend *backend;
@@ -79,16 +122,7 @@ public:
     std::vector<Tool> tools;
 
     // Sampling parameters (per-request overrides from API)
-    // If set (non-negative), these override backend config defaults
-    float temperature = -1.0f;
-    float top_p = -1.0f;
-    int top_k = -1;
-    float min_p = -1.0f;
-    float repetition_penalty = -1.0f;
-    float presence_penalty = -999.0f;  // Use -999 since 0 is valid
-    float frequency_penalty = -999.0f;
-    float length_penalty = -999.0f;
-    int no_repeat_ngram_size = -1;
+    SamplingParams sampling;
 
     // Main message interface - handles eviction and delegates to backend
     /// @brief Add a message to the session with automatic eviction if needed

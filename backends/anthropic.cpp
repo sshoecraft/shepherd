@@ -787,9 +787,8 @@ void AnthropicBackend::add_message(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    // Route through unified output filter (includes channel parsing)
-                                    if (!process_output(delta_text)) {
-                                        // User requested cancellation or channel parser signaled stop
+                                    // Route through output() for filtering (backticks, buffering)
+                                    if (!output(delta_text)) {
                                         return false;
                                     }
                                 }
@@ -967,7 +966,6 @@ void AnthropicBackend::add_message(Session& session,
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
 
-        // Flush any remaining output from the filter
         flush_output();
 
         // Success - update session with messages
@@ -1039,12 +1037,13 @@ void AnthropicBackend::add_message(Session& session,
             }
         }
 
-        // Send tool calls via callback before STOP
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", "");
+
+        // Send tool calls AFTER STOP - frontend handles immediately
         for (const auto& tc : accumulated_resp.tool_calls) {
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
-
-        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
+        return;
     }
 
     Response err_resp;
@@ -1133,7 +1132,7 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
         std::string partial_json;
     };
     std::optional<ToolUseBlock> current_tool_block;
-    pending_tool_calls.clear();  // Clear any previous tool calls
+    clear_tool_calls();  // Clear any previous tool calls
 
     // Streaming callback to process SSE chunks
     auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
@@ -1173,8 +1172,8 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
                                 std::string delta_text = delta["text"].get<std::string>();
                                 accumulated_content += delta_text;
 
-                                // Route through unified output filter
-                                if (!process_output(delta_text)) {
+                                // Route through output() for filtering (backticks, buffering)
+                                if (!output(delta_text)) {
                                     return false;
                                 }
                             }
@@ -1192,27 +1191,14 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
                                     nlohmann::json::object() :
                                     nlohmann::json::parse(current_tool_block->partial_json);
 
-                                ToolParser::ToolCall tool_call;
-                                tool_call.name = current_tool_block->name;
-                                tool_call.tool_call_id = current_tool_block->id;
-                                tool_call.raw_json = input.dump();
+                                std::string tool_name = current_tool_block->name;
+                                std::string tool_id = current_tool_block->id;
+                                std::string params_json = input.dump();
 
-                                for (auto it = input.begin(); it != input.end(); ++it) {
-                                    if (it.value().is_string()) {
-                                        tool_call.parameters[it.key()] = it.value().get<std::string>();
-                                    } else if (it.value().is_number_integer()) {
-                                        tool_call.parameters[it.key()] = it.value().get<int>();
-                                    } else if (it.value().is_number_float()) {
-                                        tool_call.parameters[it.key()] = it.value().get<double>();
-                                    } else if (it.value().is_boolean()) {
-                                        tool_call.parameters[it.key()] = it.value().get<bool>();
-                                    } else {
-                                        tool_call.parameters[it.key()] = it.value().dump();
-                                    }
-                                }
+                                // Record for emission after STOP (don't emit here)
+                                record_tool_call(tool_name, params_json, tool_id);
 
-                                pending_tool_calls.push_back(tool_call);
-                                dout(1) << "Tool use block complete: " + current_tool_block->name << std::endl;
+                                dout(1) << "Tool use block complete: " + tool_name << std::endl;
                             } catch (const std::exception& e) {
                                 dout(1) << std::string("WARNING: ") + "Failed to parse tool use JSON: " + std::string(e.what()) << std::endl;
                             }
@@ -1265,7 +1251,6 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
         return;
     }
 
-    // Flush any remaining output from the filter
     flush_output();
 
     // Update session token counts (session is source of truth)
@@ -1275,10 +1260,18 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
         session.last_assistant_message_tokens = completion_tokens;
     }
 
-    // Adjust finish reason for tool calls (pending_tool_calls is checked by API server)
-    if (!pending_tool_calls.empty()) {
+    // Adjust finish reason for tool calls
+    if (!accumulated_tool_calls.empty()) {
         finish_reason = "tool_calls";
     }
 
     callback(CallbackEvent::STOP, finish_reason, "", "");
+
+    // Emit tool calls AFTER STOP - frontend handles immediately
+    for (const auto& tc : accumulated_tool_calls) {
+        std::string name = tc["function"]["name"];
+        std::string args = tc["function"]["arguments"];
+        std::string id = tc["id"];
+        callback(CallbackEvent::TOOL_CALL, args, name, id);
+    }
 }

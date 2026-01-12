@@ -536,3 +536,73 @@ TEST_F(ChatTemplateTest, MessageWithSpecialCharacters) {
     EXPECT_TRUE(formatted.find("<tags>") != std::string::npos);
     EXPECT_TRUE(formatted.find("\"quotes\"") != std::string::npos);
 }
+
+// ============================================================================
+// TPL-008: 2-Element Vector Incremental Rendering (O(1) optimization)
+// ============================================================================
+
+TEST_F(ChatTemplateTest, TPL008_TwoElementVectorToolResponse) {
+    // Test that 2-element vector correctly handles tool response after assistant
+    Message assistant_msg(Message::ASSISTANT, "I'll help with that.", 0);
+    Message tool_response(Message::TOOL_RESPONSE, "Result: 42", 0);
+    tool_response.tool_name = "calculator";
+    tool_response.tool_call_id = "call_123";
+
+    std::vector<Message> two_msgs = {assistant_msg, tool_response};
+
+    // Render incrementally with 2-element vector
+    std::string incremental = chatml->format_message_incremental(two_msgs, 1, {}, false);
+
+    // Should contain the tool response
+    EXPECT_TRUE(incremental.find("Result: 42") != std::string::npos)
+        << "2-element incremental render should contain tool response content";
+    EXPECT_TRUE(incremental.find("<|im_start|>tool") != std::string::npos)
+        << "2-element incremental render should have tool role";
+}
+
+TEST_F(ChatTemplateTest, TPL008_TwoElementVectorConsecutiveToolResponses) {
+    // Test that 2-element vector handles consecutive tool responses
+    Message first_tool(Message::TOOL_RESPONSE, "First result", 0);
+    first_tool.tool_name = "tool1";
+    Message second_tool(Message::TOOL_RESPONSE, "Second result", 0);
+    second_tool.tool_name = "tool2";
+
+    std::vector<Message> two_msgs = {first_tool, second_tool};
+
+    // Render incrementally with 2-element vector
+    std::string incremental = chatml->format_message_incremental(two_msgs, 1, {}, false);
+
+    // Should contain the second tool response
+    EXPECT_TRUE(incremental.find("Second result") != std::string::npos)
+        << "Should contain the current (second) tool response";
+}
+
+TEST_F(ChatTemplateTest, TPL008_SingleElementVector) {
+    // Test single-element vector for first message (no prev)
+    Message user_msg(Message::USER, "Hello there", 0);
+
+    std::vector<Message> single_msg = {user_msg};
+
+    std::string incremental = chatml->format_message_incremental(single_msg, 0, {}, false);
+
+    EXPECT_TRUE(incremental.find("Hello there") != std::string::npos)
+        << "Single-element vector should render the message";
+    EXPECT_TRUE(incremental.find("<|im_start|>user") != std::string::npos)
+        << "Should have user role tag";
+}
+
+TEST_F(ChatTemplateTest, TPL008_TwoElementVectorAssistantWithToolCalls) {
+    // Test that 2-element vector handles assistant with tool_calls
+    Message user_msg(Message::USER, "What's 2+2?", 0);
+    Message assistant_msg(Message::ASSISTANT, "", 0);
+    assistant_msg.tool_calls_json = R"([{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{}"}}])";
+
+    std::vector<Message> two_msgs = {user_msg, assistant_msg};
+
+    // This tests that the template can handle tool_calls in 2-element context
+    std::string incremental = chatml->format_message_incremental(two_msgs, 1, {}, false);
+
+    // Should have assistant role
+    EXPECT_TRUE(incremental.find("<|im_start|>assistant") != std::string::npos)
+        << "Should have assistant role for tool call message";
+}

@@ -111,13 +111,11 @@ OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallbac
         dout(1) << "Using model config's context size: " + std::to_string(this->context_size) << std::endl;
     }
 
-    // If we still don't have a context size, require user to specify it
+    // If we still don't have a context size, default to 16k with warning
     if (this->context_size == 0) {
-        throw std::runtime_error(
-            "Cannot determine context size for model '" + model_name + "'. "
-            "Please specify --context-size explicitly. "
-            "Check your model's config.json or documentation for the correct max_seq_len value."
-        );
+        this->context_size = 16384;
+        std::cerr << "Warning: Cannot determine context size for model '" << model_name
+                  << "'. Defaulting to 16k. Use --context-size to specify explicitly." << std::endl;
     }
 
     // NOTE: Context safety margin disabled - now sending proper sampling params (top_p, top_k)
@@ -256,8 +254,8 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
                 }
 
                 // Parse tool calls if present
-                if (message.contains("tool_calls") && message["tool_calls"].is_array()) {
-                    // Store raw tool_calls JSON for message persistence
+                if (message.contains("tool_calls") && message["tool_calls"].is_array() && !message["tool_calls"].empty()) {
+                    // Store raw tool_calls JSON for message persistence (only if non-empty)
                     resp.tool_calls_json = message["tool_calls"].dump();
 
                     for (const auto& tc : message["tool_calls"]) {
@@ -993,11 +991,10 @@ void OpenAIBackend::add_message(Session& session,
                                     dout(2) << "SSE delta content: [" << delta_text << "] tool_calls.size=" << accumulated_resp.tool_calls.size() << std::endl;
 
                                     // Only stream content if we haven't seen tool calls
-                                    // The unified process_output() handles channel parsing + tool call detection
                                     if (accumulated_resp.tool_calls.empty()) {
-                                        // Route through unified output filter (includes channel parsing)
-                                        if (!process_output(delta_text)) {
-                                            // User requested cancellation or channel parser signaled stop
+                                        // Route through output() for filtering (backticks, buffering)
+                                        if (!output(delta_text)) {
+                                            // User requested cancellation
                                             return false;
                                         }
                                     } else {
@@ -1118,7 +1115,6 @@ void OpenAIBackend::add_message(Session& session,
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
         }
 
-        // Flush any remaining output from the filter
         flush_output();
 
         // Success - update session with messages
@@ -1227,15 +1223,17 @@ void OpenAIBackend::add_message(Session& session,
                 session.total_tokens = total;
             }
 
-            // Send tool calls via callback
-            for (const auto& tc : accumulated_resp.tool_calls) {
-                // Use empty JSON object if no arguments provided
-                std::string args = tc.raw_json.empty() ? "{}" : tc.raw_json;
-                callback(CallbackEvent::TOOL_CALL, args, tc.name, tc.tool_call_id);
-            }
         }
 
-        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
+        callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", "");
+
+        // Send tool calls AFTER STOP - frontend handles immediately
+        for (const auto& tc : accumulated_resp.tool_calls) {
+            // Use empty JSON object if no arguments provided
+            std::string args = tc.raw_json.empty() ? "{}" : tc.raw_json;
+            callback(CallbackEvent::TOOL_CALL, args, tc.name, tc.tool_call_id);
+        }
+        return;
     }
 
     Response err_resp;

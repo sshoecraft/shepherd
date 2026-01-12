@@ -366,7 +366,14 @@ std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content)
     }
 
     dout(1) << "Successfully parsed XML function block with " + std::to_string(tool_params.size()) + " parameters" << std::endl;
-    return ToolCall(tool_name, tool_params, xml_content, "");
+
+    // Build JSON from parameters (not raw XML)
+    nlohmann::json params_json;
+    for (const auto& [key, value] : tool_params) {
+        params_json[key] = std::any_cast<std::string>(value);
+    }
+
+    return ToolCall(tool_name, tool_params, params_json.dump(), "");
 }
 
 // Parse <tools> block with JSON inside (possibly in markdown code fence)

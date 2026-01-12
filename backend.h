@@ -15,11 +15,6 @@ namespace ChatTemplates {
     struct ChatTemplateCaps;
 }
 
-// Forward declaration for channel parsing
-namespace ChannelParsing {
-    class ChannelParser;
-}
-
 // Unified response structure returned by all backends
 struct Response {
     // Response codes for different error conditions
@@ -54,8 +49,10 @@ class Session;
 enum class CallbackEvent {
     CONTENT,      // Assistant text chunk
     THINKING,     // Reasoning/thinking chunk (if show_thinking enabled)
-    TOOL_CALL,    // Model requesting a tool call
+    TOOL_CALL,    // Model requesting a tool call (triggers execution)
     TOOL_RESULT,  // Result of tool execution (summary in content)
+    TOOL_DISP,    // Display-only tool call (remote execution, no local action)
+    RESULT_DISP,  // Display-only tool result (remote execution, no local action)
     USER_PROMPT,  // Echo user's prompt
     SYSTEM,       // System info/status messages
     ERROR,        // Error occurred (message in content, type in name)
@@ -64,6 +61,9 @@ enum class CallbackEvent {
     STATS         // Performance stats (prefill/decode speed, KV cache info)
 };
 
+// Backend base class - minimal interface for all backends
+// GPU backends inherit from GpuBackend (which inherits from Backend)
+// API backends inherit from ApiBackend (which inherits from Backend)
 class Backend {
 public:
     // Callback for backend-to-frontend communication (pure callback architecture)
@@ -78,7 +78,7 @@ public:
                                              const std::string& id)>;
 
     Backend(size_t context_size, Session& session, EventCallback callback);
-    virtual ~Backend();  // Defined in .cpp where ChannelParser is complete
+    virtual ~Backend() = default;
 
     // Main transactional message interface
     // Adds message and generates response, handling eviction if needed
@@ -95,16 +95,6 @@ public:
     // All output flows through callback, session token counts are updated
     virtual void generate_from_session(Session& session, int max_tokens = 0) = 0;
 
-    // Tool and thinking tag markers (model-specific, extracted from chat template)
-    virtual std::vector<std::string> get_tool_call_markers() const { return {}; }
-    virtual std::vector<std::string> get_tool_call_end_markers() const { return {}; }
-    virtual std::vector<std::string> get_thinking_start_markers() const { return {}; }
-    virtual std::vector<std::string> get_thinking_end_markers() const { return {}; }
-
-    // Get chat template capabilities (for channel-based models)
-    // Returns nullptr if no template or not available
-    virtual const ChatTemplates::ChatTemplateCaps* get_chat_template_caps() const { return nullptr; }
-
     /// @brief Count tokens for a message (without adding to context)
     /// Formats exactly as add_message() would, but only returns token count
     /// Used for proactive eviction to determine if message will fit
@@ -119,6 +109,17 @@ public:
                                      const std::string& content,
                                      const std::string& tool_name = "",
                                      const std::string& tool_id = "") = 0;
+
+    // Tool and thinking tag markers (model-specific, GPU backends override)
+    // API backends return empty (no marker-based filtering needed)
+    virtual std::vector<std::string> get_tool_call_markers() const { return {}; }
+    virtual std::vector<std::string> get_tool_call_end_markers() const { return {}; }
+    virtual std::vector<std::string> get_thinking_start_markers() const { return {}; }
+    virtual std::vector<std::string> get_thinking_end_markers() const { return {}; }
+
+    // Get chat template capabilities (for channel-based models)
+    // Returns nullptr for API backends (no channel parsing needed)
+    virtual const ChatTemplates::ChatTemplateCaps* get_chat_template_caps() const { return nullptr; }
 
     // Shutdown and cleanup resources (called before switching providers)
     virtual void shutdown() {}
@@ -146,12 +147,57 @@ public:
     size_t context_size;
     int max_output_tokens = 0;  // Maximum tokens for completion (0 = no limit)
     std::set<std::string> valid_tool_names;  // Tool names for filtering (set by frontend)
-    bool is_local = false;  // true for GPU/local backends (llamacpp, tensorrt), false for API backends
+    bool is_gpu = false;  // true for GPU backends (llamacpp, tensorrt), false for API backends
     bool streaming_enabled = false;  // true if backend supports and has enabled streaming
     bool sse_handles_output = false;  // true if SSE handles all output (CLI client backend)
     EventCallback callback;  // Frontend callback for streaming output events
 
+    // Tool calls detected during streaming (accumulated as JSON array)
+    // Used for building tool_calls_json in assistant message and by API server
+    nlohmann::json accumulated_tool_calls = nlohmann::json::array();
+
+    // Helper to record a tool call (called when emitting TOOL_CALL callback)
+    void record_tool_call(const std::string& name, const std::string& params_json, const std::string& id) {
+        nlohmann::json tc;
+        tc["id"] = id;
+        tc["type"] = "function";
+        tc["function"]["name"] = name;
+        tc["function"]["arguments"] = params_json;
+        accumulated_tool_calls.push_back(tc);
+    }
+
+    // Clear accumulated tool calls (call at start of generation)
+    void clear_tool_calls() {
+        accumulated_tool_calls = nlohmann::json::array();
+    }
+
 protected:
+    // Common output filtering (backticks, buffering with newline flush)
+    // Called by both ApiBackend::output() and GpuBackend::output()
+    // Returns true to continue, false if callback requested cancellation
+    bool filter(const char* text, size_t len);
+    bool filter(const std::string& text) { return filter(text.c_str(), text.length()); }
+
+    // Flush the filter output buffer (called on newlines and at end)
+    bool flush_filter_buffer();
+
+    // Reset/flush output state
+    virtual void reset_output_state();
+    virtual void flush_output();
+
+    // Filter state (common to all backends)
+    std::string backtick_buffer;   // Accumulates backticks for ``` detection
+    std::string output_buffer;     // Buffered output, flushed on newlines
+    bool in_code_block = false;    // Inside ``` code block
+    bool skip_to_newline = false;  // Skip chars until newline (after opening ```)
+
+    // Think block filtering state
+    std::string think_tag_buffer;  // Accumulates potential <think> or </think> tag
+    bool in_think_block = false;   // Inside <think>...</think> block
+
+    // UTF-8 handling
+    std::string utf8_incomplete;   // Incomplete UTF-8 sequence from previous chunk
+
     virtual void parse_backend_config() {
         // Default: no-op. Backends override if they have specific config
     }
@@ -160,76 +206,8 @@ protected:
     /// @return Vector of model IDs
     virtual std::vector<std::string> fetch_models() { return {}; }
 
-    // Unified output function - all backends call this instead of callback directly
-    // Filters tool calls and thinking blocks, emits structured callbacks
-    // Returns true to continue, false if callback requested cancellation
-    bool output(const char* text, size_t len);
-    bool output(const std::string& text) { return output(text.c_str(), text.length()); }
-
-    // Process output through channel parser (for GPT-OSS harmony format)
-    // If model has channels: routes through ChannelParser first, then output()
-    // If no channels: falls back to output() directly
-    // Returns true to continue, false if cancelled or stop requested
-    bool process_output(const char* text, size_t len);
-    bool process_output(const std::string& text) { return process_output(text.c_str(), text.length()); }
-
-    // Reset filter state between requests
-    void reset_output_state();
-
-    // Flush any pending output at end of response
-    void flush_output();
-
-    // Control flags
-    bool show_thinking = false;
-
-public:
-    // Tool calls detected during streaming via emit_tool_call()
-    // Used by derived backends and API server to access tool calls captured by channel parser
-    std::vector<ToolParser::ToolCall> pending_tool_calls;
-
 private:
     std::vector<std::string> cached_models;  // Lazy-loaded model list
-
-    // Filtering state machine
-    enum FilterState {
-        FILTER_NORMAL,
-        FILTER_DETECTING_TAG,
-        FILTER_IN_THINKING,
-        FILTER_IN_TOOL_CALL,
-        FILTER_CHECKING_CLOSE
-    };
-
-    FilterState filter_state = FILTER_NORMAL;
-    bool in_tool_call = false;
-    bool in_thinking = false;
-    bool in_code_block = false;
-    bool skip_to_newline = false;  // Skip rest of line (e.g., language after ```)
-    int json_brace_depth = 0;
-
-    std::string tag_buffer;
-    std::string current_tag;
-    std::string backtick_buffer;
-    std::string buffered_tool_call;
-    std::string buffered_thinking;
-    std::string output_buffer;  // Buffer for batching small outputs
-
-    // Marker vectors (cached from virtual methods)
-    std::vector<std::string> tool_call_start_markers;
-    std::vector<std::string> tool_call_end_markers;
-    std::vector<std::string> thinking_start_markers;
-    std::vector<std::string> thinking_end_markers;
-    bool markers_initialized = false;
-
-    // Channel parser for GPT-OSS harmony format (integrated for all modes)
-    std::unique_ptr<ChannelParsing::ChannelParser> channel_parser_;
-    bool channel_parsing_enabled_ = false;
-
-    // Filter helpers
-    void ensure_markers_initialized();
-    bool matches_any(const std::string& buffer, const std::vector<std::string>& markers, std::string* matched = nullptr) const;
-    bool could_match_any(const std::string& buffer, const std::vector<std::string>& markers) const;
-    void emit_tool_call();
-    bool flush_output_buffer();  // Returns true to continue, false if cancelled
 };
 
 /// @brief Exception thrown by backend managers

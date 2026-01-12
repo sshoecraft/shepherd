@@ -314,7 +314,7 @@ static std::string extract_string(const std::any& value) {
     }
 }
 
-ToolResult Tools::execute(const std::string& tool_name, const std::map<std::string, std::any>& parameters) {
+ToolResult Tools::execute(const std::string& tool_name, const std::string& params_json) {
     Tool* tool = get(tool_name);
 
     if (!tool) {
@@ -326,6 +326,32 @@ ToolResult Tools::execute(const std::string& tool_name, const std::map<std::stri
     if (!is_enabled(tool_name)) {
         ToolResult r(false, "", "Tool is disabled: " + tool_name);
         r.summary = "Tool is disabled: " + tool_name;
+        return r;
+    }
+
+    // Parse JSON params to map
+    std::map<std::string, std::any> parameters;
+    try {
+        if (!params_json.empty()) {
+            auto j = nlohmann::json::parse(params_json);
+            for (auto& [key, value] : j.items()) {
+                if (value.is_string()) {
+                    parameters[key] = value.get<std::string>();
+                } else if (value.is_number_integer()) {
+                    parameters[key] = value.get<int>();
+                } else if (value.is_number_float()) {
+                    parameters[key] = value.get<double>();
+                } else if (value.is_boolean()) {
+                    parameters[key] = value.get<bool>();
+                } else {
+                    // Complex types: store as JSON string
+                    parameters[key] = value.dump();
+                }
+            }
+        }
+    } catch (const nlohmann::json::exception& e) {
+        ToolResult r(false, "", "Invalid JSON parameters: " + std::string(e.what()));
+        r.summary = "Invalid JSON parameters";
         return r;
     }
 

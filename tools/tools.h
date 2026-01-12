@@ -58,9 +58,9 @@ public:
     int handle_tools_args(const std::vector<std::string>& args,
                           std::function<void(const std::string&)> callback);
 
-    // Execute a tool by name with given parameters
+    // Execute a tool by name with JSON parameters string
     // Returns ToolResult with success/failure, content, and error
-    ToolResult execute(const std::string& tool_name, const std::map<std::string, std::any>& parameters);
+    ToolResult execute(const std::string& tool_name, const std::string& params_json);
 
     // Populate session.tools from all_tools
     void populate_session_tools(Session& session);
@@ -70,6 +70,9 @@ public:
 
     // Remove a tool by name
     void remove_tool(const std::string& name);
+
+    // Check if native (core) tools are registered
+    bool has_native_tools() const { return !core_tools.empty(); }
 };
 
 // Include individual tool headers for direct access if needed

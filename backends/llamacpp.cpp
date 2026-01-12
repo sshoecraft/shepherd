@@ -1,6 +1,7 @@
 
 #include "shepherd.h"
 #include "llamacpp.h"
+#include "harmony_parser.h"
 #include "tools/tool.h"
 #include "tools/tool_parser.h"
 #include "nlohmann/json.hpp"
@@ -11,21 +12,24 @@
 #include <ctime>
 #include <filesystem>
 
+// Use config->thinking instead of config->thinking
+
 #ifdef ENABLE_LLAMACPP
 #include "llama.cpp/include/llama.h"
 #include "llama.cpp/src/llama-batch.h"
 #include "llama.cpp/common/chat.h"
+#include "llama.cpp/common/sampling.h"
 #endif
 
 
 // LlamaCppBackend implementation
 LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback)
-    : Backend(max_context_tokens, session, callback),
+    : GpuBackend(max_context_tokens, session, callback),
       model_config(ModelConfig::create_generic()) {
     // Set public variables per RULES.md
     backend_name = "llamacpp";
     context_size = max_context_tokens;
-    is_local = true;  // Local GPU backend
+    // is_gpu = true set by GpuBackend constructor
 
     dout(1) << "LlamaCppBackend created with context_size: " + std::to_string(context_size) << std::endl;
 
@@ -376,6 +380,12 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
 
     // Detect model family - priority: chat template -> config.json -> path
     model_config = Models::detect_from_chat_template(chat_template_text, model_path);
+
+    // Preserve thinking markers detected from template
+    auto thinking_start = model_config.thinking_start_markers;
+    auto thinking_end = model_config.thinking_end_markers;
+    bool has_thinking = model_config.supports_thinking_mode;
+
     if (model_config.family == ModelFamily::GENERIC) {
         // Try config.json in model directory
         std::filesystem::path model_dir_path = std::filesystem::path(model_path).parent_path();
@@ -384,6 +394,14 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
     if (model_config.family == ModelFamily::GENERIC) {
         // Last resort: path-based detection
         model_config = Models::detect_from_model_path(model_path);
+    }
+
+    // Restore thinking markers if they were detected from template
+    if (has_thinking && model_config.thinking_start_markers.empty()) {
+        model_config.thinking_start_markers = thinking_start;
+        model_config.thinking_end_markers = thinking_end;
+        model_config.supports_thinking_mode = true;
+        dout(1) << "Preserved thinking markers from template detection" << std::endl;
     }
     max_output_tokens = model_config.max_output_tokens;
     dout(1) << "Model configuration: family=" + std::to_string(static_cast<int>(model_config.family)) +
@@ -434,6 +452,26 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
                    ", tool_calls=" + std::string(caps.supports_tool_calls ? "yes" : "no") +
                    ", tool_responses=" + std::string(caps.supports_tool_responses ? "yes" : "no") +
                    ", channels=" + std::string(caps.has_channels ? "yes" : "no") << std::endl;
+
+        // Initialize harmony stop tokens for channel-based models (GPT-OSS)
+        if (caps.has_channels) {
+            llama_model* mdl = static_cast<llama_model*>(model);
+            const llama_vocab* vocab = llama_model_get_vocab(mdl);
+
+            // Harmony stop tokens: <|end|>, <|return|>, <|call|>
+            const char* stop_markers[] = {"<|end|>", "<|return|>", "<|call|>"};
+            for (const char* marker : stop_markers) {
+                // Tokenize the marker to get its token ID
+                std::vector<llama_token> tokens(8);
+                int n = llama_tokenize(vocab, marker, strlen(marker), tokens.data(), tokens.size(), false, true);
+                if (n == 1) {
+                    harmony_stop_tokens.push_back(tokens[0]);
+                    dout(1) << "Harmony stop token: '" << marker << "' -> id " << tokens[0] << std::endl;
+                } else {
+                    dout(1) << "Warning: Harmony marker '" << marker << "' tokenizes to " << n << " tokens, skipping" << std::endl;
+                }
+            }
+        }
     }
 
     // Try to load sampling parameters from generation_config.json
@@ -697,7 +735,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     dout(1) << "KV cache full - need to free " + std::to_string(tokens_needed) + " tokens" << std::endl;
 
     if (!current_session) {
-        if (callback) callback(CallbackEvent::ERROR, "No current session - cannot evict", "", "");
+        callback(CallbackEvent::ERROR, "No current session - cannot evict", "", "");
         return UINT32_MAX;
     }
 
@@ -737,7 +775,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     auto ranges = mutable_session->calculate_messages_to_evict(tokens_needed);
 
     if (ranges.empty()) {
-        if (callback) callback(CallbackEvent::ERROR, "Cannot evict - no space can be freed", "", "");
+        callback(CallbackEvent::ERROR, "Cannot evict - no space can be freed", "", "");
         return 0;  // Signal failure: eviction cannot proceed
     }
 
@@ -793,9 +831,23 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
         dout(1) << "Shifted KV cache positions >= " + std::to_string(it->end_pos + 1) + " down by " + std::to_string(it->tokens) << std::endl;
     }
 
+    // Step 3.5: Update kv_cache_mirror to match KV cache state
+    // Process ranges in reverse order (same as KV removal)
+    for (auto it = range_infos.rbegin(); it != range_infos.rend(); ++it) {
+        if (it->start_pos < static_cast<int>(kv_cache_mirror.size())) {
+            int erase_end = std::min(it->end_pos + 1, static_cast<int>(kv_cache_mirror.size()));
+            kv_cache_mirror.erase(
+                kv_cache_mirror.begin() + it->start_pos,
+                kv_cache_mirror.begin() + erase_end
+            );
+            dout(1) << "Updated kv_cache_mirror: erased [" << it->start_pos
+                    << ", " << erase_end << ")" << std::endl;
+        }
+    }
+
     // Step 4: Archive to RAG and remove messages from session (all ranges at once)
     if (!mutable_session->evict_messages(ranges)) {
-        if (callback) callback(CallbackEvent::ERROR, "Failed to evict messages from session", "", "");
+        callback(CallbackEvent::ERROR, "Failed to evict messages from session", "", "");
         return UINT32_MAX;
     }
 
@@ -816,7 +868,7 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     }
     int actual_kv_tokens = get_context_token_count();
     if (expected_kv_tokens != actual_kv_tokens) {
-        if (callback) callback(CallbackEvent::ERROR, "Eviction validation FAILED: expected " +
+        callback(CallbackEvent::ERROR, "Eviction validation FAILED: expected " +
                   std::to_string(expected_kv_tokens) + " tokens in KV cache but found " +
                   std::to_string(actual_kv_tokens), "", "");
     } else {
@@ -886,20 +938,23 @@ int LlamaCppBackend::get_context_token_count() const {
 #endif
 }
 
-std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
+std::string LlamaCppBackend::generate(const Session& session, int max_tokens, EventCallback callback) {
     dout(1) << "=== GENERATE START ===" << std::endl;
     if (!is_ready()) {
         throw std::runtime_error("LlamaCpp backend not initialized");
     }
 
+    // Set current_session for eviction callback (must be done before any KV operations)
+    current_session = &session;
+
     // Extract tool call markers from chat template on first call
-    if (!have_tool_markers && chat_templates && current_session) {
+    if (!have_tool_markers && chat_templates) {
         try {
             common_chat_templates_inputs inputs{};
 
-            // Convert session messages (all messages in current_session are in KV cache)
-            for (int i = 0; i < static_cast<int>(current_session->messages.size()); i++) {
-                const auto& msg = current_session->messages[i];
+            // Convert session messages
+            for (int i = 0; i < static_cast<int>(session.messages.size()); i++) {
+                const auto& msg = session.messages[i];
                 common_chat_msg tmpl_msg;
                 tmpl_msg.role = msg.get_role();
                 tmpl_msg.content = msg.content;
@@ -994,11 +1049,11 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
 
 #ifdef _DEBUG
     // In debug mode, show what's in the KV cache
-    if (g_debug_level && current_session) {
+    if (g_debug_level) {
         dout(1) << "=== MESSAGES IN KV CACHE ===" << std::endl;
         char line[128];
-        for (int i = 0; i < static_cast<int>(current_session->messages.size()); i++) {
-            const auto& msg = current_session->messages[i];
+        for (int i = 0; i < static_cast<int>(session.messages.size()); i++) {
+            const auto& msg = session.messages[i];
             line[0] = 0;
             // Format: "[role] content..." with max 128 chars total, newlines replaced with spaces
 
@@ -1033,10 +1088,8 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
     dout(1) << "Running generation (messages already cached)" << std::endl;
 
     // Before generation, we need to add the generation prompt to KV cache
-    // Use chat template to get the generation prompt
     std::string generation_prompt = chat_template->get_generation_prompt();
 
-    // Declare these outside the if block so they're accessible later
     llama_context* ctx = static_cast<llama_context*>(model_ctx);
     llama_model* mdl = static_cast<llama_model*>(this->model);
     int n_tokens = 0;
@@ -1058,7 +1111,7 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
                 llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
                 if (llama_decode(ctx, batch) != 0) {
-                    if (callback) callback(CallbackEvent::ERROR, "Failed to decode generation prompt at position " + std::to_string(i), "", "");
+                    callback(CallbackEvent::ERROR, "Failed to decode generation prompt at position " + std::to_string(i), "", "");
                 }
             }
         }
@@ -1093,27 +1146,61 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
         }
     }
 
-    // CRITICAL FIX: After generation, add the closing tag to KV cache
-    // The generation prompt added assistant_start_tag, and run_inference() generated tokens,
-    // but we never added the assistant_end_tag closing tag! This causes malformed context on next generate()
+    // CRITICAL FIX: After generation, ensure proper ending tokens in KV cache
+    // For non-harmony models: add assistant_end_tag closing tag
+    // For harmony models: replace <|return|> with <|end|> if present (per llama.cpp issue #15417)
+    //   - <|return|> should NEVER appear in model input - it's only for end-of-generation
+    //   - The template uses <|end|> for completed assistant turns, but model may generate <|return|>
+    //   - This mismatch causes context corruption in multi-turn conversations
     int n_closing = 0;
-    std::string assistant_end_tag = chat_template->get_assistant_end_tag();
-    if (!assistant_end_tag.empty()) {
-        // Tokenize and add the closing tag to KV cache
-        const llama_vocab* vocab = llama_model_get_vocab(mdl);
-        std::vector<llama_token> closing_tokens(16);
-        n_closing = llama_tokenize(vocab, assistant_end_tag.c_str(),
-                                    assistant_end_tag.length(),
-                                    closing_tokens.data(), closing_tokens.size(), false, true);
+    bool model_has_channels = chat_template && chat_template->get_capabilities().has_channels;
+    if (!model_has_channels) {
+        std::string assistant_end_tag = chat_template->get_assistant_end_tag();
+        if (!assistant_end_tag.empty()) {
+            // Tokenize and add the closing tag to KV cache
+            const llama_vocab* vocab = llama_model_get_vocab(mdl);
+            std::vector<llama_token> closing_tokens(16);
+            n_closing = llama_tokenize(vocab, assistant_end_tag.c_str(),
+                                        assistant_end_tag.length(),
+                                        closing_tokens.data(), closing_tokens.size(), false, true);
 
-        if (n_closing > 0) {
-            closing_tokens.resize(n_closing);
-            llama_batch closing_batch = llama_batch_get_one(closing_tokens.data(), n_closing);
-            if (llama_decode(ctx, closing_batch) != 0) {
-                dout(1) << std::string("WARNING: ") +"Failed to decode closing tag into KV cache" << std::endl;
-            } else {
-                dout(1) << "Added closing tag to KV cache: " + assistant_end_tag << std::endl;
+            if (n_closing > 0) {
+                closing_tokens.resize(n_closing);
+                llama_batch closing_batch = llama_batch_get_one(closing_tokens.data(), n_closing);
+                if (llama_decode(ctx, closing_batch) != 0) {
+                    dout(1) << std::string("WARNING: ") +"Failed to decode closing tag into KV cache" << std::endl;
+                } else {
+                    dout(1) << "Added closing tag to KV cache: " + assistant_end_tag << std::endl;
+                }
             }
+        }
+    } else {
+        // For harmony models: check if response ended with <|return|> and replace with <|end|>
+        // This matches llama-server behavior (see llama.cpp common/chat.cpp line ~1830)
+        const llama_vocab* vocab = llama_model_get_vocab(mdl);
+
+        // Get token IDs for <|return|> and <|end|>
+        std::vector<llama_token> return_tokens(4), end_tokens(4);
+        int n_return = llama_tokenize(vocab, "<|return|>", 10, return_tokens.data(), return_tokens.size(), false, true);
+        int n_end = llama_tokenize(vocab, "<|end|>", 7, end_tokens.data(), end_tokens.size(), false, true);
+
+        if (n_return == 1 && n_end == 1 && raw_response.find("<|return|>") != std::string::npos) {
+            // Response ended with <|return|> - need to replace it with <|end|> in KV cache
+            llama_memory_t mem = llama_get_memory(ctx);
+            int kv_used = llama_memory_seq_pos_max(mem, 0) + 1;
+
+            // Remove the last token (<|return|>) from KV cache
+            llama_memory_seq_rm(mem, 0, kv_used - 1, -1);
+
+            // Add <|end|> token instead
+            llama_batch end_batch = llama_batch_get_one(end_tokens.data(), 1);
+            if (llama_decode(ctx, end_batch) == 0) {
+                dout(1) << "Harmony: replaced <|return|> with <|end|> in KV cache for proper multi-turn context" << std::endl;
+            } else {
+                dout(1) << std::string("WARNING: ") + "Failed to add <|end|> token after removing <|return|>" << std::endl;
+            }
+        } else {
+            dout(1) << "Harmony model: response ended with <|end|>, no replacement needed" << std::endl;
         }
     }
 
@@ -1129,17 +1216,36 @@ std::string LlamaCppBackend::generate(int max_tokens, EventCallback callback) {
     return raw_response;
 }
 
-std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming, EventCallback callback) {
+std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int max_tokens, bool suppress_streaming, EventCallback callback, const std::vector<llama_token>& generation_prompt_tokens) {
 #ifdef ENABLE_LLAMACPP
     // Reset cancellation flag at start of generation
     g_generation_cancelled = false;
 
     reset_output_state();
+    parser_utf8_buffer.clear();  // Clear UTF-8 buffer for new generation
+
+    // Parser is now created in GpuBackend::reset_output_state()
+    // HarmonyParser for GPT-OSS models, GenericParser for others
+    const auto* caps = get_chat_template_caps();
+    harmony_enabled = caps && caps->has_channels && !config->raw_output;
+    if (harmony_enabled) {
+        dout(1) << "Using HarmonyParser for GPT-OSS channel format" << std::endl;
+        // Start parser in appropriate state based on thinking mode
+        // When thinking disabled: generation prompt includes <|channel|>final<|message|>
+        // When thinking enabled: generation prompt is just <|start|>assistant
+        if (auto* hp = dynamic_cast<StreamParser::HarmonyParser*>(parser.get())) {
+            if (config->thinking) {
+                hp->start_in_header();  // Model will output <|channel|>analysis first
+            } else {
+                hp->start_in_final_content();  // Skip to FINAL channel content
+            }
+        }
+    }
 
     // Note: TerminalIO reset removed
 
     if (!model || !model_ctx) {
-        if (callback) callback(CallbackEvent::ERROR, "llama.cpp model or context not initialized", "", "");
+        callback(CallbackEvent::ERROR, "llama.cpp model or context not initialized", "", "");
         return "Error: Model not initialized";
     }
 
@@ -1147,40 +1253,46 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     llama_model* mdl = static_cast<llama_model*>(this->model);
     const llama_vocab* vocab = llama_model_get_vocab(mdl);
 
-    // Compute effective sampling parameters - use session overrides if set, otherwise backend defaults
-    // This mirrors TensorRT's approach for per-request parameter support
-    float use_temperature = (current_session && current_session->temperature >= 0.0f) ? current_session->temperature : temperature;
-    float use_top_p = (current_session && current_session->top_p >= 0.0f) ? current_session->top_p : top_p;
-    int use_top_k = (current_session && current_session->top_k >= 0) ? current_session->top_k : top_k;
-    float use_penalty_repeat = (current_session && current_session->repetition_penalty >= 0.0f) ? current_session->repetition_penalty : penalty_repeat;
-    float use_penalty_freq = (current_session && current_session->frequency_penalty > -999.0f) ? current_session->frequency_penalty : penalty_freq;
-    float use_penalty_present = (current_session && current_session->presence_penalty > -999.0f) ? current_session->presence_penalty : penalty_present;
+    // Build common_params_sampling from session overrides (or use llama.cpp defaults)
+    // current_session is set by generate() before calling run_inference()
+    common_params_sampling sparams;  // llama.cpp defaults: temp=0.8, top_p=0.95, top_k=40, min_p=0.05
+    const auto* sp = current_session ? &current_session->sampling : nullptr;
+    if (sp) {
+        if (sp->temperature >= 0.0f) sparams.temp = sp->temperature;
+        if (sp->top_p >= 0.0f) sparams.top_p = sp->top_p;
+        if (sp->top_k >= 0) sparams.top_k = sp->top_k;
+        if (sp->min_p >= 0.0f) sparams.min_p = sp->min_p;
+        if (sp->typ_p >= 0.0f) sparams.typ_p = sp->typ_p;
+        if (sp->top_n_sigma >= 0.0f) sparams.top_n_sigma = sp->top_n_sigma;
+        if (sp->repetition_penalty >= 0.0f) sparams.penalty_repeat = sp->repetition_penalty;
+        if (sp->presence_penalty > -999.0f) sparams.penalty_present = sp->presence_penalty;
+        if (sp->frequency_penalty > -999.0f) sparams.penalty_freq = sp->frequency_penalty;
+        if (sp->penalty_last_n >= 0) sparams.penalty_last_n = sp->penalty_last_n;
+        if (sp->dynatemp_range >= 0.0f) sparams.dynatemp_range = sp->dynatemp_range;
+        if (sp->dynatemp_exponent >= 0.0f) sparams.dynatemp_exponent = sp->dynatemp_exponent;
+        if (sp->dry_multiplier >= 0.0f) sparams.dry_multiplier = sp->dry_multiplier;
+        if (sp->dry_base >= 0.0f) sparams.dry_base = sp->dry_base;
+        if (sp->dry_allowed_length >= 0) sparams.dry_allowed_length = sp->dry_allowed_length;
+        if (sp->dry_penalty_last_n >= 0) sparams.dry_penalty_last_n = sp->dry_penalty_last_n;
+        if (sp->xtc_probability >= 0.0f) sparams.xtc_probability = sp->xtc_probability;
+        if (sp->xtc_threshold >= 0.0f) sparams.xtc_threshold = sp->xtc_threshold;
+        if (sp->mirostat >= 0) sparams.mirostat = sp->mirostat;
+        if (sp->mirostat_tau >= 0.0f) sparams.mirostat_tau = sp->mirostat_tau;
+        if (sp->mirostat_eta >= 0.0f) sparams.mirostat_eta = sp->mirostat_eta;
+        if (sp->seed != 0) sparams.seed = sp->seed;
+        if (sp->min_keep >= 0) sparams.min_keep = sp->min_keep;
+    }
 
-    // Initialize sampler chain with effective sampling parameters
-    llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Initialize sampler with full chain (penalties, dry, top_n_sigma, top_k, typ_p, top_p, min_p, xtc, temperature)
+    common_sampler* sampler = common_sampler_init(mdl, sparams);
 
-    // Add samplers in the recommended order (from llama.cpp examples)
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(use_top_k));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(use_top_p, min_keep));
-
-    // Add repetition penalties BEFORE temperature to discourage repetitive patterns
-    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-        penalty_last_n,        // last n tokens to penalize
-        use_penalty_repeat,    // repetition penalty (1.0 = disabled)
-        use_penalty_freq,      // frequency penalty (0.0 = disabled)
-        use_penalty_present)); // presence penalty (0.0 = disabled)
-
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(use_temperature));
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));           // greedy sampling from dist
-
-    dout(1) << "Sampling params: temperature=" + std::to_string(use_temperature) +
-              ", top_p=" + std::to_string(use_top_p) +
-              ", top_k=" + std::to_string(use_top_k) +
-              ", min_keep=" + std::to_string(min_keep) +
-              ", penalty_repeat=" + std::to_string(use_penalty_repeat) +
-              ", penalty_freq=" + std::to_string(use_penalty_freq) +
-              ", penalty_present=" + std::to_string(use_penalty_present) +
-              ", penalty_last_n=" + std::to_string(penalty_last_n) << std::endl;
+    dout(1) << "Sampling params: temp=" + std::to_string(sparams.temp) +
+              ", top_p=" + std::to_string(sparams.top_p) +
+              ", top_k=" + std::to_string(sparams.top_k) +
+              ", min_p=" + std::to_string(sparams.min_p) +
+              ", penalty_repeat=" + std::to_string(sparams.penalty_repeat) +
+              ", penalty_freq=" + std::to_string(sparams.penalty_freq) +
+              ", penalty_present=" + std::to_string(sparams.penalty_present) << std::endl;
 
     // If prompt_text is empty, everything is already in KV cache
     // Just skip straight to generation
@@ -1194,8 +1306,8 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                                              prompt_tokens.data(), prompt_tokens.size(), false, true);
 
         if (n_prompt_tokens < 0) {
-            if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize input text", "", "");
-            llama_sampler_free(sampler);
+            callback(CallbackEvent::ERROR, "Failed to tokenize input text", "", "");
+            common_sampler_free(sampler);
             return "Error: Tokenization failed";
         }
 
@@ -1204,9 +1316,9 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
         // Check if prompt alone is larger than entire context window
         if (n_prompt_tokens > static_cast<int>(context_size)) {
-            if (callback) callback(CallbackEvent::ERROR, "Prompt too large for context: " +
+            callback(CallbackEvent::ERROR, "Prompt too large for context: " +
                       std::to_string(n_prompt_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
-            llama_sampler_free(sampler);
+            common_sampler_free(sampler);
             if (g_server_mode) {
                 throw ContextFullException("This model's maximum context length is " +
                     std::to_string(context_size) + " tokens. However, your messages resulted in " +
@@ -1220,7 +1332,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
             // Check for cancellation between batches
             if (g_generation_cancelled) {
                 dout(1) << "Generation cancelled during prompt processing" << std::endl;
-                llama_sampler_free(sampler);
+                common_sampler_free(sampler);
                 return "";
             }
 
@@ -1229,8 +1341,8 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
             llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
             if (llama_decode(ctx, batch) != 0) {
-                if (callback) callback(CallbackEvent::ERROR, "Failed to evaluate prompt tokens at position " + std::to_string(i), "", "");
-                llama_sampler_free(sampler);
+                callback(CallbackEvent::ERROR, "Failed to evaluate prompt tokens at position " + std::to_string(i), "", "");
+                common_sampler_free(sampler);
                 return "Error: Evaluation failed";
             }
         }
@@ -1270,25 +1382,44 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
 
         // TODO: Escape key cancellation removed with TerminalIO
 
-        // Sample next token
-        llama_token next_token = llama_sampler_sample(sampler, ctx, -1);
+        // Sample next token using common_sampler (applies full sampler chain with min_p, etc.)
+        llama_token next_token = common_sampler_sample(sampler, ctx, -1);
 
         int32_t n_vocab = llama_vocab_n_tokens(vocab);
         dout(3) << "Sampled token: " << next_token << " (vocab size: " << n_vocab << ")" << std::endl;
         if (next_token < 0 || next_token >= n_vocab) {
-            if (callback) callback(CallbackEvent::ERROR, "Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")", "", "");
+            callback(CallbackEvent::ERROR, "Invalid token sampled: " + std::to_string(next_token) + " (vocab size: " + std::to_string(n_vocab) + ")", "", "");
             break;
         }
+
+        // Accept the token (updates sampler state for repetition penalties, etc.)
+        common_sampler_accept(sampler, next_token, true);
 
         // Check for end of generation using llama.cpp's native EOG detection
         // This handles all model-specific end tokens automatically
         if (llama_vocab_is_eog(vocab, next_token)) {
-            dout(1) << "End of generation token detected" << std::endl;
+            char eog_str[256];
+            int eog_len = llama_token_to_piece(vocab, next_token, eog_str, sizeof(eog_str), 0, true);
+            std::string eog_text(eog_str, eog_len);
+            dout(1) << "End of generation token detected: id=" << next_token << " text='" << eog_text << "'" << std::endl;
+
+            // For harmony models: stop tokens should go through parser to trigger flush
+            if (harmony_enabled && parser) {
+                parser->process(eog_text);
+                // Emit any remaining content delta before stopping
+                std::string content_delta = parser->get_content_delta();
+                if (!content_delta.empty()) {
+                    response.append(content_delta);
+                    filter(content_delta.c_str(), content_delta.length());
+                }
+                dout(1) << "Harmony stop token " << eog_text << " - stopping generation" << std::endl;
+            } else {
+                // For non-harmony models, output the token
+                response.append(eog_str, eog_len);
+                output(eog_text);
+            }
             break;
         }
-
-        // Accept the token
-        llama_sampler_accept(sampler, next_token);
 
         // Convert token to text
         // NOTE: Testing whether raw output (like vLLM) works with shepherd client
@@ -1304,18 +1435,97 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         }
 #endif
         char token_str[256];
-        int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, false);
+        // Render special tokens as text so harmony parser can see markers like <|end|>
+        int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, true);
 
-        if (token_len > 0) {
-            // Accumulate for final response
-            response.append(token_str, token_len);
-
-            // Route through unified output filter (includes channel parsing for GPT-OSS)
-            std::string delta(token_str, token_len);
-            if (!process_output(delta)) {
-                // Callback returned false or channel parser signaled stop
+        // Check if this is a harmony stop token before processing
+        bool is_harmony_stop = false;
+        for (int32_t stop_id : harmony_stop_tokens) {
+            if (next_token == stop_id) {
+                is_harmony_stop = true;
+                dout(1) << "Harmony stop token detected: id=" << next_token << " text='" << std::string(token_str, token_len) << "'" << std::endl;
                 break;
             }
+        }
+
+        if (token_len > 0) {
+            // Debug: log each token (level 3 - very verbose)
+            dout(3) << "TOKEN[" << n_generated << "]: id=" << next_token << " text='" << std::string(token_str, token_len) << "'" << std::endl;
+
+            // Text-based output path - unified parser (HarmonyParser or GenericParser)
+            std::string delta(token_str, token_len);
+
+            // UTF-8 buffering - ensure complete multi-byte sequences before parsing
+            if (!parser_utf8_buffer.empty()) {
+                delta = parser_utf8_buffer + delta;
+                parser_utf8_buffer.clear();
+            }
+            size_t valid_len = delta.size();
+            for (size_t i = 1; i <= 4 && i <= delta.size(); ++i) {
+                unsigned char c = delta[delta.size() - i];
+                if ((c & 0xC0) != 0x80) {
+                    // Found start byte - check if sequence is complete
+                    int expected_len = 1;
+                    if ((c & 0xE0) == 0xC0) expected_len = 2;
+                    else if ((c & 0xF0) == 0xE0) expected_len = 3;
+                    else if ((c & 0xF8) == 0xF0) expected_len = 4;
+                    if (i < (size_t)expected_len) {
+                        valid_len = delta.size() - i;
+                    }
+                    break;
+                }
+            }
+            if (valid_len < delta.size()) {
+                parser_utf8_buffer = delta.substr(valid_len);
+                delta = delta.substr(0, valid_len);
+                if (delta.empty()) continue;
+            }
+
+            // Use unified parser from GpuBackend
+            if (parser) {
+                bool should_stop = parser->process(delta);
+
+                // Emit content delta - for harmony models, only content goes to response
+                std::string content_delta = parser->get_content_delta();
+                if (!content_delta.empty()) {
+                    // Accumulate ONLY content (not reasoning) for session storage
+                    response.append(content_delta);
+                    if (!filter(content_delta.c_str(), content_delta.length())) {
+                        dout(1) << "filter signaled stop after content" << std::endl;
+                        break;
+                    }
+                }
+
+                // Emit thinking/reasoning delta (NOT added to response - transient)
+                std::string thinking_delta = parser->get_reasoning_delta();
+                if (!thinking_delta.empty() && config->thinking ) {
+                    if (!callback(CallbackEvent::THINKING, thinking_delta, "", "")) {
+                        dout(1) << "callback signaled stop after thinking" << std::endl;
+                        break;
+                    }
+                }
+
+                // Check for tool calls
+                auto tool_calls = parser->get_tool_calls();
+                for (const auto& tc : tool_calls) {
+                    record_tool_call(tc.name, tc.arguments, tc.id);
+                }
+
+                // Parser signals stop (e.g., <|return|> or <|call|> in HarmonyParser)
+                if (should_stop) {
+                    dout(1) << "Parser signaled generation stop" << std::endl;
+                    break;
+                }
+            } else {
+                // No parser - accumulate raw tokens and output directly
+                response.append(token_str, token_len);
+                if (!output(delta)) {
+                    dout(1) << "output signaled stop after token: " << delta << std::endl;
+                    break;
+                }
+            }
+            // Note: harmony stop token handling (<|return|>, <|call|>) is now done by HarmonyParser
+            // which returns should_stop=true from process() when it sees these markers
         }
 
         // Evaluate the generated token - retry once if eviction happens
@@ -1333,7 +1543,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         }
 
         if (!decode_ok) {
-            if (callback) callback(CallbackEvent::ERROR, "Failed to evaluate generated token after retries", "", "");
+            callback(CallbackEvent::ERROR, "Failed to evaluate generated token after retries", "", "");
             break;
         }
 
@@ -1346,10 +1556,10 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     double seconds = duration.count() / 1000.0;
     double tokens_per_second = (n_generated > 0 && seconds > 0) ? (n_generated / seconds) : 0.0;
 
-    llama_sampler_free(sampler);
+    common_sampler_free(sampler);
 
     // Send performance stats via callback (frontend decides whether to display)
-    if (n_generated > 0 && callback) {
+    if (n_generated > 0 ) {
         int context_used = get_context_token_count();
         int context_max = context_size;
 
@@ -1497,12 +1707,12 @@ bool LlamaCppBackend::format_and_decode_message(
     bool add_generation_prompt) {
 #ifdef ENABLE_LLAMACPP
     if (!model || !model_ctx) {
-        if (callback) callback(CallbackEvent::ERROR, "Model or context not initialized", "", "");
+        callback(CallbackEvent::ERROR, "Model or context not initialized", "", "");
         return false;
     }
 
     if (target_index >= all_messages.size()) {
-        if (callback) callback(CallbackEvent::ERROR, "Target index " + std::to_string(target_index) + " out of bounds (size=" + std::to_string(all_messages.size()) + ")", "", "");
+        callback(CallbackEvent::ERROR, "Target index " + std::to_string(target_index) + " out of bounds (size=" + std::to_string(all_messages.size()) + ")", "", "");
         return false;
     }
 
@@ -1510,13 +1720,18 @@ bool LlamaCppBackend::format_and_decode_message(
 
     // Render message through template with full conversation context
     // Exception: assistant messages without tool_calls use raw content to avoid think tag stripping
+    // BUT: for harmony/channel-based models (GPT-OSS), we MUST render through template to get
+    // proper <|start|>assistant<|channel|>final<|message|>...<|end|> wrapping
     std::string rendered_msg;
-    if (msg.get_role() == "assistant" && msg.tool_calls_json.empty()) {
+    bool has_channels = chat_template && chat_template->get_capabilities().has_channels;
+    if (msg.get_role() == "assistant" && msg.tool_calls_json.empty() && !has_channels) {
         // Use raw content for regular assistant messages - no template processing
+        // (skip this for harmony models which need channel wrapping)
         rendered_msg = msg.content;
     } else {
         // Render through the template with full conversation context
-        // This is needed for: user messages, tool responses, and assistant messages with tool_calls
+        // This is needed for: user messages, tool responses, assistant messages with tool_calls,
+        // and ALL assistant messages for harmony models
         rendered_msg = render_message(all_messages, target_index, tools, add_generation_prompt);
     }
 
@@ -1530,7 +1745,7 @@ bool LlamaCppBackend::format_and_decode_message(
                                    msg_tokens.data(), msg_tokens.size(), false, true);
 
     if (n_tokens < 0) {
-        if (callback) callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
+        callback(CallbackEvent::ERROR, "Failed to tokenize message", "", "");
         return false;
     }
     msg_tokens.resize(n_tokens);
@@ -1543,7 +1758,7 @@ bool LlamaCppBackend::format_and_decode_message(
 
     // Check if message alone is larger than entire context window
     if (n_tokens > static_cast<int>(context_size)) {
-        if (callback) callback(CallbackEvent::ERROR, "Message too large for context: " +
+        callback(CallbackEvent::ERROR, "Message too large for context: " +
                   std::to_string(n_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
         if (g_server_mode) {
             throw ContextFullException("This model's maximum context length is " +
@@ -1583,7 +1798,7 @@ bool LlamaCppBackend::format_and_decode_message(
                     decode_failed = true;
                     break;
                 } else {
-                    if (callback) callback(CallbackEvent::ERROR, "Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts", "", "");
+                    callback(CallbackEvent::ERROR, "Failed to decode message tokens after " + std::to_string(MAX_DECODE_RETRIES + 1) + " attempts", "", "");
                     return false;
                 }
             }
@@ -1605,15 +1820,13 @@ bool LlamaCppBackend::format_and_decode_message(
     dout(2) << "KV cache after decode: " << get_context_token_count() << " tokens" << std::endl;
 
     // Send performance stats via callback (frontend decides whether to display)
-    if (callback) {
-        int context_used = get_context_token_count();
-        int context_max = context_size;
-        std::ostringstream stats;
-        stats << "[Prefill: " << n_tokens << " tokens, "
-              << std::fixed << std::setprecision(1) << prefill_tokens_per_second << " t/s, "
-              << "context: " << context_used << "/" << context_max << "]\n";
-        callback(CallbackEvent::STATS, stats.str(), "", "");
-    }
+    int context_used = get_context_token_count();
+    int context_max = context_size;
+    std::ostringstream stats;
+    stats << "[Prefill: " << n_tokens << " tokens, "
+          << std::fixed << std::setprecision(1) << prefill_tokens_per_second << " t/s, "
+          << "context: " << context_used << "/" << context_max << "]\n";
+    callback(CallbackEvent::STATS, stats.str(), "", "");
 
     return true;
 #else
@@ -1632,208 +1845,175 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
         callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
     }
 
+    auto request_start = std::chrono::high_resolution_clock::now();
     dout(1) << "LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
 
-    // GPT-OSS HARMONY FIX: Drop analysis content from completed assistant turns
-    // vLLM's auto_drop_analysis_messages() does this - we need to match that behavior
-    // For channel-based models, assistant messages contain <|channel|>analysis<|message|>...
-    // followed by <|channel|>final<|message|>content<|end|>
-    // We only want to keep the final content for completed turns (any assistant message
-    // that's followed by another message)
-    if (chat_template && chat_template->get_capabilities().has_channels) {
-        for (size_t i = 0; i < session.messages.size(); i++) {
-            auto& msg = session.messages[i];
+    // Clear accumulated tool calls from previous generation
+    clear_tool_calls();
 
-            // Only process assistant messages that are followed by another message (completed turns)
-            if (msg.role == Message::ASSISTANT && i + 1 < session.messages.size()) {
-                // Check if this message contains analysis channel content
-                if (msg.content.find("<|channel|>analysis") != std::string::npos) {
-                    // Extract only the final channel content
-                    std::string filtered = chat_template->extract_content(msg.content);
+    llama_context* ctx = static_cast<llama_context*>(model_ctx);
+    llama_model* mdl = static_cast<llama_model*>(model);
+    const llama_vocab* vocab = llama_model_get_vocab(mdl);
+    llama_memory_t mem = llama_get_memory(ctx);
 
-                    if (filtered != msg.content) {
-                        dout(1) << "GPT-OSS: Filtered analysis from completed turn " << i
-                                << " (" << msg.content.length() << " -> " << filtered.length() << " chars)" << std::endl;
-                        msg.content = filtered;
-                    }
-                }
-            }
-        }
-    }
+    // ============================================================================
+    // TOKEN-LEVEL PREFIX CACHING
+    // Render full conversation, tokenize, compare with cached tokens, decode delta
+    // This approach avoids token count mismatches that occurred with message-level
+    // tracking (especially for harmony models where analysis content is dropped)
+    // ============================================================================
 
-    // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
-    size_t cached_count = backend_session.messages.size();
+    // Step 1: Build message list for rendering
+    std::vector<Message> all_messages;
 
-    dout(1) << "Backend has " + std::to_string(cached_count) + " cached messages, " +
-              "incoming session has " + std::to_string(session.messages.size()) + " messages" << std::endl;
-
-    // Account for system message offset: backend_session may have SYSTEM at [0], but session doesn't
-    size_t backend_offset = 0;
-    if (!backend_session.messages.empty() && backend_session.messages[0].role == Message::SYSTEM) {
-        backend_offset = 1;
-        dout(1) << "Backend has system message at index 0, offsetting comparison by 1" << std::endl;
-    }
-
-    // Find how many messages match (prefix caching)
-    // Compare session.messages[i] with backend_session.messages[i + backend_offset]
-    size_t matching_prefix = 0;
-    for (size_t i = 0; i < session.messages.size(); i++) {
-        size_t backend_idx = i + backend_offset;
-
-        if (backend_idx >= cached_count) {
-            // No more cached messages to compare
-            break;
-        }
-
-        const auto& cached_msg = backend_session.messages[backend_idx];
-        const auto& session_msg = session.messages[i];
-
-        // Compare role and content to see if they match
-        if (cached_msg.get_role() == session_msg.get_role() &&
-            cached_msg.content == session_msg.content) {
-            matching_prefix++;
-        } else {
-            // Messages diverged
-            dout(1) << std::string("WARNING: ") +"DIVERGENCE at session message " + std::to_string(i) + " (backend index " + std::to_string(backend_idx) + "):" << std::endl;
-            dout(1) << std::string("WARNING: ") +"  Cached: [" + cached_msg.get_role() + "] " + cached_msg.content.substr(0, 50) + "..." << std::endl;
-            dout(1) << std::string("WARNING: ") +"  Session: [" + session_msg.get_role() + "] " + session_msg.content.substr(0, 50) + "..." << std::endl;
-            break;
-        }
-    }
-
-    dout(1) << "Prefix match: " + std::to_string(matching_prefix) + " messages (out of " + std::to_string(session.messages.size()) + " in session)" << std::endl;
-
-    // Check if backend has more messages than what matched
-    // Keep: system message (if present) + matching_prefix messages
-    size_t expected_backend_count = backend_offset + matching_prefix;
-
-    if (cached_count > expected_backend_count) {
-        dout(1) << std::string("WARNING: ") +"Conversation diverged - clearing " + std::to_string(cached_count - expected_backend_count) + " cached messages" << std::endl;
-
-        // Clear KV cache from divergence point onward
-        llama_context* ctx = static_cast<llama_context*>(model_ctx);
-        llama_memory_t mem = llama_get_memory(ctx);
-
-        // Calculate token position to clear from
-        int clear_from_pos = 0;
-        for (size_t i = 0; i < expected_backend_count; i++) {
-            clear_from_pos += backend_session.messages[i].tokens;
-        }
-
-        llama_memory_seq_rm(mem, 0, clear_from_pos, -1);
-        dout(1) << "Cleared KV cache from token position " + std::to_string(clear_from_pos) << std::endl;
-
-        // Remove diverged messages from backend_session
-        while (backend_session.messages.size() > expected_backend_count) {
-            backend_session.messages.pop_back();
-        }
-    }
-
-    // Set current_session for eviction callbacks
-    current_session = &backend_session;
-
-    // Handle system message if present (server mode sends it separately)
-    if (!session.system_message.empty() &&
-        (backend_session.messages.empty() || backend_session.messages[0].role != Message::SYSTEM)) {
-
-        dout(1) << "Adding system message to KV cache" << std::endl;
-
-        // Format system message with tools using chat template
+    // Add system message if present
+    if (!session.system_message.empty()) {
         std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
-        dout(1) << "Formatted system prompt with " + std::to_string(session.tools.size()) + " tools" << std::endl;
-
-        // Create system message (token count will be set by format_and_decode_message)
-        Message sys_msg(Message::SYSTEM, formatted_system, 0);
-
-        // Decode to KV cache using full-conversation rendering
-        std::vector<Message> sys_messages = {sys_msg};
-        if (!format_and_decode_message(sys_messages, 0, session.tools, false)) {
-            Response err_resp;
-            err_resp.success = false;
-            err_resp.code = Response::ERROR;
-            err_resp.finish_reason = "error";
-            err_resp.error = "Failed to decode system message to KV cache";
-            callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
-        }
-
-        // Add to backend_session (token count was set by format_and_decode_message)
-        backend_session.messages.push_back(sys_messages[0]);
-        backend_session.system_message = session.system_message;
-        dout(1) << "System message added to KV cache (" + std::to_string(sys_messages[0].tokens) + " tokens)" << std::endl;
+        all_messages.push_back(Message(Message::SYSTEM, formatted_system, 0));
     }
 
-    // Add NEW messages (from matching_prefix onward)
-    size_t new_messages = session.messages.size() - matching_prefix;
-    if (new_messages > 0) {
-        dout(1) << "Adding " + std::to_string(new_messages) + " new messages to KV cache" << std::endl;
+    // Add all conversation messages
+    for (const auto& msg : session.messages) {
+        all_messages.push_back(msg);
+    }
 
-        for (size_t i = matching_prefix; i < session.messages.size(); i++) {
-            const auto& msg = session.messages[i];
+    // Step 2: Render full conversation WITHOUT generation prompt
+    // generate() will add the generation prompt itself
+    std::string rendered;
+    try {
+        rendered = chat_template->format_conversation(all_messages, session.tools, false);
+    } catch (const std::exception& e) {
+        dout(1) << "Template rendering failed: " << e.what() << std::endl;
+        Response err_resp;
+        err_resp.success = false;
+        err_resp.code = Response::ERROR;
+        err_resp.finish_reason = "error";
+        err_resp.error = "Template rendering failed: " + std::string(e.what());
+        callback(CallbackEvent::ERROR, err_resp.error, "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+    auto render_end = std::chrono::high_resolution_clock::now();
+    auto render_ms = std::chrono::duration_cast<std::chrono::microseconds>(render_end - request_start).count() / 1000.0;
+    dout(1) << "Template render: " << render_ms << "ms, " << rendered.length() << " chars" << std::endl;
+    dout(2) << "Rendered prompt:\n" << rendered << std::endl;
 
-            // Decode to KV cache - always use full-conversation rendering
-            // Build all_messages from backend_session + messages up to current
-            std::vector<Message> all_messages(backend_session.messages.begin(), backend_session.messages.end());
-            for (size_t j = matching_prefix; j <= i; j++) {
-                all_messages.push_back(session.messages[j]);
-            }
-            size_t target_idx = all_messages.size() - 1;
-            bool decode_ok = format_and_decode_message(all_messages, target_idx, session.tools, false);
-            if (!decode_ok) {
+    // Step 3: Tokenize the rendered conversation
+    // Note: add_special=true to match llama-server behavior (adds BOS if model expects it)
+    std::vector<llama_token> new_tokens(rendered.length() + 256);
+    int n_new_tokens = llama_tokenize(vocab, rendered.c_str(), rendered.length(),
+                                       new_tokens.data(), new_tokens.size(), true, true);
+    if (n_new_tokens < 0) {
+        // Buffer too small, resize and retry
+        new_tokens.resize(-n_new_tokens + 1);
+        n_new_tokens = llama_tokenize(vocab, rendered.c_str(), rendered.length(),
+                                       new_tokens.data(), new_tokens.size(), true, true);
+    }
+    if (n_new_tokens < 0) {
+        Response err_resp;
+        err_resp.success = false;
+        err_resp.code = Response::ERROR;
+        err_resp.finish_reason = "error";
+        err_resp.error = "Failed to tokenize conversation";
+        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
+    }
+    new_tokens.resize(n_new_tokens);
+
+    auto tokenize_end = std::chrono::high_resolution_clock::now();
+    auto tokenize_ms = std::chrono::duration_cast<std::chrono::microseconds>(tokenize_end - render_end).count() / 1000.0;
+    dout(1) << "Tokenize: " << tokenize_ms << "ms, " << n_new_tokens << " tokens, cached: " << kv_cache_mirror.size() << " tokens" << std::endl;
+
+    // Step 4: Find matching prefix (compare token arrays)
+    size_t prefix_len = 0;
+    size_t max_compare = std::min(kv_cache_mirror.size(), new_tokens.size());
+    while (prefix_len < max_compare && kv_cache_mirror[prefix_len] == new_tokens[prefix_len]) {
+        prefix_len++;
+    }
+
+    size_t delta_tokens = new_tokens.size() - prefix_len;
+    dout(1) << "Prefix cache: " << prefix_len << "/" << kv_cache_mirror.size()
+            << " tokens match, " << delta_tokens << " new tokens to decode" << std::endl;
+
+    // Step 5: Clear KV cache from divergence point if needed
+    // CRITICAL: Check ACTUAL KV cache size, not just kv_cache_mirror.size()
+    // After generation, KV cache has untracked tokens (gen_prompt + response + closing)
+    // that aren't in kv_cache_mirror. We must clear these before decoding new tokens.
+    int actual_kv_tokens = get_context_token_count();
+    if (prefix_len < static_cast<size_t>(actual_kv_tokens)) {
+        dout(1) << "Clearing KV cache from position " << prefix_len
+                << " (actual_kv=" << actual_kv_tokens << ", tracked=" << kv_cache_mirror.size() << ")" << std::endl;
+        llama_memory_seq_rm(mem, 0, prefix_len, -1);
+    }
+    // Update tracked tokens to match cleared state
+    if (prefix_len < kv_cache_mirror.size()) {
+        kv_cache_mirror.resize(prefix_len);
+    }
+
+    // Step 6: Decode delta tokens (only the new ones after prefix)
+    if (delta_tokens > 0) {
+        // Check if total would exceed context
+        if (prefix_len + delta_tokens > context_size) {
+            throw ContextFullException("This model's maximum context length is " +
+                std::to_string(context_size) + " tokens. However, your messages resulted in " +
+                std::to_string(prefix_len + delta_tokens) + " tokens.");
+        }
+
+        // Start timing for prefill
+        auto prefill_start_time = std::chrono::high_resolution_clock::now();
+
+        // Decode in batches
+        context_full_in_server_mode = false;
+        for (size_t i = prefix_len; i < new_tokens.size(); i += n_batch) {
+            int batch_size = std::min(n_batch, static_cast<int>(new_tokens.size() - i));
+            llama_batch batch = llama_batch_get_one(new_tokens.data() + i, batch_size);
+
+            if (llama_decode(ctx, batch) != 0) {
+                if (context_full_in_server_mode) {
+                    throw ContextFullException("Context full during prefix decode");
+                }
                 Response err_resp;
                 err_resp.success = false;
                 err_resp.code = Response::ERROR;
                 err_resp.finish_reason = "error";
-                err_resp.error = "Failed to decode message to KV cache";
+                err_resp.error = "Failed to decode tokens to KV cache";
                 callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
             }
-
-            // Successfully decoded - add to backend_session
-            // Token count was set by format_and_decode_message
-            Message msg_copy = all_messages[target_idx];
-            backend_session.messages.push_back(msg_copy);
-
-            // Update last_user/last_assistant for eviction protection
-            if (msg.role == Message::USER) {
-                backend_session.last_user_message_index = backend_session.messages.size() - 1;
-                backend_session.last_user_message_tokens = msg_copy.tokens;
-            } else if (msg.role == Message::ASSISTANT) {
-                backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
-                backend_session.last_assistant_message_tokens = msg_copy.tokens;
-            }
-
-            dout(1) << "Decoded message " + std::to_string(i) + " to KV cache" << std::endl;
         }
 
-        dout(1) << "Prefix caching: " + std::to_string(matching_prefix) + " cached, " +
-                  std::to_string(new_messages) + " new, total " + std::to_string(session.messages.size()) << std::endl;
+        // End timing
+        auto prefill_end_time = std::chrono::high_resolution_clock::now();
+        auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end_time - prefill_start_time);
+        double prefill_seconds = prefill_duration.count() / 1000.0;
+        double prefill_tps = (delta_tokens > 0 && prefill_seconds > 0) ? (delta_tokens / prefill_seconds) : 0.0;
+
+        dout(1) << "Prefill: " << delta_tokens << " tokens in " << prefill_duration.count() << "ms ("
+                << std::fixed << std::setprecision(1) << prefill_tps << " t/s)" << std::endl;
+
+        // Send stats callback
+        int context_used = get_context_token_count();
+        std::ostringstream stats;
+        stats << "[Prefill: " << delta_tokens << " tokens, "
+              << std::fixed << std::setprecision(1) << prefill_tps << " t/s, "
+              << "context: " << context_used << "/" << context_size << "]\n";
+        callback(CallbackEvent::STATS, stats.str(), "", "");
     } else {
-        dout(1) << "All messages already in KV cache (100% prefix cache hit)" << std::endl;
+        dout(1) << "100% prefix cache hit - no tokens to decode" << std::endl;
     }
 
-    // Copy tools to backend_session
-    backend_session.tools = session.tools;
-    backend_session.system_message = session.system_message;
-
-    // Copy sampling parameters from request (like TensorRT does)
-    backend_session.temperature = session.temperature;
-    backend_session.top_p = session.top_p;
-    backend_session.top_k = session.top_k;
-    backend_session.min_p = session.min_p;
-    backend_session.repetition_penalty = session.repetition_penalty;
-    backend_session.presence_penalty = session.presence_penalty;
-    backend_session.frequency_penalty = session.frequency_penalty;
+    // Step 7: Update kv_cache_mirror to match what's now in KV cache (pre-generation)
+    kv_cache_mirror = new_tokens;
 
     // Update member variables used by generate() for token calculations
-    // System message tokens
-    if (!backend_session.messages.empty() && backend_session.messages[0].role == Message::SYSTEM) {
-        system_formatted_tokens = backend_session.messages[0].tokens;
+    // System message tokens (first message in all_messages if it's SYSTEM)
+    if (!all_messages.empty() && all_messages[0].role == Message::SYSTEM) {
+        system_formatted_tokens = all_messages[0].tokens;
     } else {
         system_formatted_tokens = 0;
     }
 
     // Last user message tokens
-    if (backend_session.last_user_message_index >= 0) {
-        current_user_formatted_tokens = backend_session.last_user_message_tokens;
+    if (session.last_user_message_index >= 0) {
+        current_user_formatted_tokens = session.last_user_message_tokens;
     } else {
         current_user_formatted_tokens = 0;
     }
@@ -1842,36 +2022,23 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
               ", user_tokens=" + std::to_string(current_user_formatted_tokens) << std::endl;
 
     // Generate response (pass streaming callback if provided)
-    std::string result = generate(max_tokens, callback);
+    std::string result = generate(session, max_tokens, callback);
 
     // Update session token counts from KV cache (session is source of truth)
+    // Use last_completion_tokens for API (excludes gen_prompt tokens like <|start|>assistant)
     int kv_tokens = get_context_token_count();
     session.total_tokens = kv_tokens;
-    session.last_prompt_tokens = kv_tokens - last_assistant_kv_tokens;
-    session.last_assistant_message_tokens = last_assistant_kv_tokens;
+    session.last_prompt_tokens = kv_tokens - last_completion_tokens;
+    session.last_assistant_message_tokens = last_completion_tokens;
 
     dout(1) << "generate_from_session token update: kv_tokens=" << kv_tokens
-            << ", last_assistant_kv_tokens=" << last_assistant_kv_tokens
-            << ", session.total_tokens=" << session.total_tokens
-            << ", session.last_prompt_tokens=" << session.last_prompt_tokens << std::endl;
-
-    // Add assistant response to backend_session to keep it in sync with KV cache
-    // Without this, next request's prefix matching fails because backend_session
-    // only has the user message but KV cache has user + assistant tokens
-    // CRITICAL: Always add the message if any tokens were generated, even if content extraction
-    // returned empty (e.g., for channel-based models that only output analysis without final).
-    // This ensures the next request detects divergence and clears the stale KV cache.
-    if (last_assistant_kv_tokens > 0) {
-        Message assistant_msg(Message::ASSISTANT, result, last_assistant_kv_tokens);
-        backend_session.messages.push_back(assistant_msg);
-        backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
-        backend_session.last_assistant_message_tokens = last_assistant_kv_tokens;
-        dout(1) << "Added assistant message to backend_session (" << last_assistant_kv_tokens << " tokens, content_len=" << result.length() << ")" << std::endl;
-    }
+            << ", completion_tokens=" << last_completion_tokens
+            << ", prompt_tokens=" << session.last_prompt_tokens << std::endl;
 
     // Content already delivered via callback during generate()
-    // Signal completion
-    callback(CallbackEvent::STOP, "stop", "", "");
+    // Signal completion with correct finish_reason
+    std::string finish_reason = last_generation_hit_length_limit ? "length" : "stop";
+    callback(CallbackEvent::STOP, finish_reason, "", "");
 #else
     callback(CallbackEvent::ERROR, "LlamaCpp backend not compiled in", "error", "");
     callback(CallbackEvent::STOP, "error", "", "");
@@ -1891,9 +2058,6 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
         err_resp.error = "LlamaCpp backend not initialized";
         callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
     }
-
-    // Set current session for eviction callbacks
-    current_session = &session;
 
     dout(1) << "LlamaCpp add_message called: role=" + std::to_string(static_cast<int>(role)) +
               ", content_len=" + std::to_string(content.length()) << std::endl;
@@ -1942,13 +2106,13 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
     session.messages.push_back(msg);
     int new_message_index = static_cast<int>(session.messages.size()) - 1;
 
-    // Update session total tokens
-    session.total_tokens += message_tokens;
+    // Update session total tokens (msg.tokens was set by format_and_decode_message)
+    session.total_tokens += msg.tokens;
 
     // Track for context preservation
     if (role == Message::USER) {
         session.last_user_message_index = new_message_index;
-        session.last_user_message_tokens = message_tokens;
+        session.last_user_message_tokens = msg.tokens;
     }
 
     // Fire USER event callback when prompt is accepted
@@ -1985,23 +2149,14 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
         // User prompt echo moved to frontend - backend never outputs directly
 
         // Generate with callback if provided (streaming), otherwise accumulate
-        std::string response_text = generate(max_tokens, callback);
+        std::string response_text = generate(session, max_tokens, callback);
 
         // Add assistant message to session (generation was successful)
         Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
 
         // Populate tool_calls_json from tool calls detected during streaming
-        if (!pending_tool_calls.empty()) {
-            nlohmann::json tc_array = nlohmann::json::array();
-            for (const auto& tc : pending_tool_calls) {
-                nlohmann::json tc_obj;
-                tc_obj["id"] = tc.tool_call_id;
-                tc_obj["type"] = "function";
-                tc_obj["function"]["name"] = tc.name;
-                tc_obj["function"]["arguments"] = tc.raw_json;
-                tc_array.push_back(tc_obj);
-            }
-            assistant_msg.tool_calls_json = tc_array.dump();
+        if (!accumulated_tool_calls.empty()) {
+            assistant_msg.tool_calls_json = accumulated_tool_calls.dump();
             dout(1) << "Populated tool_calls_json: " << assistant_msg.tool_calls_json << std::endl;
         }
 
@@ -2022,15 +2177,16 @@ void LlamaCppBackend::add_message(Session& session, Message::Role role, const st
             finish_reason = "length";
         }
 
-#if 0
-        // Send tool calls via callback - now handled by output() filter
-        for (const auto& tc : tool_calls) {
-            callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
-        }
-#endif
-
         // Signal completion
         callback(CallbackEvent::STOP, finish_reason, "", "");
+
+        // Emit TOOL_CALL events after STOP - frontend handles immediately
+        for (const auto& tc : accumulated_tool_calls) {
+            std::string name = tc["function"]["name"];
+            std::string args = tc["function"]["arguments"];
+            std::string id = tc["id"];
+            callback(CallbackEvent::TOOL_CALL, args, name, id);
+        }
     } else {
         // System message - no generation, just success
         callback(CallbackEvent::STOP, "system", "", "");

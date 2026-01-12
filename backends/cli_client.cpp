@@ -8,7 +8,7 @@ extern std::unique_ptr<Config> config;
 
 CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, EventCallback callback)
     : Backend(0, session, callback), base_url(url) {
-    is_local = false;
+    is_gpu = false;  // API backend (CLI client to remote server)
     sse_handles_output = true;
     http_client = std::make_unique<HttpClient>();
 
@@ -241,16 +241,22 @@ void CLIClientBackend::sse_listener_thread() {
                                 }
                             } catch (...) {}
                         }
-                        // Use callback with TOOL_CALL event
-                        callback(CallbackEvent::TOOL_CALL, args_str, tool_name, "");
+                        // Display-only tool call (server executes it, not us)
+                        callback(CallbackEvent::TOOL_DISP, args_str, tool_name, "");
                     } else if (event_type == "tool_result") {
                         bool success = event_data.value("success", true);
                         std::string result_str = success ? "Success" : ("Error: " + event_data.value("error", "Unknown"));
-                        callback(CallbackEvent::TOOL_RESULT, result_str, event_data.value("tool_name", ""), "");
+                        // Display-only tool result
+                        callback(CallbackEvent::RESULT_DISP, result_str, event_data.value("tool_name", ""), "");
                     } else if (event_type == "delta") {
                         std::string delta = event_data.value("delta", "");
                         if (!delta.empty()) {
                             callback(CallbackEvent::CONTENT, delta, "", "");
+                        }
+                    } else if (event_type == "codeblock") {
+                        std::string content = event_data.value("content", "");
+                        if (!content.empty()) {
+                            callback(CallbackEvent::CODEBLOCK, content, "", "");
                         }
                     } else if (event_type == "response_complete") {
                         callback(CallbackEvent::STOP, "stop", "", "");

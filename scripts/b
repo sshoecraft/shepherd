@@ -1,6 +1,6 @@
 
 doit() {
-	. ~/venv/bin/activate
+	. ~/venvs/tensorrt/bin/activate
 #	CUDA_VISIBLE_DEVICES=1,2
 	./build_engine.py "$@" 2>&1 | tee build.log
 }
@@ -11,4 +11,6 @@ doit() {
 #doit ~/models/TinyLlama-1.1B-Chat-v1.0 --max_seq_len 2048 --clean
 #doit ~/models/Qwen3-Coder-30B-A3B-Instruct --max_seq_len 131072 --tp 1 --pp 3
 
-doit ~/models/MindLink-72B-0801 --output_dir ~/models/MindLink-72B-0801_engine --max_seq_len 32768 --workers 1 --tp 1 --pp 3 --quant int8 --cpu --clean
+#doit ~/models/MindLink-72B-0801 --output_dir ~/models/MindLink-72B-0801_engine --max_seq_len 32768 --workers 1 --tp 1 --pp 3 --quant int8 --cpu --clean
+ #--quant int8 --cpu --clean
+doit ~/.cache/huggingface/hub/models--openai--gpt-oss-120b/ --output_dir ~/models/gpt-oss-120b_engine --max_seq_len 65536 --workers 1 --tp 4 --pp 1

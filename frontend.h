@@ -31,6 +31,8 @@ inline FrontendColor get_color_for_event(CallbackEvent event) {
         case CallbackEvent::USER_PROMPT:  return FrontendColor::GREEN;
         case CallbackEvent::TOOL_CALL:    return FrontendColor::YELLOW;
         case CallbackEvent::TOOL_RESULT:  return FrontendColor::GREEN;
+        case CallbackEvent::TOOL_DISP:    return FrontendColor::YELLOW;  // Same as TOOL_CALL
+        case CallbackEvent::RESULT_DISP:  return FrontendColor::GREEN;   // Same as TOOL_RESULT
         case CallbackEvent::ERROR:        return FrontendColor::RED;
         case CallbackEvent::SYSTEM:       return FrontendColor::RED;
         case CallbackEvent::THINKING:     return FrontendColor::GRAY;
@@ -51,6 +53,8 @@ inline int get_indent_for_event(CallbackEvent event) {
         case CallbackEvent::ERROR:        return 0;
         case CallbackEvent::TOOL_CALL:    return 2;  // "  read(...)"
         case CallbackEvent::TOOL_RESULT:  return 4;  // "    Output: ..."
+        case CallbackEvent::TOOL_DISP:    return 2;  // Same as TOOL_CALL
+        case CallbackEvent::RESULT_DISP:  return 4;  // Same as TOOL_RESULT
         case CallbackEvent::CONTENT:      return 2;  // Assistant response
         case CallbackEvent::THINKING:     return 2;
         case CallbackEvent::CODEBLOCK:    return 4;
@@ -134,12 +138,12 @@ public:
     /// API server does NOT use this - it returns tool calls to the client.
     /// @param tools The Tools instance
     /// @param tool_name Name of the tool to execute
-    /// @param parameters Tool parameters
+    /// @param params_json Tool parameters as JSON string
     /// @param tool_call_id Tool call ID for correlation
     /// @return ToolResult with success/summary/error for display
     ToolResult execute_tool(Tools& tools,
                             const std::string& tool_name,
-                            const std::map<std::string, std::any>& parameters,
+                            const std::string& params_json,
                             const std::string& tool_call_id);
 
     // Session owned by frontend (source of truth for conversation state)

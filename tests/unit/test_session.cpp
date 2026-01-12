@@ -182,15 +182,15 @@ TEST(SessionTest, SamplingParameterDefaults) {
     Session session;
 
     // All sampling parameters should be "unset" (negative values)
-    EXPECT_LT(session.temperature, 0);
-    EXPECT_LT(session.top_p, 0);
-    EXPECT_LT(session.top_k, 0);
-    EXPECT_LT(session.min_p, 0);
-    EXPECT_LT(session.repetition_penalty, 0);
-    EXPECT_EQ(session.presence_penalty, -999.0f);
-    EXPECT_EQ(session.frequency_penalty, -999.0f);
-    EXPECT_EQ(session.length_penalty, -999.0f);
-    EXPECT_LT(session.no_repeat_ngram_size, 0);
+    EXPECT_LT(session.sampling.temperature, 0);
+    EXPECT_LT(session.sampling.top_p, 0);
+    EXPECT_LT(session.sampling.top_k, 0);
+    EXPECT_LT(session.sampling.min_p, 0);
+    EXPECT_LT(session.sampling.repetition_penalty, 0);
+    EXPECT_EQ(session.sampling.presence_penalty, -999.0f);
+    EXPECT_EQ(session.sampling.frequency_penalty, -999.0f);
+    EXPECT_EQ(session.sampling.length_penalty, -999.0f);
+    EXPECT_LT(session.sampling.no_repeat_ngram_size, 0);
 }
 
 // =============================================================================

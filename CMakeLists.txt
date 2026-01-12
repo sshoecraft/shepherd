@@ -83,16 +83,20 @@ endif()
 # CLI client backend (always available - simple HTTP)
 list(APPEND SHEPHERD_SOURCES backends/cli_client.cpp)
 
+# GPU backend base class and shared code (needed by both llamacpp and tensorrt)
+if(ENABLE_LLAMACPP OR ENABLE_TENSORRT)
+    list(APPEND SHEPHERD_SOURCES
+        backends/gpu.cpp
+        backends/chat_template.cpp
+    )
+endif()
+
 if(ENABLE_TENSORRT)
     list(APPEND SHEPHERD_SOURCES backends/tensorrt.cpp)
 endif()
 
 if(ENABLE_LLAMACPP)
-    list(APPEND SHEPHERD_SOURCES
-        backends/llamacpp.cpp
-        backends/chat_template.cpp
-        backends/channel_parser.cpp
-    )
+    list(APPEND SHEPHERD_SOURCES backends/llamacpp.cpp)
 endif()
 
 # Main executable
@@ -189,7 +193,7 @@ target_link_libraries(shepherd PRIVATE
     OpenSSL::Crypto
     pthread
     dl
-    ncurses
+    ncursesw
 )
 
 # TensorRT-LLM library from pip installation
@@ -367,6 +371,19 @@ add_subdirectory(vendor/replxx)
 target_link_libraries(shepherd PRIVATE replxx)
 target_include_directories(shepherd PRIVATE vendor/replxx/include)
 message(STATUS "Using replxx for line editing")
+
+# Streaming parsers for output processing
+# GenericParser: For non-harmony models (tool calls, thinking tags)
+# HarmonyParser: O(n) parser for GPT-OSS channel format
+# Legacy harmony.cpp: Still included for backward compatibility (will be removed)
+if(ENABLE_LLAMACPP OR ENABLE_TENSORRT)
+    target_sources(shepherd PRIVATE
+        backends/generic_parser.cpp
+        backends/harmony_parser.cpp
+        backends/harmony.cpp
+    )
+    message(STATUS "Using streaming parsers (GenericParser, HarmonyParser)")
+endif()
 
 # Compiler options
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

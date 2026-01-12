@@ -92,6 +92,14 @@ protected:
     /// @brief Flag to track if we've tested streaming capability
     bool streaming_tested = false;
 
+    /// @brief Output content through common filter (backticks, buffering)
+    /// API backends call this for streaming output
+    /// @param text Text to output
+    /// @param len Length of text
+    /// @return true to continue, false if callback requested cancellation
+    bool output(const char* text, size_t len);
+    bool output(const std::string& text) { return output(text.c_str(), text.length()); }
+
     /// @brief Calibrate token counts by sending probe messages
     /// Sends system+"." and system+tools+"." to get exact token counts
     /// Backend-agnostic, uses build_request() to format requests

@@ -27,9 +27,9 @@ ModelConfig Models::detect_from_chat_template(const std::string& template_text, 
         return config;
     }
 
-    // Return GENERIC - caller should try config.json before path analysis
+    // Return config (may have thinking markers even if family is GENERIC)
     dout(1) << "Chat template detection returned generic, caller should try config.json" << std::endl;
-    return ModelConfig::create_generic();
+    return config;
 }
 
 ModelConfig Models::detect_from_model_path(const std::string& model_path) {
@@ -210,16 +210,7 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
                 version = "3";
             }
 
-            // Check if this is a thinking model by looking for <think> in the template
-            // Don't assume based on model name - check the actual template content
-            bool is_thinking = (template_text.find("<think>") != std::string::npos) ||
-                               (template_text.find("</think>") != std::string::npos) ||
-                               (model_lower.find("thinking") != std::string::npos);
-            if (is_thinking) {
-                dout(1) << "Detected Thinking model variant" << std::endl;
-            }
-
-            return ModelConfig::create_qwen_3x(version, is_thinking);
+            return ModelConfig::create_qwen_3x(version);
         } else {
             dout(1) << "Detected Qwen 2.x model family from chat template" << std::endl;
 
@@ -239,8 +230,20 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
         return ModelConfig::create_gpt_oss();
     }
 
-    // No match - return generic
-    return ModelConfig::create_generic();
+    // No match - return generic, but check for thinking markers
+    ModelConfig config = ModelConfig::create_generic();
+
+    // Detect thinking markers from template content
+    // If template references </think>, this model supports thinking mode
+    // (Template may only have </think> for stripping thinking from history)
+    if (template_text.find("</think>") != std::string::npos) {
+        dout(1) << "Detected thinking support (</think> in template)" << std::endl;
+        config.thinking_start_markers = {"<think>"};
+        config.thinking_end_markers = {"</think>"};
+        config.supports_thinking_mode = true;
+    }
+
+    return config;
 }
 
 ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
@@ -286,13 +289,7 @@ ModelConfig Models::detect_from_path_analysis(const std::string& model_path) {
         if (version.empty()) {
             version = "3";
         }
-        // Only detect thinking mode if "thinking" is in the name
-        // Path-based detection can't check template content, so be conservative
-        bool is_thinking = (model_lower.find("thinking") != std::string::npos);
-        if (is_thinking) {
-            dout(1) << "Detected Thinking model variant from path" << std::endl;
-        }
-        return ModelConfig::create_qwen_3x(version, is_thinking);
+        return ModelConfig::create_qwen_3x(version);
     }
 
     // Qwen 2.x detection

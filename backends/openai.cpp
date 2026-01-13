@@ -1263,8 +1263,8 @@ void OpenAIBackend::add_message(Session& session,
 
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     // Check prerequisites for making API call
-    if (!http_client || api_key.empty()) {
-        dout(1) << "HTTP client or API key not available for model query" << std::endl;
+    if (!http_client) {
+        dout(1) << "HTTP client not available for model query" << std::endl;
         return 0;
     }
 

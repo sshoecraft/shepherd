@@ -228,7 +228,7 @@ bool Server::check_auth(const httplib::Request& req, httplib::Response& res) {
         res.status = 401;
         json error = {
             {"error", {
-                {"message", "Missing Authorization header"},
+                {"message", "API key required"},
                 {"type", "authentication_error"},
                 {"code", "401"}
             }}
@@ -242,7 +242,7 @@ bool Server::check_auth(const httplib::Request& req, httplib::Response& res) {
         res.status = 401;
         json error = {
             {"error", {
-                {"message", "Invalid Authorization header format. Expected: Bearer <api_key>"},
+                {"message", "Invalid API key format"},
                 {"type", "authentication_error"},
                 {"code", "401"}
             }}

@@ -3,6 +3,7 @@
 
 #include "harmony_parser.h"
 #include "../tools/tool_parser.h"
+#include "../shepherd.h"  // for dout
 #include <algorithm>
 #include <regex>
 
@@ -12,6 +13,7 @@ void HarmonyParser::reset() {
     parse_state = ParseState::EXPECT_START;
     current_channel = Channel::NONE;
     tool_recipient.clear();
+    constraint_type.clear();
 
     char_state = CharState::NORMAL;
     marker_buffer.clear();
@@ -51,16 +53,20 @@ bool HarmonyParser::process(const std::string& token) {
 
     // Flush content buffer for streaming - move accumulated content to pending
     // This ensures content is available via get_content_delta() after each token
-    // BUT: Don't flush COMMENTARY with tool_recipient - that's a tool call, not content
+    // BUT: Don't flush if tool_recipient is set - that's a tool call, keep for parsing
+    // Note: Tool calls can appear in both analysis and commentary channels
+    // (per vLLM and llama.cpp implementations)
     if (parse_state == ParseState::CONTENT && !content_buffer.empty()) {
-        if (current_channel == Channel::ANALYSIS) {
+        if (!tool_recipient.empty()) {
+            // Tool call in progress - keep content_buffer for tool call parsing
+        } else if (current_channel == Channel::ANALYSIS) {
             pending_reasoning += content_buffer;
             content_buffer.clear();
         } else if (current_channel == Channel::FINAL) {
             pending_content += content_buffer;
             content_buffer.clear();
         }
-        // COMMENTARY with tool_recipient: keep in content_buffer for tool call parsing
+        // COMMENTARY without tool_recipient: keep in content_buffer (might be preamble)
     }
 
     return false;
@@ -249,8 +255,14 @@ void HarmonyParser::handle_marker(const std::string& marker_name) {
     } else if (marker_name == "call") {
         // <|call|> - Tool call, stop generation
         // The tool call should have been parsed from content
+        dout(2) << "HarmonyParser: <|call|> detected, tool_recipient='" << tool_recipient
+                << "', content_buffer length=" << content_buffer.length() << std::endl;
         if (!tool_recipient.empty()) {
             parse_tool_call_from_buffer();
+        } else {
+            dout(1) << "HarmonyParser: WARNING - <|call|> with empty tool_recipient, tool call dropped!" << std::endl;
+            dout(2) << "HarmonyParser: header_buffer was: " << header_buffer << std::endl;
+            dout(2) << "HarmonyParser: content_buffer was: " << content_buffer.substr(0, 200) << std::endl;
         }
         content_buffer.clear();
         parse_state = ParseState::EXPECT_START;
@@ -283,14 +295,36 @@ void HarmonyParser::extract_channel_from_header() {
     // "assistant<|channel|>analysis"
     // "assistant<|channel|>final"
     // "assistant<|channel|>commentary to=functions.tool_name"
+    // "assistant<|channel|>analysis to=functions.bash code"
+
+    dout(2) << "HarmonyParser: extract_channel_from_header: '" << header_buffer << "'" << std::endl;
 
     // Check for tool recipient pattern: "to=functions.X"
     static const std::regex recipient_regex("to=functions\\.([^<\\s]+)");
     std::smatch match;
     if (std::regex_search(header_buffer, match, recipient_regex)) {
         tool_recipient = match[1].str();
+        dout(2) << "HarmonyParser: found tool_recipient='" << tool_recipient << "'" << std::endl;
     } else {
         tool_recipient.clear();
+    }
+
+    // Check for built-in tool recipients that we don't support
+    static const std::regex builtin_regex("to=(browser\\.[^<\\s]+|python)");
+    if (std::regex_search(header_buffer, match, builtin_regex)) {
+        std::string builtin_tool = match[1].str();
+        dout(0) << "WARNING: Model tried to call built-in tool '" << builtin_tool
+                << "' which is not supported. Tool call will be ignored." << std::endl;
+        // Don't set tool_recipient - this will cause the call to be ignored
+    }
+
+    // Extract constraint type (json or code) - appears at end of header
+    static const std::regex constraint_regex("\\b(json|code)\\s*$");
+    if (std::regex_search(header_buffer, match, constraint_regex)) {
+        constraint_type = match[1].str();
+        dout(2) << "HarmonyParser: found constraint_type='" << constraint_type << "'" << std::endl;
+    } else {
+        constraint_type = "json";  // default
     }
 
     // Extract channel type

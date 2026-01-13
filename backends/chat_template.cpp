@@ -591,11 +591,16 @@ std::string MinjaTemplate::render_via_minja(
     context->set("enable_thinking", minja::Value(thinking_enabled));
     context->set("thinking", minja::Value(thinking_enabled));
 
-    // GPT-OSS reasoning_effort: high when thinking enabled, low when disabled
+    // GPT-OSS reasoning_effort: high when thinking enabled, model default (medium) otherwise
     // From: https://huggingface.co/blog/welcome-openai-gpt-oss#system-and-developer-messages
-    std::string reasoning_effort = thinking_enabled ? "high" : "low";
-    context->set("reasoning_effort", minja::Value(reasoning_effort));
-    dout(1) << "GPT-OSS reasoning_effort set to: " << reasoning_effort << std::endl;
+    // Only set reasoning_effort when thinking is explicitly enabled
+    if (thinking_enabled) {
+        context->set("reasoning_effort", minja::Value("high"));
+        dout(1) << "GPT-OSS reasoning_effort set to: high" << std::endl;
+    } else {
+        // Don't set reasoning_effort - let model use its default (medium)
+        dout(1) << "GPT-OSS reasoning_effort not set, using model default (medium)" << std::endl;
+    }
 
     // Add tools if present
     if (!tools.empty()) {

@@ -195,6 +195,11 @@ protected:
     std::string think_tag_buffer;  // Accumulates potential <think> or </think> tag
     bool in_think_block = false;   // Inside <think>...</think> block
 
+    // LaTeX to Unicode conversion state
+    std::string latex_buffer;      // Accumulates potential LaTeX sequence (starts with \)
+    int latex_brace_depth = 0;     // Depth of {} braces to skip after LaTeX commands
+    bool convert_latex = true;     // Convert LaTeX to Unicode (disable for API backends)
+
     // UTF-8 handling
     std::string utf8_incomplete;   // Incomplete UTF-8 sequence from previous chunk
 

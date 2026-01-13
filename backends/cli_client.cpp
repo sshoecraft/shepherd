@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "sse_parser.h"
 #include "nlohmann/json.hpp"
+#include "ansi.h"
 #include <sstream>
 
 extern std::unique_ptr<Config> config;
@@ -60,12 +61,13 @@ CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, Eve
                 Message::Role msg_type = Message::ASSISTANT;
 
                 if (role == "user") {
-                    msg_output = "> " + content + "\n";
-                    msg_type = Message::USER;
+                    // Use ANSI green for user prompts (CLI ignores USER_PROMPT callback)
+                    std::cout << ANSI_FG_GREEN << "> " << content << ANSI_RESET << std::endl;
+                    continue;
                 } else if (role == "assistant") {
                     // Check if this is a tool call message (OpenAI format)
                     if (msg.contains("tool_calls") && msg["tool_calls"].is_array() && !msg["tool_calls"].empty()) {
-                        // Display tool calls in format: * tool_name(param=value, ...)
+                        // Display tool calls via callback for consistent formatting
                         for (const auto& tc : msg["tool_calls"]) {
                             std::string tool_name = "tool";
                             std::string tool_args_str;
@@ -101,7 +103,7 @@ CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, Eve
                                     }
                                 }
                             }
-                            std::cout << "  * " + tool_name + "(" + tool_args_str + ")\n";
+                            callback(CallbackEvent::TOOL_DISP, tool_args_str, tool_name, "");
                         }
                         continue;  // Don't output content for tool call messages
                     }
@@ -129,23 +131,27 @@ CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, Eve
                                     if (i > 0) tool_args_str += ", ";
                                     tool_args_str += parts[i];
                                 }
-                                std::cout << "  * " + tool_name + "(" + tool_args_str + ")\n";
+                                callback(CallbackEvent::TOOL_DISP, tool_args_str, tool_name, "");
                                 continue;
                             }
                         } catch (...) {
                             // Not valid JSON, treat as normal content
                         }
                     }
-                    msg_output = "  " + content + "\n";  // Indent assistant
-                    msg_type = Message::ASSISTANT;
+                    // Route through filter() to handle thinking blocks
+                    reset_output_state();
+                    filter(content.c_str(), content.length());
+                    flush_output();
+                    callback(CallbackEvent::STOP, "", "", "");  // Signal end of this message
+                    continue;  // Skip the msg_output path
                 } else if (role == "tool") {
-                    // Tool result - show error message or success checkmark
+                    // Tool result - use callback for consistent formatting
                     if (content.rfind("Error: ", 0) == 0) {
-                        msg_output = "    " + content + "\n";
+                        callback(CallbackEvent::RESULT_DISP, content, "error", "");
                     } else {
-                        msg_output = "    ✓ Success\n";
+                        callback(CallbackEvent::RESULT_DISP, "Success", "", "");
                     }
-                    msg_type = Message::TOOL_RESPONSE;
+                    continue;
                 }
                 // Skip system messages - they're huge and not useful to display
 

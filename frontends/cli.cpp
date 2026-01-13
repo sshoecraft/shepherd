@@ -358,6 +358,9 @@ const char* CLI::ansi_color(CallbackEvent event) {
 void CLI::write_colored(const std::string& text, CallbackEvent type) {
     if (text.empty()) return;
 
+    // Format assistant content (LaTeX → Unicode, table alignment)
+    std::string formatted = (type == CallbackEvent::CONTENT) ? format_output(text) : text;
+
     // Get indent from centralized config (frontend.h)
     int indent_spaces = get_indent_for_event(type);
     std::string indent(indent_spaces, ' ');
@@ -368,23 +371,23 @@ void CLI::write_colored(const std::string& text, CallbackEvent type) {
     // Output with indentation at line starts
     // Process line-by-line to handle indentation while preserving UTF-8
     size_t pos = 0;
-    while (pos < text.length()) {
+    while (pos < formatted.length()) {
         // Add indentation at line starts
-        if (at_line_start && text[pos] != '\n' && !indent.empty()) {
+        if (at_line_start && formatted[pos] != '\n' && !indent.empty()) {
             printf("%s", indent.c_str());
             at_line_start = false;
         }
 
         // Find end of current line (or end of text)
-        size_t line_end = text.find('\n', pos);
+        size_t line_end = formatted.find('\n', pos);
         if (line_end == std::string::npos) {
             // No newline - print rest of text
-            printf("%s%s%s", color, text.substr(pos).c_str(), reset);
+            printf("%s%s%s", color, formatted.substr(pos).c_str(), reset);
             at_line_start = false;
             break;
         } else {
             // Print up to and including the newline
-            printf("%s%s%s", color, text.substr(pos, line_end - pos + 1).c_str(), reset);
+            printf("%s%s%s", color, formatted.substr(pos, line_end - pos + 1).c_str(), reset);
             at_line_start = true;
             pos = line_end + 1;
         }

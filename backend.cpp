@@ -1,12 +1,82 @@
 
 #include "shepherd.h"
 #include "backend.h"
+#include <unordered_map>
+
+// LaTeX symbol to Unicode mapping
+static const std::unordered_map<std::string, std::string> latex_symbols = {
+    // Greek letters
+    {"\\alpha", "α"}, {"\\beta", "β"}, {"\\gamma", "γ"}, {"\\delta", "δ"},
+    {"\\epsilon", "ε"}, {"\\zeta", "ζ"}, {"\\eta", "η"}, {"\\theta", "θ"},
+    {"\\iota", "ι"}, {"\\kappa", "κ"}, {"\\lambda", "λ"}, {"\\mu", "μ"},
+    {"\\nu", "ν"}, {"\\xi", "ξ"}, {"\\pi", "π"}, {"\\rho", "ρ"},
+    {"\\sigma", "σ"}, {"\\tau", "τ"}, {"\\upsilon", "υ"}, {"\\phi", "φ"},
+    {"\\chi", "χ"}, {"\\psi", "ψ"}, {"\\omega", "ω"},
+    {"\\Gamma", "Γ"}, {"\\Delta", "Δ"}, {"\\Theta", "Θ"}, {"\\Lambda", "Λ"},
+    {"\\Xi", "Ξ"}, {"\\Pi", "Π"}, {"\\Sigma", "Σ"}, {"\\Phi", "Φ"},
+    {"\\Psi", "Ψ"}, {"\\Omega", "Ω"},
+
+    // Arrows
+    {"\\to", "→"}, {"\\rightarrow", "→"}, {"\\leftarrow", "←"},
+    {"\\leftrightarrow", "↔"}, {"\\Rightarrow", "⇒"}, {"\\Leftarrow", "⇐"},
+    {"\\Leftrightarrow", "⇔"}, {"\\mapsto", "↦"}, {"\\uparrow", "↑"},
+    {"\\downarrow", "↓"}, {"\\nearrow", "↗"}, {"\\searrow", "↘"},
+    {"\\xrightarrow", "→"}, {"\\xleftarrow", "←"},  // Extended arrows (ignore annotation)
+
+    // Operators and relations
+    {"\\times", "×"}, {"\\div", "÷"}, {"\\pm", "±"}, {"\\mp", "∓"},
+    {"\\cdot", "·"}, {"\\ast", "∗"}, {"\\star", "⋆"},
+    {"\\leq", "≤"}, {"\\le", "≤"}, {"\\geq", "≥"}, {"\\ge", "≥"},
+    {"\\neq", "≠"}, {"\\ne", "≠"}, {"\\approx", "≈"}, {"\\equiv", "≡"},
+    {"\\sim", "∼"}, {"\\simeq", "≃"}, {"\\cong", "≅"},
+    {"\\subset", "⊂"}, {"\\supset", "⊃"}, {"\\subseteq", "⊆"}, {"\\supseteq", "⊇"},
+    {"\\in", "∈"}, {"\\notin", "∉"}, {"\\ni", "∋"},
+    {"\\cap", "∩"}, {"\\cup", "∪"}, {"\\setminus", "∖"},
+    {"\\land", "∧"}, {"\\lor", "∨"}, {"\\neg", "¬"}, {"\\lnot", "¬"},
+    {"\\forall", "∀"}, {"\\exists", "∃"}, {"\\nexists", "∄"},
+
+    // Brackets and delimiters
+    {"\\langle", "⟨"}, {"\\rangle", "⟩"},
+    {"\\lfloor", "⌊"}, {"\\rfloor", "⌋"},
+    {"\\lceil", "⌈"}, {"\\rceil", "⌉"},
+    {"\\|", "‖"},
+
+    // Miscellaneous
+    {"\\infty", "∞"}, {"\\partial", "∂"}, {"\\nabla", "∇"},
+    {"\\sum", "∑"}, {"\\prod", "∏"}, {"\\int", "∫"},
+    {"\\sqrt", "√"}, {"\\angle", "∠"}, {"\\degree", "°"},
+    {"\\circ", "∘"}, {"\\bullet", "•"}, {"\\ldots", "…"}, {"\\cdots", "⋯"},
+    {"\\vdots", "⋮"}, {"\\ddots", "⋱"},
+    {"\\emptyset", "∅"}, {"\\varnothing", "∅"},
+    {"\\prime", "′"}, {"\\dagger", "†"}, {"\\ddagger", "‡"},
+    {"\\ell", "ℓ"}, {"\\hbar", "ℏ"}, {"\\Re", "ℜ"}, {"\\Im", "ℑ"},
+
+    // Spacing (convert to space or empty)
+    {"\\,", " "}, {"\\;", " "}, {"\\:", " "}, {"\\!", ""},
+    {"\\quad", "  "}, {"\\qquad", "    "},
+    {"\\ ", " "},
+
+    // Display/inline math delimiters (remove entirely)
+    {"\\[", ""}, {"\\]", ""}, {"\\(", ""}, {"\\)", ""},
+
+    // Common escapes
+    {"\\{", "{"}, {"\\}", "}"}, {"\\%", "%"}, {"\\$", "$"},
+    {"\\&", "&"}, {"\\#", "#"},
+
+    // Structural commands (remove, let brace content flow through)
+    {"\\frac", ""}, {"\\text", ""}, {"\\textbf", ""}, {"\\textit", ""},
+    {"\\mathrm", ""}, {"\\mathbf", ""}, {"\\mathit", ""}, {"\\mathcal", ""},
+    {"\\mathbb", ""}, {"\\left", ""}, {"\\right", ""}, {"\\big", ""},
+    {"\\Big", ""}, {"\\bigg", ""}, {"\\Bigg", ""},
+};
 
 Backend::Backend(size_t ctx_size, Session& session, EventCallback cb)
     : context_size(ctx_size), callback(cb) {
     if (!callback) {
         throw std::invalid_argument("Internal error: callback not passed to backend constructor");
     }
+    // Disable LaTeX conversion in server mode - UIs like OpenWebUI render LaTeX themselves
+    convert_latex = !g_server_mode;
 }
 
 // Flush the output buffer to callback
@@ -29,6 +99,8 @@ void Backend::reset_output_state() {
     skip_to_newline = false;
     think_tag_buffer.clear();
     in_think_block = false;
+    latex_buffer.clear();
+    latex_brace_depth = 0;
     utf8_incomplete.clear();
 }
 
@@ -64,12 +136,41 @@ static size_t validate_utf8(const std::string& text) {
     return len;  // No incomplete sequence found
 }
 
+// Try to match latex_buffer against known symbols
+// Returns (found, unicode) - found=true means in table (even if unicode is empty)
+static std::pair<bool, std::string> lookup_latex(const std::string& seq) {
+    auto it = latex_symbols.find(seq);
+    if (it != latex_symbols.end()) {
+        return {true, it->second};
+    }
+    return {false, ""};
+}
+
+// Find longest prefix of seq that matches a known symbol
+// Returns (unicode, chars_consumed) or ("", 0) if no match
+static std::pair<std::string, size_t> lookup_latex_prefix(const std::string& seq) {
+    // Try longest to shortest
+    for (size_t len = seq.length(); len >= 2; len--) {
+        std::string prefix = seq.substr(0, len);
+        auto it = latex_symbols.find(prefix);
+        if (it != latex_symbols.end()) {
+            return {it->second, len};
+        }
+    }
+    return {"", 0};
+}
+
 // Flush any pending output (called at end of generation)
 void Backend::flush_output() {
     // Flush any partial backticks as content
     if (!backtick_buffer.empty()) {
         output_buffer += backtick_buffer;
         backtick_buffer.clear();
+    }
+    // Flush any partial latex as content
+    if (!latex_buffer.empty()) {
+        output_buffer += latex_buffer;
+        latex_buffer.clear();
     }
     flush_filter_buffer();
 }
@@ -154,6 +255,114 @@ bool Backend::filter(const char* text, size_t len) {
         // If in think block and thinking disabled, suppress content
         if (in_think_block && config && !config->thinking) {
             continue;
+        }
+
+        // LaTeX to Unicode conversion (skip inside code blocks)
+        // convert_latex is set false in server mode (UIs like OpenWebUI render LaTeX themselves)
+        if (!in_code_block && convert_latex) {
+            // If we have a pending latex command and see a new backslash, finalize it first
+            if (c == '\\' && !latex_buffer.empty()) {
+                auto it = latex_symbols.find(latex_buffer);
+                if (it != latex_symbols.end()) {
+                    output_buffer += it->second;
+                } else {
+                    auto [prefix_unicode, consumed] = lookup_latex_prefix(latex_buffer);
+                    if (consumed > 0) {
+                        output_buffer += prefix_unicode;
+                        output_buffer += latex_buffer.substr(consumed);
+                    } else {
+                        output_buffer += latex_buffer;
+                    }
+                }
+                latex_buffer.clear();
+            }
+
+            // Start of potential LaTeX sequence
+            if (c == '\\' && latex_buffer.empty()) {
+                latex_buffer = "\\";
+                continue;
+            }
+
+            // Track braces after LaTeX commands (skip { and } but keep content)
+            if (latex_brace_depth > 0) {
+                if (c == '{') {
+                    latex_brace_depth++;
+                    continue;  // Skip opening brace
+                } else if (c == '}') {
+                    latex_brace_depth--;
+                    continue;  // Skip closing brace
+                }
+                // Content inside braces flows through normally (but LaTeX inside is still processed above)
+            }
+
+            // Accumulating LaTeX sequence
+            if (!latex_buffer.empty()) {
+                // Check what kind of sequence this could be
+                if (latex_buffer.length() == 1) {
+                    // Just saw backslash - check for single-char escapes or start of command
+                    if (c == '[' || c == ']' || c == '(' || c == ')' ||
+                        c == '{' || c == '}' || c == '%' || c == '$' ||
+                        c == '&' || c == '#' || c == '|' || c == ' ' ||
+                        c == ',' || c == ';' || c == ':' || c == '!') {
+                        // Single-char escape - look it up
+                        latex_buffer += c;
+                        auto [found, unicode] = lookup_latex(latex_buffer);
+                        if (found) {
+                            output_buffer += unicode;  // May be empty (delete sequence)
+                        } else {
+                            output_buffer += latex_buffer;  // Not in table, emit as-is
+                        }
+                        latex_buffer.clear();
+                        continue;
+                    } else if (std::isalpha(c)) {
+                        // Start of command name
+                        latex_buffer += c;
+                        continue;
+                    } else {
+                        // Not a valid LaTeX sequence, flush backslash
+                        output_buffer += latex_buffer;
+                        latex_buffer.clear();
+                        // Fall through to process current char normally
+                    }
+                } else {
+                    // In a command name - keep accumulating letters
+                    if (std::isalpha(c) && latex_buffer.length() < 20) {
+                        latex_buffer += c;
+                        continue;
+                    }
+
+                    // End of command name (non-alpha or too long) - find best match
+                    auto it = latex_symbols.find(latex_buffer);
+                    if (it != latex_symbols.end()) {
+                        // Exact match
+                        output_buffer += it->second;
+                    } else {
+                        // Try prefix match (e.g., \textIndex -> \text + Index)
+                        auto [prefix_unicode, consumed] = lookup_latex_prefix(latex_buffer);
+                        if (consumed > 0) {
+                            output_buffer += prefix_unicode;
+                            output_buffer += latex_buffer.substr(consumed);
+                        } else {
+                            output_buffer += latex_buffer;  // No match, emit as-is
+                        }
+                    }
+                    latex_buffer.clear();
+
+                    // Start tracking braces after commands
+                    if (c == '{') {
+                        latex_brace_depth = 1;
+                        continue;
+                    }
+                    // Fall through to process current char normally
+                }
+            }
+        } else {
+            // Inside code block - flush any pending latex state
+            if (!latex_buffer.empty()) {
+                output_buffer += latex_buffer;
+                latex_buffer.clear();
+            }
+            latex_brace_depth = 0;
         }
 
         // Track backticks for code block detection (``` toggles code block mode)

@@ -146,6 +146,13 @@ public:
                             const std::string& params_json,
                             const std::string& tool_call_id);
 
+    /// @brief Format output for terminal display
+    /// Converts LaTeX math notation to Unicode and aligns markdown tables.
+    /// Called by CLI/TUI before displaying assistant content.
+    /// @param text Raw text from model (may contain LaTeX/markdown)
+    /// @return Formatted text suitable for terminal display
+    static std::string format_output(const std::string& text);
+
     // Session owned by frontend (source of truth for conversation state)
     Session session;
 

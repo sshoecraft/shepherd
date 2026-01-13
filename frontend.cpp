@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include <algorithm>
 #include <sstream>
+#include <regex>
 
 // Use config->thinking instead of g_show_thinking
 
@@ -392,4 +393,175 @@ bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {
 
     // Command not recognized
     return false;
+}
+
+// ============================================================================
+// Output formatting (markdown table alignment)
+// LaTeX → Unicode conversion is now handled in Backend::filter()
+// ============================================================================
+
+namespace {
+
+// Get display width of a UTF-8 string (accounting for wide chars)
+size_t display_width(const std::string& s) {
+    size_t width = 0;
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        if ((c & 0x80) == 0) {
+            // ASCII
+            width++;
+            i++;
+        } else if ((c & 0xE0) == 0xC0) {
+            // 2-byte UTF-8
+            width++;
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            // 3-byte UTF-8 (includes CJK which are typically double-width)
+            // For simplicity, assume single width; could check ranges for CJK
+            width++;
+            i += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            // 4-byte UTF-8
+            width++;
+            i += 4;
+        } else {
+            width++;
+            i++;
+        }
+    }
+    return width;
+}
+
+// Trim whitespace from both ends
+std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t");
+    return s.substr(start, end - start + 1);
+}
+
+// Format markdown tables with aligned columns
+std::string format_tables(const std::string& text) {
+    std::istringstream iss(text);
+    std::ostringstream oss;
+    std::string line;
+    std::vector<std::string> table_lines;
+    bool in_table = false;
+
+    auto flush_table = [&]() {
+        if (table_lines.empty()) return;
+
+        // Parse table into cells
+        std::vector<std::vector<std::string>> rows;
+        size_t max_cols = 0;
+
+        for (const auto& tl : table_lines) {
+            std::vector<std::string> cells;
+            std::istringstream row_stream(tl);
+            std::string cell;
+
+            // Skip leading |
+            if (!tl.empty() && tl[0] == '|') {
+                row_stream.get();
+            }
+
+            while (std::getline(row_stream, cell, '|')) {
+                cells.push_back(trim(cell));
+            }
+
+            // Remove empty last cell from trailing |
+            if (!cells.empty() && cells.back().empty()) {
+                cells.pop_back();
+            }
+
+            if (!cells.empty()) {
+                rows.push_back(cells);
+                max_cols = std::max(max_cols, cells.size());
+            }
+        }
+
+        if (rows.empty()) {
+            for (const auto& tl : table_lines) oss << tl << "\n";
+            table_lines.clear();
+            return;
+        }
+
+        // Calculate column widths
+        std::vector<size_t> col_widths(max_cols, 0);
+        for (const auto& row : rows) {
+            for (size_t i = 0; i < row.size(); i++) {
+                col_widths[i] = std::max(col_widths[i], display_width(row[i]));
+            }
+        }
+
+        // Output formatted table
+        for (size_t r = 0; r < rows.size(); r++) {
+            const auto& row = rows[r];
+            oss << "|";
+            for (size_t c = 0; c < max_cols; c++) {
+                std::string cell = (c < row.size()) ? row[c] : "";
+                size_t cell_width = display_width(cell);
+                size_t padding = col_widths[c] - cell_width;
+
+                // Check if this is separator row (all dashes)
+                bool is_sep = !cell.empty() && cell.find_first_not_of("-:") == std::string::npos;
+
+                if (is_sep) {
+                    oss << " " << std::string(col_widths[c], '-') << " |";
+                } else {
+                    oss << " " << cell << std::string(padding, ' ') << " |";
+                }
+            }
+            oss << "\n";
+        }
+
+        table_lines.clear();
+    };
+
+    while (std::getline(iss, line)) {
+        // Check if line looks like a table row (starts with | or contains | ... |)
+        bool is_table_line = false;
+        std::string trimmed = trim(line);
+        if (!trimmed.empty()) {
+            if (trimmed[0] == '|') {
+                is_table_line = true;
+            } else if (trimmed.find('|') != std::string::npos &&
+                       trimmed.find('|') != trimmed.rfind('|')) {
+                // Has at least 2 pipes
+                is_table_line = true;
+            }
+        }
+
+        if (is_table_line) {
+            in_table = true;
+            table_lines.push_back(line);
+        } else {
+            if (in_table) {
+                flush_table();
+                in_table = false;
+            }
+            oss << line << "\n";
+        }
+    }
+
+    // Flush any remaining table
+    if (in_table) {
+        flush_table();
+    }
+
+    std::string result = oss.str();
+    // Remove trailing newline if original didn't have one
+    if (!text.empty() && text.back() != '\n' && !result.empty() && result.back() == '\n') {
+        result.pop_back();
+    }
+
+    return result;
+}
+
+} // anonymous namespace
+
+std::string Frontend::format_output(const std::string& text) {
+    // Format markdown tables (LaTeX is handled in Backend::filter())
+    return format_tables(text);
 }

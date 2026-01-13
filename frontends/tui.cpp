@@ -874,7 +874,13 @@ int TUI::count_input_lines() const {
 }
 
 void TUI::write_output(const std::string& text, CallbackEvent type) {
-    write_output(text.c_str(), text.length(), type);
+    // Format assistant content (LaTeX → Unicode, table alignment)
+    if (type == CallbackEvent::CONTENT) {
+        std::string formatted = format_output(text);
+        write_output(formatted.c_str(), formatted.length(), type);
+    } else {
+        write_output(text.c_str(), text.length(), type);
+    }
 }
 
 void TUI::write_output(const char* text_data, size_t len, CallbackEvent type) {

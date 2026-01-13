@@ -357,7 +357,19 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
     if (cb_success) {
         result["content"] = accumulated_content;
         result["success"] = true;
-        result["summary"] = accumulated_content.substr(0, std::min(size_t(100), accumulated_content.size()));
+        // Count words for summary
+        size_t word_count = 0;
+        bool in_word = false;
+        for (char c : accumulated_content) {
+            if (std::isspace(c)) {
+                in_word = false;
+            } else if (!in_word) {
+                in_word = true;
+                word_count++;
+            }
+        }
+        result["summary"] = std::string("Response: ") + std::to_string(word_count) + " words (" +
+                           std::to_string(accumulated_content.size()) + " chars)";
     } else {
         result["error"] = cb_error.empty() ? "Unknown error" : cb_error;
         result["success"] = false;

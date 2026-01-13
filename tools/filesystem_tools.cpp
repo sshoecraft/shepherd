@@ -1,20 +1,53 @@
 #include "shepherd.h"
 #include "filesystem_tools.h"
 #include "tools.h"
+#include "../llama.cpp/common/base64.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <vector>
+#include <algorithm>
+#include <set>
 
 namespace fs = std::filesystem;
+
+// Binary file detection helpers
+static bool is_binary_extension(const std::string& ext) {
+    static const std::set<std::string> binary_exts = {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+        ".exe", ".dll", ".so", ".dylib", ".bin",
+        ".mp3", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mkv", ".mov",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".db", ".sqlite", ".sqlite3",
+        ".pyc", ".class", ".o", ".obj"
+    };
+    std::string lower_ext = ext;
+    std::transform(lower_ext.begin(), lower_ext.end(), lower_ext.begin(), ::tolower);
+    return binary_exts.count(lower_ext) > 0;
+}
+
+static bool has_binary_content(const std::string& content, size_t check_bytes = 8192) {
+    size_t to_check = std::min(content.size(), check_bytes);
+    for (size_t i = 0; i < to_check; ++i) {
+        unsigned char c = static_cast<unsigned char>(content[i]);
+        // Null byte or other control characters (except tab, newline, carriage return)
+        if (c == 0 || (c < 32 && c != 9 && c != 10 && c != 13)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::vector<ParameterDef> ReadFileTool::get_parameters_schema() const {
     return {
         {"file_path", "string", "path to the file to be read", true, "", "", {}},
-        {"offset", "number", "Optional line number to start reading from (1-indexed)", false, "1", "", {}},
-        {"limit", "number", "Optional number of lines to read (-1 for unlimited)", false, "-1", "", {}}
+        {"offset", "number", "Optional line number to start reading from (1-indexed, text mode only)", false, "1", "", {}},
+        {"limit", "number", "Optional number of lines to read (-1 for unlimited, text mode only)", false, "-1", "", {}},
+        {"encoding", "string", "How to read the file: 'auto' (detect binary and use base64), 'text' (force text, fail on binary), 'base64' (force base64 encoding). Values: auto, text, base64", false, "auto", "", {}}
     };
 }
 
@@ -31,6 +64,12 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
         result["error"] = std::string("file_path is required");
         result["success"] = false;
         return result;
+    }
+
+    // Get encoding parameter (default: auto)
+    std::string encoding = tool_utils::get_string(args, "encoding", "auto");
+    if (encoding != "auto" && encoding != "text" && encoding != "base64") {
+        encoding = "auto";
     }
 
     try {
@@ -50,114 +89,142 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
             return result;
         }
 
-        // Get optional line range parameters
-        // Accept both Claude Code style (offset, limit) and legacy style (start_line, end_line)
-        int start_line = 1;  // Default: start from line 1
-        int limit = -1;      // Default: read to end of file (-1 means unlimited)
+        // Determine if file should be read as binary
+        bool use_base64 = false;
+        std::string file_ext = abs_path.extension().string();
 
-        // Try "offset" first (Claude Code), then "start_line" (legacy)
-        auto offset_it = args.find("offset");
-        if (offset_it != args.end()) {
-            try {
-                start_line = std::any_cast<int>(offset_it->second);
-            } catch (...) {
-                try {
-                    start_line = std::stoi(std::any_cast<std::string>(offset_it->second));
-                } catch (...) {}
+        if (encoding == "base64") {
+            use_base64 = true;
+        } else if (encoding == "auto") {
+            // Check extension first
+            if (is_binary_extension(file_ext)) {
+                use_base64 = true;
             }
+        }
+        // encoding == "text" means force text mode
+
+        if (use_base64) {
+            // Binary mode: read entire file and base64 encode
+            std::ifstream file(abs_path, std::ios::binary);
+            if (!file.is_open()) {
+                result["error"] = std::string("error opening file: ") + path;
+                result["success"] = false;
+                return result;
+            }
+
+            // Read entire file into string
+            std::ostringstream content_stream;
+            content_stream << file.rdbuf();
+            std::string raw_content = content_stream.str();
+
+            // Base64 encode
+            std::string encoded = base64::encode(raw_content);
+
+            result["content"] = encoded;
+            result["encoding"] = std::string("base64");
+            result["path"] = abs_path.string();
+            result["success"] = true;
+            result["summary"] = std::string("Read ") + std::to_string(raw_content.size()) +
+                               " bytes (base64 encoded: " + std::to_string(encoded.size()) + " chars)";
+
+            dout(1) << "Read: Read " + std::to_string(raw_content.size()) + " bytes (base64) from " + abs_path.string() << std::endl;
         } else {
-            auto start_it = args.find("start_line");
-            if (start_it != args.end()) {
+            // Text mode: read with line handling
+            // Get optional line range parameters
+            int start_line = 1;
+            int limit = -1;
+
+            auto offset_it = args.find("offset");
+            if (offset_it != args.end()) {
                 try {
-                    start_line = std::any_cast<int>(start_it->second);
+                    start_line = std::any_cast<int>(offset_it->second);
                 } catch (...) {
                     try {
-                        start_line = std::stoi(std::any_cast<std::string>(start_it->second));
+                        start_line = std::stoi(std::any_cast<std::string>(offset_it->second));
                     } catch (...) {}
                 }
             }
-        }
 
-        // Try "limit" first (Claude Code), then "end_line" (legacy)
-        auto limit_it = args.find("limit");
-        if (limit_it != args.end()) {
-            try {
-                limit = std::any_cast<int>(limit_it->second);
-            } catch (...) {
+            auto limit_it = args.find("limit");
+            if (limit_it != args.end()) {
                 try {
-                    limit = std::stoi(std::any_cast<std::string>(limit_it->second));
-                } catch (...) {}
+                    limit = std::any_cast<int>(limit_it->second);
+                } catch (...) {
+                    try {
+                        limit = std::stoi(std::any_cast<std::string>(limit_it->second));
+                    } catch (...) {}
+                }
             }
-        } else {
-            auto end_it = args.find("end_line");
-            if (end_it != args.end()) {
-                try {
-                    int end_line = std::any_cast<int>(end_it->second);
-                    // Convert end_line to limit
-                    if (end_line > 0) {
-                        limit = end_line - start_line + 1;
-                    } else {
-                        limit = -1; // Read to end
+
+            // Read file content
+            std::ifstream file(abs_path);
+            if (!file.is_open()) {
+                result["error"] = std::string("error opening file: ") + path;
+                result["success"] = false;
+                return result;
+            }
+
+            std::ostringstream content_stream;
+            std::string line;
+            int current_line = 1;
+            int lines_read = 0;
+
+            while (std::getline(file, line)) {
+                if (current_line >= start_line) {
+                    content_stream << line << "\n";
+                    lines_read++;
+
+                    if (limit > 0 && lines_read >= limit) {
+                        break;
                     }
-                } catch (...) {
-                    try {
-                        int end_line = std::stoi(std::any_cast<std::string>(end_it->second));
-                        if (end_line > 0) {
-                            limit = end_line - start_line + 1;
-                        } else {
-                            limit = -1;
-                        }
-                    } catch (...) {}
                 }
+                current_line++;
             }
-        }
 
-        // Read file content
-        std::ifstream file(abs_path);
-        if (!file.is_open()) {
-            result["error"] = std::string("error opening file: ") + path;
-            result["success"] = false;
-            return result;
-        }
+            std::string content = content_stream.str();
 
-        std::ostringstream content_stream;
-        std::string line;
-        int current_line = 1;
-        int lines_read = 0;
+            // In auto mode, check if content has binary data
+            if (encoding == "auto" && has_binary_content(content)) {
+                // Re-read as binary and base64 encode
+                file.close();
+                std::ifstream bin_file(abs_path, std::ios::binary);
+                std::ostringstream bin_stream;
+                bin_stream << bin_file.rdbuf();
+                std::string raw_content = bin_stream.str();
+                std::string encoded = base64::encode(raw_content);
 
-        // Read file - no limits here, truncation handled by CLI based on context window
-        while (std::getline(file, line)) {
-            // Check if we're at or past the start line
-            if (current_line >= start_line) {
-                content_stream << line << "\n";
-                lines_read++;
+                result["content"] = encoded;
+                result["encoding"] = std::string("base64");
+                result["path"] = abs_path.string();
+                result["success"] = true;
+                result["summary"] = std::string("Read ") + std::to_string(raw_content.size()) +
+                                   " bytes (binary detected, base64 encoded)";
 
-                // Stop if user specified a limit
-                if (limit > 0 && lines_read >= limit) {
-                    break;
-                }
+                dout(1) << "Read: Binary content detected, base64 encoded " + abs_path.string() << std::endl;
+                return result;
             }
-            current_line++;
-        }
 
-        result["content"] = content_stream.str();
-        result["path"] = abs_path.string();
-        result["success"] = true;
+            // Text mode with potential binary check failure
+            if (encoding == "text" && has_binary_content(content)) {
+                result["error"] = std::string("File contains binary data. Use encoding='base64' or encoding='auto' to read binary files.");
+                result["success"] = false;
+                return result;
+            }
 
-        // Build summary
-        std::string summary;
-        if (start_line > 1) {
-            summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "") +
-                      " from offset " + std::to_string(start_line);
-        } else {
-            summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "");
-        }
-        result["summary"] = summary;
+            result["content"] = content;
+            result["encoding"] = std::string("text");
+            result["path"] = abs_path.string();
+            result["success"] = true;
 
-        if (start_line > 1 || limit > 0) {
-            dout(1) << "Read: Read " + std::to_string(lines_read) + " lines starting from line " +
-                      std::to_string(start_line) + " from " + abs_path.string() << std::endl;
-        } else {
+            std::string summary;
+            if (start_line > 1) {
+                summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "") +
+                          " from offset " + std::to_string(start_line);
+            } else {
+                summary = "Read " + std::to_string(lines_read) + " line" + (lines_read != 1 ? "s" : "");
+            }
+            result["summary"] = summary;
+
             dout(1) << "Read: Successfully read " + abs_path.string() << std::endl;
         }
 
@@ -172,7 +239,8 @@ std::map<std::string, std::any> ReadFileTool::execute(const std::map<std::string
 std::vector<ParameterDef> WriteFileTool::get_parameters_schema() const {
     return {
         {"file_path", "string", "path to the file to be written", true, "", "", {}},
-        {"content", "string", "The content to write to the file", true, "", "", {}}
+        {"content", "string", "The content to write to the file", true, "", "", {}},
+        {"encoding", "string", "How to write the file: 'text' (write content as-is), 'base64' (decode content from base64 and write as binary). Values: text, base64", false, "text", "", {}}
     };
 }
 
@@ -186,6 +254,12 @@ std::map<std::string, std::any> WriteFileTool::execute(const std::map<std::strin
     }
 
     std::string content = tool_utils::get_string(args, "content");
+
+    // Get encoding parameter (default: text)
+    std::string encoding = tool_utils::get_string(args, "encoding", "text");
+    if (encoding != "text" && encoding != "base64") {
+        encoding = "text";
+    }
 
     if (path.empty()) {
         result["error"] = std::string("file_path is required");
@@ -203,23 +277,54 @@ std::map<std::string, std::any> WriteFileTool::execute(const std::map<std::strin
             fs::create_directories(parent_dir);
         }
 
-        // Write file content
-        std::ofstream file(abs_path);
-        if (!file.is_open()) {
-            result["error"] = std::string("error creating file: ") + path;
-            result["success"] = false;
-            return result;
+        if (encoding == "base64") {
+            // Decode base64 and write as binary
+            std::string decoded;
+            try {
+                decoded = base64::decode(content);
+            } catch (const base64_error& e) {
+                result["error"] = std::string("Invalid base64 content: ") + e.what();
+                result["success"] = false;
+                return result;
+            }
+
+            std::ofstream file(abs_path, std::ios::binary);
+            if (!file.is_open()) {
+                result["error"] = std::string("error creating file: ") + path;
+                result["success"] = false;
+                return result;
+            }
+
+            file.write(decoded.data(), decoded.size());
+            file.close();
+
+            result["status"] = std::string("success");
+            result["path"] = abs_path.string();
+            result["encoding"] = std::string("base64");
+            result["summary"] = std::string("Wrote ") + std::to_string(decoded.size()) + " bytes (decoded from base64) to " + abs_path.filename().string();
+            result["success"] = true;
+
+            dout(1) << "Write: Successfully wrote " + std::to_string(decoded.size()) + " bytes (base64 decoded) to " + abs_path.string() << std::endl;
+        } else {
+            // Write as text
+            std::ofstream file(abs_path);
+            if (!file.is_open()) {
+                result["error"] = std::string("error creating file: ") + path;
+                result["success"] = false;
+                return result;
+            }
+
+            file << content;
+            file.close();
+
+            result["status"] = std::string("success");
+            result["path"] = abs_path.string();
+            result["encoding"] = std::string("text");
+            result["summary"] = std::string("Wrote ") + std::to_string(content.length()) + " bytes to " + abs_path.filename().string();
+            result["success"] = true;
+
+            dout(1) << "Write: Successfully wrote " + std::to_string(content.length()) + " bytes to " + abs_path.string() << std::endl;
         }
-
-        file << content;
-        file.close();
-
-        result["status"] = std::string("success");
-        result["path"] = abs_path.string();
-        result["summary"] = std::string("Wrote ") + std::to_string(content.length()) + " bytes to " + abs_path.filename().string();
-        result["success"] = true;
-
-        dout(1) << "Write: Successfully wrote " + std::to_string(content.length()) + " bytes to " + abs_path.string() << std::endl;
 
     } catch (const std::exception& e) {
         result["error"] = std::string("error writing file: ") + e.what();

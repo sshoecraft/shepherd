@@ -1057,8 +1057,29 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
             line[0] = 0;
             // Format: "[role] content..." with max 128 chars total, newlines replaced with spaces
 
-            // Replace newlines with spaces in content
+            // For assistant messages with tool calls but empty content, show tool call info
             std::string content_clean = msg.content;
+            if (content_clean.empty() && !msg.tool_calls_json.empty()) {
+                // Parse tool_calls_json to extract tool name(s)
+                try {
+                    auto tc_json = nlohmann::json::parse(msg.tool_calls_json);
+                    if (tc_json.is_array() && !tc_json.empty()) {
+                        std::string tool_info = "[tool_call: ";
+                        for (size_t t = 0; t < tc_json.size(); t++) {
+                            if (t > 0) tool_info += ", ";
+                            if (tc_json[t].contains("function") && tc_json[t]["function"].contains("name")) {
+                                tool_info += tc_json[t]["function"]["name"].get<std::string>();
+                            }
+                        }
+                        tool_info += "]";
+                        content_clean = tool_info;
+                    }
+                } catch (...) {
+                    content_clean = "[tool_call]";
+                }
+            }
+
+            // Replace newlines with spaces in content
             for (size_t j = 0; j < content_clean.length(); j++) {
                 if (content_clean[j] == '\n' || content_clean[j] == '\r') {
                     content_clean[j] = ' ';

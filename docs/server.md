@@ -103,7 +103,8 @@ int Server::run(Provider* cmdline_provider) {
 
 Local control commands via Unix domain socket:
 
-- **Path**: `/var/tmp/shepherd.sock` (fallback: `/tmp/shepherd.sock`)
+- **Path**: `/var/tmp/shepherd-<port>.sock` (fallback: `/tmp/shepherd-<port>.sock`)
+- Each server instance gets its own socket based on its listening port
 - **Endpoints**:
   - `GET /status` - Server status JSON
   - `POST /shutdown` - Graceful shutdown
@@ -226,14 +227,20 @@ data: [DONE]
 The control client communicates with running servers via Unix socket:
 
 ```bash
-# Get server status
+# Get server status (default port 8000)
 shepherd ctl status
 
-# Shutdown server gracefully
+# Get status for server on specific port
+shepherd ctl status 8080
+
+# Shutdown server gracefully (default port 8000)
 shepherd ctl shutdown
 
-# Specify socket explicitly
-shepherd ctl status --socket /tmp/shepherd-api.sock
+# Shutdown server on specific port
+shepherd ctl shutdown 8080
+
+# Specify socket explicitly (overrides port)
+shepherd ctl status --socket /tmp/shepherd-8080.sock
 ```
 
 ## Command Line
@@ -275,6 +282,7 @@ shepherd ctl shutdown
 
 ## Version History
 
+- **2.18.0** - Port-based control sockets (shepherd-<port>.sock) for multiple server instances
 - **2.13.0** - Unified EventCallback pattern
 - **2.10.0** - Added SSE support for real-time updates
 - **2.6.0** - Initial server implementations

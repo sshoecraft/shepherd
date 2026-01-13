@@ -5,8 +5,8 @@
 class ReadFileTool : public Tool {
 public:
     std::string unsanitized_name() const override { return "Read"; }
-    std::string description() const override { return "Read files from the filesystem (supports text, images, PDFs, Jupyter notebooks). Accepts relative or absolute paths."; }
-    std::string parameters() const override { return "file_path=\"path\", offset=\"line number to start\" (optional), limit=\"number of lines\" (optional)"; }
+    std::string description() const override { return "Read files from the filesystem. Text files are returned as-is. Binary files (images, PDFs, etc.) are automatically detected and returned as base64. Use encoding parameter to control: 'auto' (default, detect binary), 'text' (force text), 'base64' (force base64)."; }
+    std::string parameters() const override { return "file_path=\"path\", encoding=\"auto|text|base64\" (optional), offset=\"line number\" (text only), limit=\"num lines\" (text only)"; }
     std::vector<ParameterDef> get_parameters_schema() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };
@@ -14,8 +14,8 @@ public:
 class WriteFileTool : public Tool {
 public:
     std::string unsanitized_name() const override { return "Write"; }
-    std::string description() const override { return "Write new files or overwrite existing files. Accepts relative or absolute paths."; }
-    std::string parameters() const override { return "file_path=\"path\", content=\"file content\""; }
+    std::string description() const override { return "Write files to the filesystem. For binary files, pass base64-encoded content with encoding='base64'. Default is text mode."; }
+    std::string parameters() const override { return "file_path=\"path\", content=\"file content\", encoding=\"text|base64\" (optional, default: text)"; }
     std::vector<ParameterDef> get_parameters_schema() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 };

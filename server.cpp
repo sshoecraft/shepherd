@@ -68,33 +68,45 @@ json ControlClient::shutdown() {
 
 int handle_ctl_args(const std::vector<std::string>& args) {
     if (args.empty()) {
-        std::cout << "Usage: shepherd ctl <command> [options]\n\n";
+        std::cout << "Usage: shepherd ctl <command> [port] [options]\n\n";
         std::cout << "Commands:\n";
-        std::cout << "  status [--socket PATH]    Get server status\n";
-        std::cout << "  shutdown [--socket PATH]  Request server shutdown\n";
-        std::cout << "\nDefault socket path: /var/tmp/shepherd.sock (or /tmp/shepherd.sock)\n";
+        std::cout << "  status [port]             Get server status (default port: 8000)\n";
+        std::cout << "  shutdown [port]           Request server shutdown (default port: 8000)\n";
+        std::cout << "\nOptions:\n";
+        std::cout << "  --socket PATH             Use explicit socket path instead of port\n";
+        std::cout << "\nSocket path: /var/tmp/shepherd-<port>.sock (or /tmp/shepherd-<port>.sock)\n";
         return 0;
     }
 
     std::string command = args[0];
     std::string socket_path;
+    int port = 8000;  // Default port
 
-    // Parse --socket option
+    // Parse arguments
     for (size_t i = 1; i < args.size(); i++) {
         if (args[i] == "--socket" && i + 1 < args.size()) {
             socket_path = args[++i];
+        } else if (!args[i].empty() && args[i][0] != '-') {
+            // Try to parse as port number
+            try {
+                port = std::stoi(args[i]);
+            } catch (const std::exception&) {
+                std::cerr << "Error: Invalid port number: " << args[i] << "\n";
+                return 1;
+            }
         }
     }
 
-    // Auto-detect socket if not specified
+    // Build socket path from port if not explicitly specified
     if (socket_path.empty()) {
-        if (access("/var/tmp/shepherd.sock", F_OK) == 0) {
-            socket_path = "/var/tmp/shepherd.sock";
-        } else if (access("/tmp/shepherd.sock", F_OK) == 0) {
-            socket_path = "/tmp/shepherd.sock";
+        std::string socket_name = "shepherd-" + std::to_string(port) + ".sock";
+        if (access(("/var/tmp/" + socket_name).c_str(), F_OK) == 0) {
+            socket_path = "/var/tmp/" + socket_name;
+        } else if (access(("/tmp/" + socket_name).c_str(), F_OK) == 0) {
+            socket_path = "/tmp/" + socket_name;
         } else {
-            std::cerr << "Error: No running server found.\n";
-            std::cerr << "Expected socket at /var/tmp/shepherd.sock or /tmp/shepherd.sock\n";
+            std::cerr << "Error: No running server found on port " << port << ".\n";
+            std::cerr << "Expected socket at /var/tmp/" << socket_name << " or /tmp/" << socket_name << "\n";
             return 1;
         }
     }
@@ -174,12 +186,13 @@ int handle_ctl_args(const std::vector<std::string>& args) {
 Server::Server(const std::string& host, int port, const std::string& server_type,
                const std::string& auth_mode)
     : Frontend(), host(host), port(port), server_type(server_type) {
-    // Set default control socket path
+    // Set control socket path based on port (allows multiple servers)
     // Prefer /var/tmp (persistent, user-writable) over /tmp
+    std::string socket_name = "shepherd-" + std::to_string(port) + ".sock";
     if (access("/var/tmp", W_OK) == 0) {
-        control_socket_path = "/var/tmp/shepherd.sock";
+        control_socket_path = "/var/tmp/" + socket_name;
     } else {
-        control_socket_path = "/tmp/shepherd.sock";
+        control_socket_path = "/tmp/" + socket_name;
     }
 
     // Initialize API key authentication

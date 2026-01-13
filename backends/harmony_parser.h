@@ -69,6 +69,7 @@ private:
     ParseState parse_state = ParseState::EXPECT_START;
     Channel current_channel = Channel::NONE;
     std::string tool_recipient;  // For "to=functions.X" pattern
+    std::string constraint_type; // "json" or "code" from header
 
     // Character-level state
     CharState char_state = CharState::NORMAL;

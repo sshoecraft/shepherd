@@ -134,6 +134,11 @@ size_t HttpClient::stream_callback(char* ptr, size_t size, size_t nmemb, void* u
 
     std::string chunk(ptr, total_size);
 
+    // Accumulate body for error response parsing
+    if (data->body) {
+        *data->body += chunk;
+    }
+
     // Call user callback
     if (data->callback) {
         data->continue_streaming = data->callback(chunk, data->user_data);
@@ -325,14 +330,9 @@ HttpResponse HttpClient::post(const std::string& url,
         std::cerr << "HTTP POST failed: " + response.error_message << std::endl;
     } else {
         dout(1) << "HTTP POST completed with status: " + std::to_string(response.status_code) << std::endl;
-        if (response.body.length() > 100) {
-            dout(1) << "Response body (first 100 chars): " + response.body.substr(0, 100) << std::endl;
-#ifdef _DEBUG
-            extern int g_debug_level;
-            if (g_debug_level >= 5) {
-                dout(1) << "Full response body:\n" + response.body << std::endl;
-            }
-#endif
+        if (response.body.length() > 500) {
+            dout(1) << "Response body (first 500 chars): " + response.body.substr(0, 500) << std::endl;
+            dout(2) << "Full response body:\n" + response.body << std::endl;
         } else {
             dout(1) << "Response body: " + response.body << std::endl;
         }
@@ -458,6 +458,7 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
     StreamCallbackData callback_data;
     callback_data.callback = callback;
     callback_data.user_data = user_data;
+    callback_data.body = &response.body;  // Accumulate body for error parsing
 
     curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, stream_callback);
     curl_easy_setopt(curl_, CURLOPT_WRITEDATA, &callback_data);

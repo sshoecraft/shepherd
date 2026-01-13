@@ -50,7 +50,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
         frontend = std::make_unique<TUI>();
     }
     else if (mode == "api-server") {
-        frontend = std::make_unique<APIServer>(host, port, auth_mode);
+        frontend = std::make_unique<APIServer>(host, port, auth_mode, no_mcp, no_tools);
     }
     else if (mode == "cli-server") {
         frontend = std::make_unique<CLIServer>(host, port, auth_mode);

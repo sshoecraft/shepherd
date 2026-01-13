@@ -40,6 +40,7 @@ public:
     // Public state
     bool eof_received = false;
     bool generation_cancelled = false;
+    std::string last_submitted_input;  // For detecting other clients' messages
 
     // Escape key handling for cancellation
     bool check_escape_key();

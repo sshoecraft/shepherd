@@ -119,7 +119,7 @@ static void print_usage(int, char** argv) {
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
 	printf("	%s ctl <status|shutdown> [--socket PATH]\n", argv[0]);
-	printf("	%s keygen <--name NAME|list|remove NAME> [--notes NOTES]\n", argv[0]);
+	printf("	%s apikey <create|list|remove> [options]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 #ifdef _DEBUG
@@ -436,14 +436,14 @@ int main(int argc, char** argv) {
 		return handle_ctl_args(args);
 	}
 
-	// Handle keygen subcommand (API key management)
-	if (argc >= 2 && std::string(argv[1]) == "keygen") {
+	// Handle apikey subcommand (API key management)
+	if (argc >= 2 && std::string(argv[1]) == "apikey") {
 		std::vector<std::string> args;
 		for (int i = 2; i < argc; i++) {
 			args.push_back(argv[i]);
 		}
 		auto out = [](const std::string& msg) { std::cout << msg; };
-		return handle_keygen_args(args, out);
+		return handle_apikey_args(args, out);
 	}
 
 	// Flags and settings that don't map directly to config

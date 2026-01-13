@@ -67,13 +67,18 @@ public:
     /// @return Key in format sk-XXXXXXXX (35 chars total)
     static std::string generate_key();
 
+    /// @brief Get entry for a validated key (for session binding)
+    /// @param key The API key to look up
+    /// @return Pointer to entry if found, nullptr otherwise
+    const ApiKeyEntry* get_entry(const std::string& key) const;
+
 private:
     std::map<std::string, ApiKeyEntry> keys;
 };
 
-/// @brief Handle 'shepherd keygen' CLI subcommand
-/// @param args Arguments after "keygen"
+/// @brief Handle 'shepherd apikey' CLI subcommand
+/// @param args Arguments after "apikey"
 /// @param callback Output callback function
 /// @return 0 on success, non-zero on error
-int handle_keygen_args(const std::vector<std::string>& args,
+int handle_apikey_args(const std::vector<std::string>& args,
                        std::function<void(const std::string&)> callback);

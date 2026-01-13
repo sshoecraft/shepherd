@@ -172,7 +172,10 @@ void CLI::init(bool no_mcp, bool no_tools_flag) {
                 write_colored(content, type);
                 break;
             case CallbackEvent::USER_PROMPT:
-                // CLI doesn't need to echo - replxx handles display
+                // Display if it's from another client (not our own input)
+                if (content != last_submitted_input && content != "> " + last_submitted_input + "\n") {
+                    write_colored(content, type);
+                }
                 break;
             case CallbackEvent::STATS:
                 // Only show stats if enabled via --stats flag
@@ -313,6 +316,9 @@ int CLI::run(Provider* cmdline_provider) {
         // Tool calls are handled in the callback - they fire AFTER STOP, execute
         // immediately, and trigger recursive generation via session.add_message(TOOL_RESULT)
         cli_debug(1, "Submitting user message");
+
+        // Store our input so we can detect other clients' messages
+        last_submitted_input = user_input;
 
         // Enter raw mode for escape key detection during generation
         generation_cancelled = false;

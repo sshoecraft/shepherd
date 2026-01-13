@@ -724,7 +724,25 @@ void OllamaBackend::add_message(Session& session,
             accumulated_resp.success = false;
             accumulated_resp.code = Response::ERROR;
             accumulated_resp.finish_reason = "error";
-            accumulated_resp.error = http_response.error_message;
+
+            // Extract error message from response body (JSON) or error_message
+            std::string error_msg = http_response.error_message;
+            if (error_msg.empty() && !http_response.body.empty()) {
+                try {
+                    auto json_body = nlohmann::json::parse(http_response.body);
+                    if (json_body.contains("error") && json_body["error"].contains("message")) {
+                        error_msg = json_body["error"]["message"].get<std::string>();
+                    } else if (json_body.contains("error") && json_body["error"].is_string()) {
+                        error_msg = json_body["error"].get<std::string>();
+                    }
+                } catch (...) {
+                    error_msg = http_response.body.substr(0, 200);
+                }
+            }
+            if (error_msg.empty()) {
+                error_msg = "HTTP error " + std::to_string(http_response.status_code);
+            }
+            accumulated_resp.error = error_msg;
 
             // Check for context overflow
             int tokens_to_evict = extract_tokens_to_evict(http_response);
@@ -759,6 +777,7 @@ void OllamaBackend::add_message(Session& session,
             if (role == Message::TOOL_RESPONSE) {
                 add_tool_response(session, content, tool_name, tool_id);
             }
+            callback(CallbackEvent::ERROR, accumulated_resp.error, "api_error", "");
             callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
 

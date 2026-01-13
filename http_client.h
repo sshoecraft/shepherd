@@ -146,6 +146,7 @@ private:
         StreamCallback callback;
         void* user_data;
         bool continue_streaming = true;
+        std::string* body = nullptr;  // Accumulate body for error responses
     };
 #endif
 };

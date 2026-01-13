@@ -166,8 +166,13 @@ bool JsonKeyStore::is_enabled() {
     return !keys.empty();
 }
 
+const ApiKeyEntry* JsonKeyStore::get_entry(const std::string& key) const {
+    auto it = keys.find(key);
+    return (it != keys.end()) ? &it->second : nullptr;
+}
+
 // =============================================================================
-// CLI handler: shepherd keygen
+// CLI handler: shepherd apikey
 // =============================================================================
 
 static std::string get_iso_timestamp() {
@@ -185,20 +190,24 @@ static std::string mask_key(const std::string& key) {
     return key.substr(0, 7) + "..." + key.substr(key.length() - 4);
 }
 
-int handle_keygen_args(const std::vector<std::string>& args,
+int handle_apikey_args(const std::vector<std::string>& args,
                        std::function<void(const std::string&)> callback) {
     // No args or help
     if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
-        callback("Usage: shepherd keygen [subcommand]\n");
-        callback("Subcommands:\n");
-        callback("  --name <name> [--notes <notes>]  Generate new API key\n");
-        callback("  list                              List all keys (masked)\n");
-        callback("  remove <name>                     Remove key by name\n");
+        callback("Usage: shepherd apikey <command> [options]\n");
+        callback("\nCommands:\n");
+        callback("  create <name> [--notes <notes>] [--perms <json>]\n");
+        callback("  list             List all keys (masked)\n");
+        callback("  show <name>      Show full details of a key\n");
+        callback("  set <name> [--notes <notes>] [--perms <json>]\n");
+        callback("  remove <name>    Remove key by name\n");
         callback("\nExamples:\n");
-        callback("  shepherd keygen --name production\n");
-        callback("  shepherd keygen --name ci --notes \"GitHub Actions\"\n");
-        callback("  shepherd keygen list\n");
-        callback("  shepherd keygen remove production\n");
+        callback("  shepherd apikey create production\n");
+        callback("  shepherd apikey create internal --perms '{\"server_tools\":true}'\n");
+        callback("  shepherd apikey list\n");
+        callback("  shepherd apikey show internal\n");
+        callback("  shepherd apikey set internal --perms '{\"server_tools\":false}'\n");
+        callback("  shepherd apikey remove production\n");
         return 0;
     }
 
@@ -209,7 +218,7 @@ int handle_keygen_args(const std::vector<std::string>& args,
         auto keys = JsonKeyStore::load_keys();
         if (keys.empty()) {
             callback("No API keys configured.\n");
-            callback("Generate one with: shepherd keygen --name <name>\n");
+            callback("Create one with: shepherd apikey create --name <name>\n");
             return 0;
         }
 
@@ -231,11 +240,90 @@ int handle_keygen_args(const std::vector<std::string>& args,
         return 0;
     }
 
+    // Show key details
+    if (subcmd == "show") {
+        if (args.size() < 2) {
+            callback("Error: Missing key name\n");
+            callback("Usage: shepherd apikey show <name>\n");
+            return 1;
+        }
+
+        std::string name = args[1];
+        auto keys = JsonKeyStore::load_keys();
+
+        // Find key by name
+        for (const auto& [key, entry] : keys) {
+            if (entry.name == name) {
+                callback("Name:        " + entry.name + "\n");
+                callback("Key:         " + mask_key(key) + "\n");
+                callback("Created:     " + entry.created + "\n");
+                callback("Notes:       " + (entry.notes.empty() ? "(none)" : entry.notes) + "\n");
+                callback("Permissions: " + entry.permissions.dump() + "\n");
+                return 0;
+            }
+        }
+
+        callback("Error: Key '" + name + "' not found\n");
+        return 1;
+    }
+
+    // Set key (update notes/perms)
+    if (subcmd == "set") {
+        if (args.size() < 2) {
+            callback("Error: Missing key name\n");
+            callback("Usage: shepherd apikey set <name> [--notes <notes>] [--perms <json>]\n");
+            return 1;
+        }
+
+        std::string name = args[1];
+        std::string notes;
+        json permissions;
+        bool has_notes = false;
+        bool has_perms = false;
+
+        // Parse optional arguments
+        for (size_t i = 2; i < args.size(); i++) {
+            if (args[i] == "--notes" && i + 1 < args.size()) {
+                notes = args[++i];
+                has_notes = true;
+            } else if (args[i] == "--perms" && i + 1 < args.size()) {
+                try {
+                    permissions = json::parse(args[++i]);
+                    has_perms = true;
+                } catch (const json::exception& e) {
+                    callback("Error: Invalid JSON for --perms: " + std::string(e.what()) + "\n");
+                    return 1;
+                }
+            }
+        }
+
+        if (!has_notes && !has_perms) {
+            callback("Error: Specify --notes or --perms to update\n");
+            return 1;
+        }
+
+        auto keys = JsonKeyStore::load_keys();
+
+        // Find and update key
+        for (auto& [key, entry] : keys) {
+            if (entry.name == name) {
+                if (has_notes) entry.notes = notes;
+                if (has_perms) entry.permissions = permissions;
+                JsonKeyStore::save_keys(keys);
+                callback("Key '" + name + "' updated.\n");
+                return 0;
+            }
+        }
+
+        callback("Error: Key '" + name + "' not found\n");
+        return 1;
+    }
+
     // Remove key
     if (subcmd == "remove") {
         if (args.size() < 2) {
             callback("Error: Missing key name\n");
-            callback("Usage: shepherd keygen remove <name>\n");
+            callback("Usage: shepherd apikey remove <name>\n");
             return 1;
         }
 
@@ -262,21 +350,29 @@ int handle_keygen_args(const std::vector<std::string>& args,
         return 0;
     }
 
-    // Generate new key (--name required)
-    if (subcmd == "--name") {
+    // Create new key
+    if (subcmd == "create") {
         if (args.size() < 2) {
             callback("Error: Missing key name\n");
-            callback("Usage: shepherd keygen --name <name> [--notes <notes>]\n");
+            callback("Usage: shepherd apikey create <name> [--notes <notes>] [--perms <json>]\n");
             return 1;
         }
 
         std::string name = args[1];
         std::string notes;
+        json permissions = json::object();
 
-        // Parse --notes if present
+        // Parse optional arguments
         for (size_t i = 2; i < args.size(); i++) {
             if (args[i] == "--notes" && i + 1 < args.size()) {
                 notes = args[++i];
+            } else if (args[i] == "--perms" && i + 1 < args.size()) {
+                try {
+                    permissions = json::parse(args[++i]);
+                } catch (const json::exception& e) {
+                    callback("Error: Invalid JSON for --perms: " + std::string(e.what()) + "\n");
+                    return 1;
+                }
             }
         }
 
@@ -297,20 +393,19 @@ int handle_keygen_args(const std::vector<std::string>& args,
         entry.name = name;
         entry.notes = notes;
         entry.created = get_iso_timestamp();
-        entry.permissions = json::object();
+        entry.permissions = permissions;
 
         // Save
         keys[new_key] = entry;
         JsonKeyStore::save_keys(keys);
 
-        callback("API key generated successfully.\n\n");
+        callback("API key created successfully.\n\n");
         callback("Key: " + new_key + "\n\n");
-        callback("IMPORTANT: Save this key now - it cannot be retrieved later.\n");
-        callback("\nKeys are stored in: " + JsonKeyStore::get_keys_file_path() + "\n");
+        callback("Keys are stored in: " + JsonKeyStore::get_keys_file_path() + "\n");
         return 0;
     }
 
-    callback("Error: Unknown subcommand '" + subcmd + "'\n");
-    callback("Use 'shepherd keygen help' for usage.\n");
+    callback("Error: Unknown command '" + subcmd + "'\n");
+    callback("Use 'shepherd apikey help' for usage.\n");
     return 1;
 }

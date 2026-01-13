@@ -988,7 +988,7 @@ void OpenAIBackend::add_message(Session& session,
                                     accumulated_content += delta_text;
                                     accumulated_resp.content = accumulated_content;
 
-                                    dout(2) << "SSE delta content: [" << delta_text << "] tool_calls.size=" << accumulated_resp.tool_calls.size() << std::endl;
+                                    dout(3) << "SSE delta content: [" << delta_text << "] tool_calls.size=" << accumulated_resp.tool_calls.size() << std::endl;
 
                                     // Only stream content if we haven't seen tool calls
                                     if (accumulated_resp.tool_calls.empty()) {
@@ -998,10 +998,10 @@ void OpenAIBackend::add_message(Session& session,
                                             return false;
                                         }
                                     } else {
-                                        dout(2) << "SSE: skipping output due to tool_calls present" << std::endl;
+                                        dout(3) << "SSE: skipping output due to tool_calls present" << std::endl;
                                     }
                                 } else {
-                                    dout(2) << "SSE delta: no content (has_content=" << delta.contains("content") << " is_null=" << (delta.contains("content") ? delta["content"].is_null() : false) << ")" << std::endl;
+                                    dout(3) << "SSE delta: no content (has_content=" << delta.contains("content") << " is_null=" << (delta.contains("content") ? delta["content"].is_null() : false) << ")" << std::endl;
                                 }
 
                                 // Handle tool_calls delta (incremental)
@@ -1074,7 +1074,23 @@ void OpenAIBackend::add_message(Session& session,
             accumulated_resp.success = false;
             accumulated_resp.code = Response::ERROR;
             accumulated_resp.finish_reason = "error";
-            accumulated_resp.error = http_response.error_message;
+
+            // Extract error message from response body (JSON) or error_message
+            std::string error_msg = http_response.error_message;
+            if (error_msg.empty() && !http_response.body.empty()) {
+                try {
+                    auto json_body = nlohmann::json::parse(http_response.body);
+                    if (json_body.contains("error") && json_body["error"].contains("message")) {
+                        error_msg = json_body["error"]["message"].get<std::string>();
+                    }
+                } catch (...) {
+                    error_msg = http_response.body;
+                }
+            }
+            if (error_msg.empty()) {
+                error_msg = "HTTP error " + std::to_string(http_response.status_code);
+            }
+            accumulated_resp.error = error_msg;
 
             // Check if context length error
             int tokens_to_evict = extract_tokens_to_evict(http_response);
@@ -1112,7 +1128,8 @@ void OpenAIBackend::add_message(Session& session,
             if (role == Message::TOOL_RESPONSE) {
                 add_tool_response(session, content, tool_name, tool_id);
             }
-            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return; // Return error
+            callback(CallbackEvent::ERROR, accumulated_resp.error, "api_error", "");
+            callback(CallbackEvent::STOP, accumulated_resp.finish_reason, "", ""); return;
         }
 
         flush_output();

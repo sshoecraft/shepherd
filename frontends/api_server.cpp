@@ -17,8 +17,10 @@ using json = nlohmann::json;
 extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
-APIServer::APIServer(const std::string& host, int port, const std::string& auth_mode)
-    : Server(host, port, "api", auth_mode) {
+APIServer::APIServer(const std::string& host, int port, const std::string& auth_mode,
+                     bool no_mcp, bool no_tools)
+    : Server(host, port, "api", auth_mode),
+      no_mcp(no_mcp), no_tools(no_tools) {
     // Set up the event callback - routes to request_handler when set
     callback = [this](CallbackEvent event, const std::string& content,
                       const std::string& name, const std::string& id) -> bool {
@@ -30,6 +32,39 @@ APIServer::APIServer(const std::string& host, int port, const std::string& auth_
 }
 
 APIServer::~APIServer() {
+}
+
+void APIServer::on_server_start() {
+    // Initialize session manager for multi-tenant stateful sessions
+    session_manager = std::make_unique<SessionManager>(backend.get(), config.get(), no_mcp, no_tools);
+    dout(1) << "SessionManager initialized" << std::endl;
+}
+
+void APIServer::on_server_stop() {
+    // Cleanup session manager
+    session_manager.reset();
+}
+
+void APIServer::add_status_info(nlohmann::json& status) {
+    if (session_manager) {
+        auto session_status = session_manager->get_status();
+        status["sessions"] = session_status;
+    }
+}
+
+std::string APIServer::extract_bearer_token(const httplib::Request& req) const {
+    auto it = req.headers.find("Authorization");
+    if (it == req.headers.end()) {
+        return "";
+    }
+
+    const std::string& auth = it->second;
+    const std::string bearer_prefix = "Bearer ";
+    if (auth.size() > bearer_prefix.size() &&
+        auth.substr(0, bearer_prefix.size()) == bearer_prefix) {
+        return auth.substr(bearer_prefix.size());
+    }
+    return "";
 }
 
 // Sanitize string to valid UTF-8 by replacing invalid sequences with replacement char
@@ -236,6 +271,42 @@ void APIServer::register_endpoints() {
                 res.set_content(create_error_response(400, "Invalid JSON").dump(), "application/json");
                 return;
             }
+
+            // Check authentication and route based on permissions
+            std::string api_key = extract_bearer_token(req);
+            bool auth_required = key_store && key_store->is_enabled();
+
+            if (auth_required) {
+                // Auth mode is json - require valid API key
+                if (api_key.empty()) {
+                    res.status = 401;
+                    res.set_content(create_error_response(401, "API key required").dump(), "application/json");
+                    return;
+                }
+                if (!key_store->validate_key(api_key)) {
+                    res.status = 401;
+                    res.set_content(create_error_response(401, "Invalid API key").dump(), "application/json");
+                    return;
+                }
+                // Valid key - check permissions.server_tools
+                auto* json_store = dynamic_cast<JsonKeyStore*>(key_store.get());
+                if (json_store) {
+                    const ApiKeyEntry* entry = json_store->get_entry(api_key);
+                    if (entry) {
+                        bool server_tools = entry->permissions.value("server_tools", false);
+                        if (server_tools && session_manager) {
+                            // server_tools=true: Stateful session with server-side tools
+                            ManagedSession* managed = session_manager->get_session(api_key, *entry);
+                            handle_stateful_request(req, res, managed, request);
+                            return;
+                        }
+                    }
+                }
+                // server_tools=false or not set: Fall through to stateless mode
+            }
+            // else: Auth not required (--auth-mode none) - fall through to stateless mode
+
+            // STATELESS MODE: Standard OpenAI behavior (existing logic below)
 
             // Create session for this request
             Session request_session;
@@ -575,7 +646,7 @@ void APIServer::register_endpoints() {
                             }
 
                             // Send chunk
-                            dout(2) << "API stream: output_delta=[" << output_delta.substr(0, 100) << "] len=" << output_delta.length() << std::endl;
+                            dout(3) << "API stream: output_delta=[" << output_delta.substr(0, 100) << "] len=" << output_delta.length() << std::endl;
                             return send_content_chunk(output_delta);
                         };
 
@@ -890,4 +961,224 @@ void APIServer::register_endpoints() {
             res.set_content(create_error_response(500, e.what()).dump(), "application/json");
         }
     });
+}
+
+// Handle stateful request with server-side tools
+void APIServer::handle_stateful_request(const httplib::Request& req,
+                                         httplib::Response& res,
+                                         ManagedSession* managed,
+                                         const nlohmann::json& request) {
+    // Lock this session for exclusive access
+    std::lock_guard<std::mutex> session_lock(managed->session_mutex);
+    managed->last_access = std::chrono::steady_clock::now();
+    managed->requests_processed++;
+
+    Session& session = *managed->session;
+    Tools& tools = *managed->tools;
+
+    // Extract ONLY the last user message from the request
+    // Server history is authoritative - we ignore client-provided history
+    std::string user_input;
+    if (request.contains("messages") && request["messages"].is_array()) {
+        // Find the last user message
+        for (auto it = request["messages"].rbegin(); it != request["messages"].rend(); ++it) {
+            if ((*it).value("role", "") == "user") {
+                if ((*it).contains("content")) {
+                    if ((*it)["content"].is_string()) {
+                        user_input = (*it)["content"].get<std::string>();
+                    } else if ((*it)["content"].is_array()) {
+                        // Extract text from content array
+                        for (const auto& part : (*it)["content"]) {
+                            if (part.contains("type") && part["type"] == "text" && part.contains("text")) {
+                                if (!user_input.empty()) user_input += "\n";
+                                user_input += part["text"].get<std::string>();
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    if (user_input.empty()) {
+        res.status = 400;
+        res.set_content(create_error_response(400, "No user message found").dump(), "application/json");
+        return;
+    }
+
+    // Add user message to session
+    session.add_message(Message::USER, user_input);
+
+    // Parse max_tokens
+    int max_tokens = request.value("max_tokens", 0);
+
+    // Parse sampling parameters
+    auto& sp = session.sampling;
+    if (request.contains("temperature")) sp.temperature = request["temperature"].get<float>();
+    if (request.contains("top_p")) sp.top_p = request["top_p"].get<float>();
+    if (request.contains("top_k")) sp.top_k = request["top_k"].get<int>();
+
+    bool stream = request.value("stream", false);
+    std::string request_id = generate_id();
+    std::string model_name = request.value("model", "shepherd");
+
+    if (stream) {
+        // Streaming response
+        res.set_header("Content-Type", "text/event-stream; charset=utf-8");
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("X-Accel-Buffering", "no");
+
+        res.set_content_provider(
+            "text/event-stream",
+            [this, &session, &tools, managed, max_tokens, request_id, model_name]
+            (size_t offset, httplib::DataSink& sink) mutable {
+                std::string accumulated_response;
+                bool generation_done = false;
+                std::string error_message;
+
+                // Set up callback for streaming
+                request_handler = [&](CallbackEvent event, const std::string& content,
+                                      const std::string& name, const std::string& id) -> bool {
+                    if (event == CallbackEvent::STOP) {
+                        generation_done = true;
+                        return true;
+                    }
+
+                    if (event == CallbackEvent::ERROR) {
+                        error_message = content;
+                        generation_done = true;
+                        return false;
+                    }
+
+                    if (event == CallbackEvent::TOOL_CALL) {
+                        // Execute tool SERVER-SIDE
+                        managed->tool_executions++;
+                        ToolResult result = execute_tool(tools, name, content, id);
+
+                        // Add tool result to session
+                        session.add_message(Message::TOOL_RESPONSE, result.content, name, id);
+
+                        // Signal to continue generation
+                        return true;
+                    }
+
+                    if (event == CallbackEvent::CONTENT) {
+                        accumulated_response += content;
+
+                        // Send SSE chunk
+                        json chunk = {
+                            {"id", request_id},
+                            {"object", "chat.completion.chunk"},
+                            {"created", std::time(nullptr)},
+                            {"model", model_name},
+                            {"choices", json::array({{
+                                {"index", 0},
+                                {"delta", {{"content", content}}},
+                                {"finish_reason", nullptr}
+                            }})}
+                        };
+                        std::string sse_data = "data: " + chunk.dump() + "\n\n";
+                        sink.write(sse_data.c_str(), sse_data.size());
+                        return true;
+                    }
+
+                    return true;
+                };
+
+                // Generate response
+                backend->generate_from_session(session, max_tokens);
+
+                // Send final chunk
+                if (!error_message.empty()) {
+                    json error_chunk = create_error_response(500, error_message);
+                    std::string sse_data = "data: " + error_chunk.dump() + "\n\n";
+                    sink.write(sse_data.c_str(), sse_data.size());
+                } else {
+                    json final_chunk = {
+                        {"id", request_id},
+                        {"object", "chat.completion.chunk"},
+                        {"created", std::time(nullptr)},
+                        {"model", model_name},
+                        {"choices", json::array({{
+                            {"index", 0},
+                            {"delta", json::object()},
+                            {"finish_reason", "stop"}
+                        }})}
+                    };
+                    std::string sse_data = "data: " + final_chunk.dump() + "\n\ndata: [DONE]\n\n";
+                    sink.write(sse_data.c_str(), sse_data.size());
+                }
+
+                request_handler = nullptr;
+                sink.done();
+                return false;
+            }
+        );
+    } else {
+        // Non-streaming response
+        std::string accumulated_response;
+        std::string error_message;
+
+        request_handler = [&](CallbackEvent event, const std::string& content,
+                              const std::string& name, const std::string& id) -> bool {
+            if (event == CallbackEvent::STOP) {
+                return true;
+            }
+
+            if (event == CallbackEvent::ERROR) {
+                error_message = content;
+                return false;
+            }
+
+            if (event == CallbackEvent::TOOL_CALL) {
+                // Execute tool SERVER-SIDE
+                managed->tool_executions++;
+                ToolResult result = execute_tool(tools, name, content, id);
+
+                // Add tool result to session
+                session.add_message(Message::TOOL_RESPONSE, result.content, name, id);
+                return true;
+            }
+
+            if (event == CallbackEvent::CONTENT) {
+                accumulated_response += content;
+                return true;
+            }
+
+            return true;
+        };
+
+        backend->generate_from_session(session, max_tokens);
+        request_handler = nullptr;
+
+        if (!error_message.empty()) {
+            res.status = 500;
+            res.set_content(create_error_response(500, error_message).dump(), "application/json");
+            return;
+        }
+
+        // Build response
+        json response = {
+            {"id", request_id},
+            {"object", "chat.completion"},
+            {"created", std::time(nullptr)},
+            {"model", model_name},
+            {"choices", json::array({{
+                {"index", 0},
+                {"message", {
+                    {"role", "assistant"},
+                    {"content", accumulated_response}
+                }},
+                {"finish_reason", "stop"}
+            }})},
+            {"usage", {
+                {"prompt_tokens", session.last_prompt_tokens},
+                {"completion_tokens", session.last_assistant_message_tokens},
+                {"total_tokens", session.last_prompt_tokens + session.last_assistant_message_tokens}
+            }}
+        };
+
+        res.set_content(response.dump(), "application/json");
+    }
 }

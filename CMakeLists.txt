@@ -32,6 +32,7 @@ set(SHEPHERD_SOURCES
     backend.cpp
     server.cpp
     auth.cpp
+    session_manager.cpp
 
     # Frontend sources
     frontends/cli.cpp

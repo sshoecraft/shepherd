@@ -57,7 +57,7 @@ bool SSEParser::process_line(const std::string& line, EventCallback callback) {
 
     // Comment lines start with :
     if (!line.empty() && line[0] == ':') {
-        dout(1) << "SSE comment: " + line << std::endl;
+        dout(3) << "SSE comment: " + line << std::endl;
         return true;
     }
 
@@ -109,7 +109,7 @@ bool SSEParser::dispatch_event(EventCallback callback) {
 
     // Only dispatch if we have data
     if (!event_data_.empty() || !event_type_.empty()) {
-        dout(1) << "SSE event - type: '" + event_type_ +
+        dout(3) << "SSE event - type: '" + event_type_ +
                   "', data length: " + std::to_string(event_data_.length()) +
                   ", id: '" + event_id_ + "'" << std::endl;
 

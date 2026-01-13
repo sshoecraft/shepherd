@@ -1086,11 +1086,11 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
                 }
             }
 
-            const char* role = msg.get_role().c_str();
+            std::string role = msg.get_role();
             const char* content = content_clean.c_str();
 
             // Truncate content to fit in remaining space
-            int prefix_len = snprintf(line, sizeof(line), "[%s] ", role);
+            int prefix_len = snprintf(line, sizeof(line), "[%s] ", role.c_str());
             if (prefix_len > 0 && prefix_len < (int)sizeof(line) - 4) {
                 int remaining = sizeof(line) - prefix_len - 4; // -4 for "..." + null
                 if (content_clean.length() > (size_t)remaining) {

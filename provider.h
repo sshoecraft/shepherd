@@ -21,6 +21,7 @@ public:
     std::string name;
     std::string type;           // llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli
     std::string model;
+    std::string display_name;   // Friendly name for /v1/models API (optional, defaults to model)
     int priority = 100;         // Lower = higher priority (0 reserved for cmdline)
     size_t context_size = 0;    // 0 = auto/default
 

@@ -203,10 +203,10 @@ int handle_apikey_args(const std::vector<std::string>& args,
         callback("  remove <name>    Remove key by name\n");
         callback("\nExamples:\n");
         callback("  shepherd apikey create production\n");
-        callback("  shepherd apikey create internal --perms '{\"server_tools\":true}'\n");
+        callback("  shepherd apikey create internal --notes 'Internal testing key'\n");
         callback("  shepherd apikey list\n");
         callback("  shepherd apikey show internal\n");
-        callback("  shepherd apikey set internal --perms '{\"server_tools\":false}'\n");
+        callback("  shepherd apikey set internal --notes 'Updated notes'\n");
         callback("  shepherd apikey remove production\n");
         return 0;
     }

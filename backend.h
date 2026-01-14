@@ -144,6 +144,7 @@ public:
     std::string name;
     std::string backend_name;
     std::string model_name;
+    std::string display_name;   // Friendly name for API (defaults to model_name if empty)
     size_t context_size;
     int max_output_tokens = 0;  // Maximum tokens for completion (0 = no limit)
     std::set<std::string> valid_tool_names;  // Tool names for filtering (set by frontend)

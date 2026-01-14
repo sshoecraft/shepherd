@@ -76,6 +76,7 @@ Provider Provider::from_json(const json& j) {
     p.name = j.value("name", "");
     p.type = j.value("type", "");
     p.model = j.value("model", "");
+    p.display_name = j.value("display_name", "");
     p.priority = j.value("priority", 100);
     p.context_size = j.value("context_size", 0);
 
@@ -155,6 +156,7 @@ json Provider::to_json() const {
     j["name"] = name;
     j["type"] = type;
     j["model"] = model;
+    if (!display_name.empty()) j["display_name"] = display_name;
     j["priority"] = priority;
     if (context_size > 0) j["context_size"] = context_size;
 
@@ -361,7 +363,14 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
     // Create backend (constructor handles all initialization)
     // Command line --context-size takes precedence over provider config
     size_t ctx = (config->context_size > 0) ? config->context_size : context_size;
-    return BackendFactory::create_backend(type, ctx, session, callback);
+    auto backend = BackendFactory::create_backend(type, ctx, session, callback);
+
+    // Set display name from provider config (for /v1/models API)
+    if (backend) {
+        backend->display_name = display_name;
+    }
+
+    return backend;
 }
 
 // Common provider command implementation

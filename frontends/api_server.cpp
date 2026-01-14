@@ -13,6 +13,7 @@
 #include "../tools/mcp_resource_tools.h"
 #include "../tools/core_tools.h"
 #include "../config.h"
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -302,6 +303,11 @@ void APIServer::register_endpoints() {
             }
 
             // Standard OpenAI behavior - stateless request handling
+
+            // Ensure tools array exists - some models require it for proper chat template formatting
+            if (!request.contains("tools")) {
+                request["tools"] = json::array();
+            }
 
             // Create session for this request
             Session request_session;
@@ -1092,6 +1098,20 @@ void APIServer::register_endpoints() {
 
             // Execute the tool
             ToolResult result = tools->execute(tool_name, arguments_json);
+
+            // Log tool execution
+            std::string content_summary = result.content;
+            if (content_summary.length() > 200) {
+                content_summary = content_summary.substr(0, 200) + "...";
+            }
+            // Replace newlines with spaces for single-line logging
+            std::replace(content_summary.begin(), content_summary.end(), '\n', ' ');
+
+            if (result.success) {
+                std::cout << "[tool] " << tool_name << ": OK - " << content_summary << std::endl;
+            } else {
+                std::cout << "[tool] " << tool_name << ": FAILED - " << result.error << std::endl;
+            }
 
             // Build response
             json response = {

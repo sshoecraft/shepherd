@@ -323,6 +323,35 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         throw BackendError("Failed to create llama context");
     }
 
+#if 0
+    // TODO: Validate context can actually perform inference by testing batch allocation
+    // This catches cases where context was created but compute buffers failed to allocate
+    {
+        llama_batch test_batch = llama_batch_init(1, 0, 1);
+        test_batch.n_tokens = 1;
+        test_batch.token[0] = 0;  // BOS token or any valid token
+        test_batch.pos[0] = 0;
+        test_batch.n_seq_id[0] = 1;
+        test_batch.seq_id[0][0] = 0;
+        test_batch.logits[0] = false;
+
+        int decode_result = llama_decode(static_cast<llama_context*>(model_ctx), test_batch);
+        llama_batch_free(test_batch);
+
+        if (decode_result != 0) {
+            llama_free(static_cast<llama_context*>(model_ctx));
+            llama_model_free(static_cast<llama_model*>(model));
+            model_ctx = nullptr;
+            model = nullptr;
+            throw BackendError("Context created but compute buffers failed to allocate (decode test failed). Try reducing context size or freeing GPU memory.");
+        }
+
+        // Clear the test token from KV cache
+        llama_kv_self_clear(static_cast<llama_context*>(model_ctx));
+        dout(1) << "Context validation passed (decode test successful)" << std::endl;
+    }
+#endif
+
     // Initialize chat templates
     auto templates = common_chat_templates_init(
         static_cast<llama_model*>(model),
@@ -546,9 +575,12 @@ void LlamaCppBackend::parse_backend_config() {
         else if (config->json.contains("pp")) pipeline_parallel = config->json["pp"].get<int>();
 
         // Batch sizes: n_batch = logical, ubatch/n_ubatch = physical micro-batch
+        // Values <= 0 mean "use auto" (reset to 512 sentinel)
         if (config->json.contains("n_batch")) n_batch = config->json["n_batch"].get<int>();
         if (config->json.contains("ubatch")) n_ubatch = config->json["ubatch"].get<int>();
         else if (config->json.contains("n_ubatch")) n_ubatch = config->json["n_ubatch"].get<int>();
+        if (n_batch <= 0) n_batch = 512;
+        if (n_ubatch <= 0) n_ubatch = 512;
 
         // KV cache type
         if (config->json.contains("cache_type")) cache_type = config->json["cache_type"].get<std::string>();

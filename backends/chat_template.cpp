@@ -602,23 +602,21 @@ std::string MinjaTemplate::render_via_minja(
         dout(1) << "GPT-OSS reasoning_effort not set, using model default (medium)" << std::endl;
     }
 
-    // Add tools if present
-    if (!tools.empty()) {
-        auto tools_array = minja::Value::array();
-        for (const auto& tool : tools) {
-            auto func_obj = minja::Value::object();
-            func_obj.set("name", minja::Value(tool.name));
-            func_obj.set("description", minja::Value(tool.description));
-            func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
+    // Add tools to context (always set, even if empty - some templates require it)
+    auto tools_array = minja::Value::array();
+    for (const auto& tool : tools) {
+        auto func_obj = minja::Value::object();
+        func_obj.set("name", minja::Value(tool.name));
+        func_obj.set("description", minja::Value(tool.description));
+        func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
 
-            auto tool_obj = minja::Value::object();
-            tool_obj.set("type", minja::Value("function"));
-            tool_obj.set("function", func_obj);
+        auto tool_obj = minja::Value::object();
+        tool_obj.set("type", minja::Value("function"));
+        tool_obj.set("function", func_obj);
 
-            tools_array.push_back(tool_obj);
-        }
-        context->set("tools", tools_array);
+        tools_array.push_back(tool_obj);
     }
+    context->set("tools", tools_array);
 
     // Render through template
     std::string rendered = (*template_ptr)->render(context);

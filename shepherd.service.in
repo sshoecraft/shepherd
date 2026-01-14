@@ -1,14 +1,29 @@
 [Unit]
 Description=Shepherd LLM Server
+Documentation=https://github.com/bigattichouse/shepherd
 After=network.target
 
 [Service]
 Type=simple
-User=@USER@
-WorkingDirectory=@WORKING_DIR@
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/shepherd --server
+User=shepherd
+Group=shepherd
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/shepherd --server
+WorkingDirectory=/var/lib/shepherd
 Restart=on-failure
 RestartSec=10
+
+# Directories (systemd creates these with correct ownership)
+StateDirectory=shepherd
+CacheDirectory=shepherd
+LogsDirectory=shepherd
+ConfigurationDirectory=shepherd
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/shepherd /var/cache/shepherd /var/log/shepherd
 
 [Install]
 WantedBy=multi-user.target

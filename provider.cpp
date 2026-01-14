@@ -511,9 +511,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("model = " + prov->model + "\n");
 		}
 		callback("priority = " + std::to_string(prov->priority) + "\n");
-		if (prov->context_size > 0) {
-			callback("context_size = " + std::to_string(prov->context_size) + "\n");
-		}
+		callback("context_size = " + std::to_string(prov->context_size) + (prov->context_size == 0 ? " (auto)" : "") + "\n");
+		callback("display_name = " + (prov->display_name.empty() ? "(not set)" : prov->display_name) + "\n");
 
 		// CLI backend fields
 		if (prov->type == "cli") {
@@ -522,34 +521,16 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		// API backend fields
 		if (prov->is_api()) {
-			callback("api_key = " + std::string(prov->api_key.empty() ? "not set" : "****") + "\n");
-			if (!prov->base_url.empty()) {
-				callback("base_url = " + prov->base_url + "\n");
-			}
-			if (!prov->client_id.empty()) {
-				callback("client_id = " + prov->client_id + "\n");
-			}
-			if (!prov->client_secret.empty()) {
-				callback("client_secret = ****\n");
-			}
-			if (!prov->token_url.empty()) {
-				callback("token_url = " + prov->token_url + "\n");
-			}
-			if (!prov->token_scope.empty()) {
-				callback("token_scope = " + prov->token_scope + "\n");
-			}
-			if (!prov->deployment_name.empty()) {
-				callback("deployment_name = " + prov->deployment_name + "\n");
-			}
-			if (!prov->api_version.empty()) {
-				callback("api_version = " + prov->api_version + "\n");
-			}
-			if (!prov->ssl_verify) {
-				callback("ssl_verify = false\n");
-			}
-			if (!prov->ca_bundle_path.empty()) {
-				callback("ca_bundle_path = " + prov->ca_bundle_path + "\n");
-			}
+			callback("api_key = " + std::string(prov->api_key.empty() ? "(not set)" : "****") + "\n");
+			callback("base_url = " + (prov->base_url.empty() ? "(not set)" : prov->base_url) + "\n");
+			callback("client_id = " + (prov->client_id.empty() ? "(not set)" : prov->client_id) + "\n");
+			callback("client_secret = " + std::string(prov->client_secret.empty() ? "(not set)" : "****") + "\n");
+			callback("token_url = " + (prov->token_url.empty() ? "(not set)" : prov->token_url) + "\n");
+			callback("token_scope = " + (prov->token_scope.empty() ? "(not set)" : prov->token_scope) + "\n");
+			callback("deployment_name = " + (prov->deployment_name.empty() ? "(not set)" : prov->deployment_name) + "\n");
+			callback("api_version = " + (prov->api_version.empty() ? "(not set)" : prov->api_version) + "\n");
+			callback("ssl_verify = " + std::string(prov->ssl_verify ? "true" : "false") + "\n");
+			callback("ca_bundle_path = " + (prov->ca_bundle_path.empty() ? "(not set)" : prov->ca_bundle_path) + "\n");
 		}
 
 		// Local backend fields
@@ -564,21 +545,15 @@ int handle_provider_args(const std::vector<std::string>& args,
 			if (prov->type == "llamacpp") {
 				callback("n_batch = " + std::to_string(prov->n_batch) + "\n");
 				callback("ubatch = " + std::to_string(prov->ubatch) + "\n");
-				if (prov->n_threads > 0) {
-					callback("n_threads = " + std::to_string(prov->n_threads) + "\n");
-				}
+				callback("n_threads = " + std::to_string(prov->n_threads) + (prov->n_threads == 0 ? " (auto)" : "") + "\n");
 				callback("cache_type = " + prov->cache_type + "\n");
 			}
 		}
 
 		// Ollama specific
 		if (prov->type == "ollama") {
-			if (prov->num_ctx > 0) {
-				callback("num_ctx = " + std::to_string(prov->num_ctx) + "\n");
-			}
-			if (prov->num_predict != -1) {
-				callback("num_predict = " + std::to_string(prov->num_predict) + "\n");
-			}
+			callback("num_ctx = " + std::to_string(prov->num_ctx) + (prov->num_ctx == 0 ? " (auto)" : "") + "\n");
+			callback("num_predict = " + std::to_string(prov->num_predict) + (prov->num_predict == -1 ? " (auto)" : "") + "\n");
 		}
 
 		// Sampling parameters (not used by CLI backend)
@@ -589,39 +564,23 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("repeat_penalty = " + std::to_string(prov->repeat_penalty) + "\n");
 			callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
 			callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
-			if (prov->max_tokens > 0) {
-				callback("max_tokens = " + std::to_string(prov->max_tokens) + "\n");
+			callback("max_tokens = " + std::to_string(prov->max_tokens) + (prov->max_tokens == 0 ? " (auto)" : "") + "\n");
+			std::string stops = "stop_sequences = [";
+			for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
+				if (i > 0) stops += ", ";
+				stops += "\"" + prov->stop_sequences[i] + "\"";
 			}
-			if (!prov->stop_sequences.empty()) {
-				std::string stops = "stop_sequences = [";
-				for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
-					if (i > 0) stops += ", ";
-					stops += "\"" + prov->stop_sequences[i] + "\"";
-				}
-				stops += "]\n";
-				callback(stops);
-			}
+			stops += "]\n";
+			callback(stops);
 		}
 
 		// Rate limits
-		if (prov->rate_limits.requests_per_second > 0) {
-			callback("requests_per_second = " + std::to_string(prov->rate_limits.requests_per_second) + "\n");
-		}
-		if (prov->rate_limits.requests_per_minute > 0) {
-			callback("requests_per_minute = " + std::to_string(prov->rate_limits.requests_per_minute) + "\n");
-		}
-		if (prov->rate_limits.tokens_per_minute > 0) {
-			callback("tokens_per_minute = " + std::to_string(prov->rate_limits.tokens_per_minute) + "\n");
-		}
-		if (prov->rate_limits.tokens_per_day > 0) {
-			callback("tokens_per_day = " + std::to_string(prov->rate_limits.tokens_per_day) + "\n");
-		}
-		if (prov->rate_limits.tokens_per_month > 0) {
-			callback("tokens_per_month = " + std::to_string(prov->rate_limits.tokens_per_month) + "\n");
-		}
-		if (prov->rate_limits.max_cost_per_month > 0) {
-			callback("max_cost_per_month = " + std::to_string(prov->rate_limits.max_cost_per_month) + "\n");
-		}
+		callback("requests_per_second = " + std::to_string(prov->rate_limits.requests_per_second) + (prov->rate_limits.requests_per_second == 0 ? " (unlimited)" : "") + "\n");
+		callback("requests_per_minute = " + std::to_string(prov->rate_limits.requests_per_minute) + (prov->rate_limits.requests_per_minute == 0 ? " (unlimited)" : "") + "\n");
+		callback("tokens_per_minute = " + std::to_string(prov->rate_limits.tokens_per_minute) + (prov->rate_limits.tokens_per_minute == 0 ? " (unlimited)" : "") + "\n");
+		callback("tokens_per_day = " + std::to_string(prov->rate_limits.tokens_per_day) + (prov->rate_limits.tokens_per_day == 0 ? " (unlimited)" : "") + "\n");
+		callback("tokens_per_month = " + std::to_string(prov->rate_limits.tokens_per_month) + (prov->rate_limits.tokens_per_month == 0 ? " (unlimited)" : "") + "\n");
+		callback("max_cost_per_month = " + std::to_string(prov->rate_limits.max_cost_per_month) + (prov->rate_limits.max_cost_per_month == 0 ? " (unlimited)" : "") + "\n");
 
 		// Pricing
 		if (prov->pricing.dynamic) {

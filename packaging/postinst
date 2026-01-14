@@ -1,0 +1,34 @@
+#!/bin/bash
+set -e
+
+# Create shepherd system user if it doesn't exist
+if ! getent passwd shepherd >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin \
+        --comment "Shepherd LLM Server" shepherd
+fi
+
+# Create and set ownership of data directories
+mkdir -p /var/lib/shepherd
+mkdir -p /var/cache/shepherd
+mkdir -p /var/log/shepherd
+chown shepherd:shepherd /var/lib/shepherd
+chown shepherd:shepherd /var/cache/shepherd
+chown shepherd:shepherd /var/log/shepherd
+chmod 750 /var/lib/shepherd
+chmod 750 /var/cache/shepherd
+chmod 750 /var/log/shepherd
+
+# Ensure config directory has correct permissions
+if [ -d /etc/shepherd ]; then
+    chown root:shepherd /etc/shepherd
+    chmod 750 /etc/shepherd
+fi
+
+# Reload systemd to pick up new service file
+systemctl daemon-reload || true
+
+echo "Shepherd installed successfully."
+echo "  - Configure: /etc/shepherd/"
+echo "  - Data: /var/lib/shepherd/"
+echo "  - Enable service: systemctl enable shepherd"
+echo "  - Start service: systemctl start shepherd"

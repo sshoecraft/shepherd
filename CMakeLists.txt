@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(shepherd LANGUAGES CXX)
+project(shepherd
+    VERSION 2.20.1
+    DESCRIPTION "Shepherd LLM Server"
+    HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
+    LANGUAGES CXX
+)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -368,7 +373,8 @@ if(ENABLE_LLAMACPP)
 endif()
 
 # replxx for line editing (used in non-TUI mode)
-add_subdirectory(vendor/replxx)
+# EXCLUDE_FROM_ALL prevents replxx's install() targets from running
+add_subdirectory(vendor/replxx EXCLUDE_FROM_ALL)
 target_link_libraries(shepherd PRIVATE replxx)
 target_include_directories(shepherd PRIVATE vendor/replxx/include)
 message(STATUS "Using replxx for line editing")
@@ -433,8 +439,68 @@ message(STATUS "  TensorRT backend: ${ENABLE_TENSORRT}")
 message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
 
-# Install targets
-install(TARGETS shepherd RUNTIME DESTINATION bin)
+# =============================================================================
+# Installation (FHS-compliant)
+# =============================================================================
+
+include(GNUInstallDirs)
+
+# Binary
+install(TARGETS shepherd
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Systemd service file
+configure_file(
+    "${CMAKE_SOURCE_DIR}/shepherd.service.in"
+    "${CMAKE_BINARY_DIR}/shepherd.service"
+    @ONLY
+)
+install(
+    FILES "${CMAKE_BINARY_DIR}/shepherd.service"
+    DESTINATION lib/systemd/system
+)
+
+# Create config directory (empty, will be populated by user)
+install(DIRECTORY DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/shepherd)
+
+# =============================================================================
+# CPack Configuration
+# =============================================================================
+
+set(CPACK_PACKAGE_NAME "shepherd")
+set(CPACK_PACKAGE_VENDOR "Big Attic House")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Shepherd LLM Server - Multi-backend LLM inference server")
+set(CPACK_PACKAGE_DESCRIPTION "Shepherd is a flexible LLM server supporting multiple backends including llama.cpp, TensorRT-LLM, and various API providers.")
+set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_PACKAGE_CONTACT "steve@bigattichouse.com")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+
+# Debian-specific
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Steve <steve@bigattichouse.com>")
+set(CPACK_DEBIAN_PACKAGE_SECTION "net")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libcurl4, libsqlite3-0, libssl3, libncursesw6")
+set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
+    "${CMAKE_SOURCE_DIR}/packaging/postinst;${CMAKE_SOURCE_DIR}/packaging/prerm;${CMAKE_SOURCE_DIR}/packaging/postrm"
+)
+
+# RPM-specific
+set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Internet")
+set(CPACK_RPM_PACKAGE_REQUIRES "libcurl, sqlite, openssl, ncurses")
+set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/packaging/postinst")
+set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/packaging/prerm")
+set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE "${CMAKE_SOURCE_DIR}/packaging/postrm")
+
+# Generator selection
+set(CPACK_GENERATOR "TGZ")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND CPACK_GENERATOR "DEB" "RPM")
+endif()
+
+include(CPack)
 
 # Test suite (optional, excluded from default build)
 # Build with: cmake -DBUILD_TESTS=ON ..

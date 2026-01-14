@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+# Stop and disable the service before removal
+if systemctl is-active --quiet shepherd; then
+    systemctl stop shepherd || true
+fi
+
+if systemctl is-enabled --quiet shepherd 2>/dev/null; then
+    systemctl disable shepherd || true
+fi

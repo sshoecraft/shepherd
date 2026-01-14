@@ -5,6 +5,7 @@
 LLAMACPP?=OFF
 TENSORRT?=OFF
 TESTS?=OFF
+BUILD_TYPE?=Debug
 
 ifneq ("$(wildcard ~/.shepherd_opts)","")
 include ~/.shepherd_opts
@@ -26,17 +27,10 @@ endif
 
 config:
 	rm -rf build; mkdir -p build
-	cd build && $(_ACT) cmake -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
-
-rconfig:
-	rm -rf build; mkdir -p build
-	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
-
-gconfig:
-	rm -rf build; mkdir -p build
-	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-g -O0" -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
+	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) ..
 
 install:
+	cd build && make install
 
 clean:
 	(cd build && make clean)

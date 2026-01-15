@@ -652,7 +652,37 @@ void APIServer::register_endpoints() {
                         };
 
                         std::string finish_reason = "stop";
-                        backend_ptr->generate_from_session(request_session, max_tokens);
+                        try {
+                            backend_ptr->generate_from_session(request_session, max_tokens);
+                        } catch (const ContextFullException& e) {
+                            // Send error in stream format and close
+                            json error_chunk = {
+                                {"error", {
+                                    {"message", e.what()},
+                                    {"type", "invalid_request_error"},
+                                    {"code", "context_length_exceeded"}
+                                }}
+                            };
+                            std::string error_data = "data: " + error_chunk.dump() + "\n\ndata: [DONE]\n\n";
+                            sink.write(error_data.c_str(), error_data.size());
+                            sink.done();
+                            request_handler = nullptr;
+                            return false;
+                        } catch (const std::exception& e) {
+                            // Send generic error in stream format
+                            json error_chunk = {
+                                {"error", {
+                                    {"message", e.what()},
+                                    {"type", "server_error"},
+                                    {"code", "500"}
+                                }}
+                            };
+                            std::string error_data = "data: " + error_chunk.dump() + "\n\ndata: [DONE]\n\n";
+                            sink.write(error_data.c_str(), error_data.size());
+                            sink.done();
+                            request_handler = nullptr;
+                            return false;
+                        }
                         request_handler = nullptr;  // Clear after request
 
                         // Check for accumulated tool calls (for channel-based models like GPT-OSS)
@@ -763,7 +793,21 @@ void APIServer::register_endpoints() {
                 return true;
             };
 
-            backend->generate_from_session(request_session, max_tokens);
+            try {
+                backend->generate_from_session(request_session, max_tokens);
+            } catch (const ContextFullException& e) {
+                request_handler = nullptr;
+                res.status = 400;
+                json error_resp = {
+                    {"error", {
+                        {"message", e.what()},
+                        {"type", "invalid_request_error"},
+                        {"code", "context_length_exceeded"}
+                    }}
+                };
+                res.set_content(error_resp.dump(), "application/json");
+                return;
+            }
             request_handler = nullptr;  // Clear after request
 
             // Build Response from accumulated content
@@ -1096,19 +1140,48 @@ void APIServer::register_endpoints() {
                 arguments_json = "{}";
             }
 
-            // Execute the tool
-            ToolResult result = tools->execute(tool_name, arguments_json);
+            // Truncate params for logging
+            std::string params_log = arguments_json;
+            if (params_log.length() > 100) {
+                params_log = params_log.substr(0, 100) + "...";
+            }
 
-            // Log tool execution
-            std::string content_summary = result.content;
-            if (content_summary.length() > 200) {
-                content_summary = content_summary.substr(0, 200) + "...";
+            // Check if tool exists
+            Tool* tool = tools->get(tool_name);
+            if (!tool) {
+                std::cout << "[tool] " << tool_name << ": NOT FOUND (params: " << params_log << ")" << std::endl;
+                res.status = 404;
+                json response = {
+                    {"tool_call_id", tool_call_id},
+                    {"success", false},
+                    {"content", ""},
+                    {"error", "Tool not found: " + tool_name}
+                };
+                res.set_content(response.dump(), "application/json");
+                return;
+            }
+
+            // Log tool call with parameters
+            std::cout << "[tool] " << tool_name << ": calling with " << params_log << std::endl;
+
+            // Execute the tool (uses Frontend::execute_tool for truncation)
+            ToolResult result = execute_tool(*tools, tool_name, arguments_json, tool_call_id);
+
+            // Log result - use summary if available, otherwise truncated content
+            std::string log_summary;
+            if (!result.summary.empty()) {
+                log_summary = result.summary;
+            } else {
+                log_summary = result.content;
+                if (log_summary.length() > 150) {
+                    log_summary = log_summary.substr(0, 150) + "...";
+                }
             }
             // Replace newlines with spaces for single-line logging
-            std::replace(content_summary.begin(), content_summary.end(), '\n', ' ');
+            std::replace(log_summary.begin(), log_summary.end(), '\n', ' ');
 
             if (result.success) {
-                std::cout << "[tool] " << tool_name << ": OK - " << content_summary << std::endl;
+                std::cout << "[tool] " << tool_name << ": OK - " << log_summary << std::endl;
             } else {
                 std::cout << "[tool] " << tool_name << ": FAILED - " << result.error << std::endl;
             }

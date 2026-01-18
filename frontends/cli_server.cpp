@@ -82,7 +82,7 @@ CLIServer::~CLIServer() {
 
 void CLIServer::init(bool no_mcp, bool no_tools) {
     // Use common tool initialization from Frontend base class
-    Frontend::init_tools(session, tools, no_mcp, no_tools);
+    init_tools(no_mcp, no_tools);
 }
 
 

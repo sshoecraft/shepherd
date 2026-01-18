@@ -24,9 +24,6 @@ public:
     void init(bool no_mcp = false, bool no_tools = false) override;
     int run(Provider* cmdline_provider = nullptr) override;
 
-    // Tool management
-    Tools tools;
-
     // Output functions (handle colors based on mode)
     void show_tool_call(const std::string& name, const std::string& params);
     void show_tool_result(const std::string& summary, bool success);

@@ -191,7 +191,7 @@ void CLI::init(bool no_mcp, bool no_tools_flag) {
     };
 
     // Use common tool initialization from Frontend base class
-    Frontend::init_tools(session, tools, no_mcp, no_tools);
+    init_tools(no_mcp, no_tools);
 
     cli_debug(1, "CLI initialized (interactive: " + std::string(interactive_mode ? "yes" : "no") +
               ", colors: " + std::string(colors_enabled ? "yes" : "no") + ")");

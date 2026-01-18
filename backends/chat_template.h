@@ -201,7 +201,8 @@ public:
 class MinjaTemplate : public ChatTemplate {
 public:
     MinjaTemplate(const std::string& template_text, void* template_node_ptr,
-                  const std::string& eos_token = "", const std::string& bos_token = "");
+                  const std::string& eos_token = "", const std::string& bos_token = "",
+                  ModelFamily family = ModelFamily::GENERIC);
     ~MinjaTemplate() override;
 
     std::string format_message(const Message& msg) const override;
@@ -234,6 +235,7 @@ public:
     void* template_node;
     std::string eos_token;
     std::string bos_token;
+    ModelFamily family;
 
 private:
     // Helper to render messages through minja

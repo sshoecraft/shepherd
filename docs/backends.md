@@ -32,6 +32,14 @@ public:
     // Stateless generation (for servers with prefix caching)
     virtual void generate_from_session(Session& session, int max_tokens = 0) = 0;
 
+    // Two-phase generation for streaming with proper HTTP error codes (v2.21.0)
+    // Local backends: Split prefill (decode to KV cache) from generate (inference)
+    // API backends: No-op / passthrough (can't validate against remote server)
+    virtual void prefill_session(Session& session) {}  // May throw ContextFullException
+    virtual void generate_from_prefilled(Session& session, int max_tokens = 0) {
+        generate_from_session(session, max_tokens);  // Default: full operation
+    }
+
     // Token counting for eviction decisions
     virtual int count_message_tokens(
         Message::Role role,

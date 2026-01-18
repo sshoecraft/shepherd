@@ -21,6 +21,20 @@
 #include "llama.cpp/common/sampling.h"
 #endif
 
+// Helper to build consistent ContextFullException message
+// All context full errors should use this for uniform client handling
+static std::string build_context_full_message(size_t context_size, int tokens_used, int tokens_available = -1, int tokens_required = -1) {
+    std::ostringstream msg;
+    msg << "This model's maximum context length is " << context_size << " tokens. "
+        << "Your conversation used " << tokens_used << " tokens";
+
+    if (tokens_available >= 0 && tokens_required >= 0) {
+        msg << ", leaving " << tokens_available << " for generation (minimum " << tokens_required << " required).";
+    } else {
+        msg << ".";
+    }
+    return msg.str();
+}
 
 // LlamaCppBackend implementation
 LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback)
@@ -789,10 +803,12 @@ uint32_t LlamaCppBackend::evict_to_free_space(uint32_t tokens_needed) {
     // and C++ exceptions cannot propagate through C stack frames (undefined behavior)
     if (g_server_mode) {
         dout(1) << "KV cache full in server mode - signaling abort (context_full)" << std::endl;
-        // Return 0 to signal abort - llama_decode will fail and we handle it at the C++ level
+        // Set flag so generate() knows to throw ContextFullException
         context_full_in_server_mode = true;
         context_full_tokens_needed = kv_used + tokens_needed;
-        return 0;  // Signal abort
+        // Return UINT32_MAX to signal intentional abort - llama.cpp will fail without retrying
+        // and our patched llama.cpp won't print the "find_slot failed" error for intentional aborts
+        return UINT32_MAX;
     }
 
     // Get KV cache memory handle for eviction operations
@@ -1167,6 +1183,8 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
                     callback(CallbackEvent::ERROR, "Failed to decode generation prompt at position " + std::to_string(i), "", "");
                 }
             }
+            // Update kv_cache_mirror with generation prompt tokens
+            kv_cache_mirror.insert(kv_cache_mirror.end(), prompt_tokens.begin(), prompt_tokens.end());
         }
     }
 
@@ -1174,6 +1192,10 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
     // Tools are OK with streaming - the terminal filter will hide <tool_call> tags
     bool suppress_stream = g_server_mode;
     std::string raw_response = run_inference("", max_tokens, suppress_stream, callback);  // Empty prompt since everything is cached
+
+    // Update kv_cache_mirror with generated tokens
+    kv_cache_mirror.insert(kv_cache_mirror.end(), last_generated_tokens.begin(), last_generated_tokens.end());
+
     dout(1) << "Got raw response length: " + std::to_string(raw_response.length()) << std::endl;
     // Log first 500 chars to avoid terminal truncation issues
     std::string debug_content = raw_response.length() > 500 ? raw_response.substr(0, 500) + "..." : raw_response;
@@ -1224,6 +1246,8 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
                     dout(1) << std::string("WARNING: ") +"Failed to decode closing tag into KV cache" << std::endl;
                 } else {
                     dout(1) << "Added closing tag to KV cache: " + assistant_end_tag << std::endl;
+                    // Update kv_cache_mirror with closing tokens
+                    kv_cache_mirror.insert(kv_cache_mirror.end(), closing_tokens.begin(), closing_tokens.begin() + n_closing);
                 }
             }
         }
@@ -1249,6 +1273,11 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
             llama_batch end_batch = llama_batch_get_one(end_tokens.data(), 1);
             if (llama_decode(ctx, end_batch) == 0) {
                 dout(1) << "Harmony: replaced <|return|> with <|end|> in KV cache for proper multi-turn context" << std::endl;
+                // Update kv_cache_mirror: remove <|return|>, add <|end|>
+                if (!kv_cache_mirror.empty()) {
+                    kv_cache_mirror.pop_back();  // Remove <|return|>
+                }
+                kv_cache_mirror.push_back(end_tokens[0]);  // Add <|end|>
             } else {
                 dout(1) << std::string("WARNING: ") + "Failed to add <|end|> token after removing <|return|>" << std::endl;
             }
@@ -1264,6 +1293,16 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
     // This includes: generation_prompt + generated_tokens + closing_tag
     // Note: last_completion_tokens is set by run_inference() to n_generated
     last_assistant_kv_tokens = n_tokens + last_completion_tokens + n_closing;
+
+    // Verify kv_cache_mirror is in sync with actual KV cache (server mode only)
+    // CLI mode doesn't use prefix caching, so the mirror isn't needed
+    if (g_server_mode) {
+        llama_memory_t mem = llama_get_memory(ctx);
+        int actual_kv = llama_memory_seq_pos_max(mem, 0) + 1;
+        dout(1) << "KV cache sync check: mirror=" + std::to_string(kv_cache_mirror.size()) +
+                   " actual=" + std::to_string(actual_kv) +
+                   (kv_cache_mirror.size() == static_cast<size_t>(actual_kv) ? " (IN SYNC)" : " (OUT OF SYNC!)") << std::endl;
+    }
 
     // Return response directly - main will handle tool parsing and cleanup
     return raw_response;
@@ -1373,9 +1412,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                       std::to_string(n_prompt_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
             common_sampler_free(sampler);
             if (g_server_mode) {
-                throw ContextFullException("This model's maximum context length is " +
-                    std::to_string(context_size) + " tokens. However, your messages resulted in " +
-                    std::to_string(n_prompt_tokens) + " tokens.");
+                throw ContextFullException(build_context_full_message(context_size, n_prompt_tokens));
             }
             return "Error: Prompt too large for context window";
         }
@@ -1406,6 +1443,7 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
     // Generate tokens
     std::string response;
     int n_generated = 0;
+    last_generated_tokens.clear();  // Track for kv_cache_mirror sync
 
     // Note: TerminalIO marker update removed
     bool cancelled_by_escape = false;
@@ -1467,9 +1505,8 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                 }
                 dout(1) << "Harmony stop token " << eog_text << " - stopping generation" << std::endl;
             } else {
-                // For non-harmony models, output the token
-                response.append(eog_str, eog_len);
-                output(eog_text);
+                // For non-harmony models, just stop - don't output the EOG token
+                dout(1) << "EOG token - stopping generation" << std::endl;
             }
             break;
         }
@@ -1596,9 +1633,16 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         }
 
         if (!decode_ok) {
+            // Check if this was due to context full in server mode
+            if (context_full_in_server_mode) {
+                throw ContextFullException(build_context_full_message(context_size, context_size));
+            }
             callback(CallbackEvent::ERROR, "Failed to evaluate generated token after retries", "", "");
             break;
         }
+
+        // Track generated token for kv_cache_mirror sync (only after successful decode)
+        last_generated_tokens.push_back(next_token);
 
         n_generated++;
     }
@@ -1814,9 +1858,7 @@ bool LlamaCppBackend::format_and_decode_message(
         callback(CallbackEvent::ERROR, "Message too large for context: " +
                   std::to_string(n_tokens) + " tokens exceeds max " + std::to_string(context_size), "", "");
         if (g_server_mode) {
-            throw ContextFullException("This model's maximum context length is " +
-                std::to_string(context_size) + " tokens. However, your messages resulted in " +
-                std::to_string(n_tokens) + " tokens.");
+            throw ContextFullException(build_context_full_message(context_size, n_tokens));
         }
         return false;
     }
@@ -1841,9 +1883,7 @@ bool LlamaCppBackend::format_and_decode_message(
 
             if (llama_decode(ctx, batch) != 0) {
                 if (context_full_in_server_mode) {
-                    throw ContextFullException("This model's maximum context length is " +
-                        std::to_string(context_size) + " tokens. However, your messages resulted in " +
-                        std::to_string(context_full_tokens_needed) + " tokens.");
+                    throw ContextFullException(build_context_full_message(context_size, context_full_tokens_needed));
                 }
 
                 if (retry_count < MAX_DECODE_RETRIES) {
@@ -1889,17 +1929,34 @@ bool LlamaCppBackend::format_and_decode_message(
 
 void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 #ifdef ENABLE_LLAMACPP
+    // Two-phase generation: prefill then generate
+    // This allows API server to catch ContextFullException before starting streaming
+    try {
+        prefill_session(session);
+    } catch (const ContextFullException&) {
+        // Re-throw context full exceptions
+        throw;
+    } catch (const std::exception& e) {
+        // Convert other exceptions to callback errors for backwards compatibility
+        callback(CallbackEvent::ERROR, e.what(), "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+    generate_from_prefilled(session, max_tokens);
+#else
+    callback(CallbackEvent::ERROR, "LlamaCpp backend not compiled in", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
+#endif
+}
+
+void LlamaCppBackend::prefill_session(Session& session) {
+#ifdef ENABLE_LLAMACPP
     if (!is_ready()) {
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "LlamaCpp backend not initialized";
-        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
+        throw std::runtime_error("LlamaCpp backend not initialized");
     }
 
     auto request_start = std::chrono::high_resolution_clock::now();
-    dout(1) << "LlamaCpp generate_from_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
+    dout(1) << "LlamaCpp prefill_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
 
     // Clear accumulated tool calls from previous generation
     clear_tool_calls();
@@ -1912,8 +1969,6 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     // ============================================================================
     // TOKEN-LEVEL PREFIX CACHING
     // Render full conversation, tokenize, compare with cached tokens, decode delta
-    // This approach avoids token count mismatches that occurred with message-level
-    // tracking (especially for harmony models where analysis content is dropped)
     // ============================================================================
 
     // Step 1: Build message list for rendering
@@ -1931,20 +1986,12 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     }
 
     // Step 2: Render full conversation WITHOUT generation prompt
-    // generate() will add the generation prompt itself
     std::string rendered;
     try {
         rendered = chat_template->format_conversation(all_messages, session.tools, false);
     } catch (const std::exception& e) {
         dout(1) << "Template rendering failed: " << e.what() << std::endl;
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "Template rendering failed: " + std::string(e.what());
-        callback(CallbackEvent::ERROR, err_resp.error, "error", "");
-        callback(CallbackEvent::STOP, "error", "", "");
-        return;
+        throw std::runtime_error("Template rendering failed: " + std::string(e.what()));
     }
     auto render_end = std::chrono::high_resolution_clock::now();
     auto render_ms = std::chrono::duration_cast<std::chrono::microseconds>(render_end - request_start).count() / 1000.0;
@@ -1952,23 +1999,16 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     dout(2) << "Rendered prompt:\n" << rendered << std::endl;
 
     // Step 3: Tokenize the rendered conversation
-    // Note: add_special=true to match llama-server behavior (adds BOS if model expects it)
     std::vector<llama_token> new_tokens(rendered.length() + 256);
     int n_new_tokens = llama_tokenize(vocab, rendered.c_str(), rendered.length(),
                                        new_tokens.data(), new_tokens.size(), true, true);
     if (n_new_tokens < 0) {
-        // Buffer too small, resize and retry
         new_tokens.resize(-n_new_tokens + 1);
         n_new_tokens = llama_tokenize(vocab, rendered.c_str(), rendered.length(),
                                        new_tokens.data(), new_tokens.size(), true, true);
     }
     if (n_new_tokens < 0) {
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "Failed to tokenize conversation";
-        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
+        throw std::runtime_error("Failed to tokenize conversation");
     }
     new_tokens.resize(n_new_tokens);
 
@@ -1976,7 +2016,58 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
     auto tokenize_ms = std::chrono::duration_cast<std::chrono::microseconds>(tokenize_end - render_end).count() / 1000.0;
     dout(1) << "Tokenize: " << tokenize_ms << "ms, " << n_new_tokens << " tokens, cached: " << kv_cache_mirror.size() << " tokens" << std::endl;
 
-    // Step 4: Find matching prefix (compare token arrays)
+#ifdef _DEBUG
+    // Dump rendered template to /tmp for inspection when debug level >= 2
+    // Use _overflow suffix for prompts that exceed context
+    if (g_debug_level >= 2) {
+        bool will_overflow = (n_new_tokens > (int)context_size);
+        std::string dump_path = will_overflow ? "/tmp/shepherd_rendered_overflow.txt" : "/tmp/shepherd_rendered_prompt.txt";
+        std::ofstream dump_file(dump_path);
+        if (dump_file.is_open()) {
+            dump_file << "=== RENDERED PROMPT (" << rendered.length() << " chars, " << n_new_tokens << " tokens, context=" << context_size << ") ===\n";
+            dump_file << rendered;
+            dump_file.close();
+            dout(2) << "Dumped rendered prompt to " << dump_path << std::endl;
+        }
+    }
+#endif
+
+#ifdef _DEBUG
+    // Token breakdown for debugging context usage
+    if (g_debug_level >= 1) {
+        int tool_def_tokens = 0;
+        int user_tokens = 0, assistant_tokens = 0, tool_result_tokens = 0;
+
+        // Count tool definitions by rendering with vs without tools
+        if (!session.tools.empty()) {
+            std::vector<Session::Tool> empty_tools;
+            std::string without_tools = chat_template->format_conversation(all_messages, empty_tools, false);
+            int tokens_without = count_tokens_in_text(without_tools);
+            tool_def_tokens = n_new_tokens - tokens_without;
+        }
+
+        // Count message tokens by role (always tokenize for accurate debug output)
+        for (const auto& msg : session.messages) {
+            int msg_tokens = count_tokens_in_text(msg.content);
+            switch (msg.role) {
+                case Message::USER: user_tokens += msg_tokens; break;
+                case Message::ASSISTANT: assistant_tokens += msg_tokens; break;
+                case Message::TOOL_RESPONSE: tool_result_tokens += msg_tokens; break;
+                default: break;
+            }
+        }
+
+        int template_overhead = n_new_tokens - tool_def_tokens - user_tokens - assistant_tokens - tool_result_tokens;
+        dout(1) << "Token breakdown: tools=" << tool_def_tokens
+                << " user=" << user_tokens
+                << " assistant=" << assistant_tokens
+                << " tool_results=" << tool_result_tokens
+                << " template_overhead=" << template_overhead
+                << " total=" << n_new_tokens << std::endl;
+    }
+#endif
+
+    // Step 4: Find matching prefix
     size_t prefix_len = 0;
     size_t max_compare = std::min(kv_cache_mirror.size(), new_tokens.size());
     while (prefix_len < max_compare && kv_cache_mirror[prefix_len] == new_tokens[prefix_len]) {
@@ -1988,33 +2079,73 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
             << " tokens match, " << delta_tokens << " new tokens to decode" << std::endl;
 
     // Step 5: Clear KV cache from divergence point if needed
-    // CRITICAL: Check ACTUAL KV cache size, not just kv_cache_mirror.size()
-    // After generation, KV cache has untracked tokens (gen_prompt + response + closing)
-    // that aren't in kv_cache_mirror. We must clear these before decoding new tokens.
     int actual_kv_tokens = get_context_token_count();
     if (prefix_len < static_cast<size_t>(actual_kv_tokens)) {
         dout(1) << "Clearing KV cache from position " << prefix_len
                 << " (actual_kv=" << actual_kv_tokens << ", tracked=" << kv_cache_mirror.size() << ")" << std::endl;
         llama_memory_seq_rm(mem, 0, prefix_len, -1);
     }
-    // Update tracked tokens to match cleared state
     if (prefix_len < kv_cache_mirror.size()) {
         kv_cache_mirror.resize(prefix_len);
     }
 
-    // Step 6: Decode delta tokens (only the new ones after prefix)
+    // Step 6: Decode delta tokens
     if (delta_tokens > 0) {
-        // Check if total would exceed context
-        if (prefix_len + delta_tokens > context_size) {
-            throw ContextFullException("This model's maximum context length is " +
-                std::to_string(context_size) + " tokens. However, your messages resulted in " +
-                std::to_string(prefix_len + delta_tokens) + " tokens.");
+        // Check if total would exceed 90% of context (reserve 10% for generation)
+        int reserved_for_generation = context_size / 10;
+        int max_prefill = context_size - reserved_for_generation;
+        int total_after_prefill = prefix_len + delta_tokens;
+
+        dout(1) << "Generation buffer check: total_after_prefill=" << total_after_prefill
+                << " max_prefill=" << max_prefill << " (90% of " << context_size << ")" << std::endl;
+
+        if (total_after_prefill > max_prefill) {
+            int available = context_size - total_after_prefill;
+            throw ContextFullException(build_context_full_message(context_size, total_after_prefill,
+                available, reserved_for_generation));
         }
 
-        // Start timing for prefill
+        // Also check hard limit
+        if (total_after_prefill > context_size) {
+#ifdef _DEBUG
+            // Log token breakdown before throwing so we can debug context overflow
+            if (g_debug_level >= 1) {
+                int tool_def_tokens = 0;
+                int user_tokens = 0, assistant_tokens = 0, tool_result_tokens = 0;
+
+                // Count tool definitions by rendering with vs without tools
+                if (!session.tools.empty()) {
+                    std::vector<Session::Tool> empty_tools;
+                    std::string without_tools = chat_template->format_conversation(all_messages, empty_tools, false);
+                    int tokens_without = count_tokens_in_text(without_tools);
+                    tool_def_tokens = n_new_tokens - tokens_without;
+                }
+
+                // Count message tokens by role
+                for (const auto& msg : session.messages) {
+                    int msg_tokens = msg.tokens > 0 ? msg.tokens : count_tokens_in_text(msg.content);
+                    switch (msg.role) {
+                        case Message::USER: user_tokens += msg_tokens; break;
+                        case Message::ASSISTANT: assistant_tokens += msg_tokens; break;
+                        case Message::TOOL_RESPONSE: tool_result_tokens += msg_tokens; break;
+                        default: break;
+                    }
+                }
+
+                int template_overhead = n_new_tokens - tool_def_tokens - user_tokens - assistant_tokens - tool_result_tokens;
+                dout(1) << "CONTEXT OVERFLOW breakdown: tools=" << tool_def_tokens
+                        << " user=" << user_tokens
+                        << " assistant=" << assistant_tokens
+                        << " tool_results=" << tool_result_tokens
+                        << " template_overhead=" << template_overhead
+                        << " total=" << (prefix_len + delta_tokens) << "/" << context_size << std::endl;
+            }
+#endif
+            throw ContextFullException(build_context_full_message(context_size, prefix_len + delta_tokens));
+        }
+
         auto prefill_start_time = std::chrono::high_resolution_clock::now();
 
-        // Decode in batches
         context_full_in_server_mode = false;
         for (size_t i = prefix_len; i < new_tokens.size(); i += n_batch) {
             int batch_size = std::min(n_batch, static_cast<int>(new_tokens.size() - i));
@@ -2022,18 +2153,12 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 
             if (llama_decode(ctx, batch) != 0) {
                 if (context_full_in_server_mode) {
-                    throw ContextFullException("Context full during prefix decode");
+                    throw ContextFullException(build_context_full_message(context_size, new_tokens.size()));
                 }
-                Response err_resp;
-                err_resp.success = false;
-                err_resp.code = Response::ERROR;
-                err_resp.finish_reason = "error";
-                err_resp.error = "Failed to decode tokens to KV cache";
-                callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
+                throw std::runtime_error("Failed to decode tokens to KV cache");
             }
         }
 
-        // End timing
         auto prefill_end_time = std::chrono::high_resolution_clock::now();
         auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end_time - prefill_start_time);
         double prefill_seconds = prefill_duration.count() / 1000.0;
@@ -2042,7 +2167,6 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
         dout(1) << "Prefill: " << delta_tokens << " tokens in " << prefill_duration.count() << "ms ("
                 << std::fixed << std::setprecision(1) << prefill_tps << " t/s)" << std::endl;
 
-        // Send stats callback
         int context_used = get_context_token_count();
         std::ostringstream stats;
         stats << "[Prefill: " << delta_tokens << " tokens, "
@@ -2051,45 +2175,76 @@ void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
         callback(CallbackEvent::STATS, stats.str(), "", "");
     } else {
         dout(1) << "100% prefix cache hit - no tokens to decode" << std::endl;
+
+        // Still need to check 10% buffer even with cache hit
+        int reserved_for_generation = context_size / 10;
+        int max_prefill = context_size - reserved_for_generation;
+        if (static_cast<int>(new_tokens.size()) > max_prefill) {
+            int available = context_size - new_tokens.size();
+            throw ContextFullException(build_context_full_message(context_size, new_tokens.size(),
+                available, reserved_for_generation));
+        }
     }
 
-    // Step 7: Update kv_cache_mirror to match what's now in KV cache (pre-generation)
+    // Step 7: Update state for generate()
     kv_cache_mirror = new_tokens;
 
-    // Update member variables used by generate() for token calculations
-    // System message tokens (first message in all_messages if it's SYSTEM)
-    if (!all_messages.empty() && all_messages[0].role == Message::SYSTEM) {
-        system_formatted_tokens = all_messages[0].tokens;
+    // Calculate system + tools token count
+    // Tools may be in a separate developer message, so we calculate by comparing with/without tools
+    if (!session.tools.empty()) {
+        std::vector<Session::Tool> empty_tools;
+        std::string without_tools = chat_template->format_conversation(all_messages, empty_tools, false);
+        int tokens_without_tools = count_tokens_in_text(without_tools);
+        system_formatted_tokens = n_new_tokens - tokens_without_tools;
+    } else if (!all_messages.empty() && all_messages[0].role == Message::SYSTEM) {
+        system_formatted_tokens = count_tokens_in_text(all_messages[0].content);
     } else {
         system_formatted_tokens = 0;
     }
 
-    // Last user message tokens
-    if (session.last_user_message_index >= 0) {
-        current_user_formatted_tokens = session.last_user_message_tokens;
+    // Calculate last user message token count
+    if (session.last_user_message_index >= 0 &&
+        session.last_user_message_index < (int)session.messages.size()) {
+        const auto& last_user = session.messages[session.last_user_message_index];
+        // Use count_message_tokens to get rendered token count (includes template overhead)
+        current_user_formatted_tokens = count_message_tokens(Message::USER, last_user.content, "", "");
+        session.last_user_message_tokens = current_user_formatted_tokens;
     } else {
         current_user_formatted_tokens = 0;
     }
 
-    dout(1) << "Server mode generation - system_tokens=" + std::to_string(system_formatted_tokens) +
+    dout(1) << "Prefill complete - kv_cache_size=" + std::to_string(kv_cache_mirror.size()) +
+              ", system_tokens=" + std::to_string(system_formatted_tokens) +
               ", user_tokens=" + std::to_string(current_user_formatted_tokens) << std::endl;
+#else
+    throw std::runtime_error("LlamaCpp backend not compiled in");
+#endif
+}
 
-    // Generate response (pass streaming callback if provided)
+void LlamaCppBackend::generate_from_prefilled(Session& session, int max_tokens) {
+#ifdef ENABLE_LLAMACPP
+    if (!is_ready()) {
+        callback(CallbackEvent::ERROR, "LlamaCpp backend not initialized", "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+
+    dout(1) << "LlamaCpp generate_from_prefilled called" << std::endl;
+
+    // Generate response
     std::string result = generate(session, max_tokens, callback);
 
-    // Update session token counts from KV cache (session is source of truth)
-    // Use last_completion_tokens for API (excludes gen_prompt tokens like <|start|>assistant)
+    // Update session token counts
     int kv_tokens = get_context_token_count();
     session.total_tokens = kv_tokens;
     session.last_prompt_tokens = kv_tokens - last_completion_tokens;
     session.last_assistant_message_tokens = last_completion_tokens;
 
-    dout(1) << "generate_from_session token update: kv_tokens=" << kv_tokens
+    dout(1) << "generate_from_prefilled token update: kv_tokens=" << kv_tokens
             << ", completion_tokens=" << last_completion_tokens
             << ", prompt_tokens=" << session.last_prompt_tokens << std::endl;
 
-    // Content already delivered via callback during generate()
-    // Signal completion with correct finish_reason
+    // Signal completion
     std::string finish_reason = last_generation_hit_length_limit ? "length" : "stop";
     callback(CallbackEvent::STOP, finish_reason, "", "");
 #else

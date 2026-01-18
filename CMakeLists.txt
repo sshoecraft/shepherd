@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.20.1
+    VERSION 2.21.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
 )
+
+# Generate version.h from template
+configure_file(version.h.in ${CMAKE_SOURCE_DIR}/version.h @ONLY)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

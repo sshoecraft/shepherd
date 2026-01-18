@@ -482,6 +482,13 @@ int Server::run(Provider* cmdline_provider) {
     // Let subclass do any startup work
     on_server_start();
 
+    // Set up HTTP access logging
+    tcp_server.set_logger([](const httplib::Request& req, const httplib::Response& res) {
+        std::cout << "[http] " << req.remote_addr << " - \""
+                  << req.method << " " << req.path << " HTTP/1.1\" "
+                  << res.status << std::endl;
+    });
+
     std::cout << server_type << " server listening on " << host << ":" << port << std::endl;
 
     // Start TCP server (blocks until stopped)

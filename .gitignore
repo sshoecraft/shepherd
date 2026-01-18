@@ -2,6 +2,9 @@
 build/
 cmake-build-*/
 
+# Generated files
+version.h
+
 # Executables
 shepherd
 *.exe

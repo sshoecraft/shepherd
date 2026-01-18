@@ -156,7 +156,7 @@ void TUI::init(bool no_mcp, bool no_tools_flag) {
         return output_callback(type, content, tool_name, tool_call_id);
     };
 
-    Frontend::init_tools(session, tools, no_mcp, no_tools);
+    init_tools(no_mcp, no_tools);
     init_ncurses();
     tui_debug(1, "TUI initialized");
 }

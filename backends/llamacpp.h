@@ -29,6 +29,8 @@ public:
                     const std::string& tool_name = "", const std::string& tool_id = "",
                     int max_tokens = 0) override;
     void generate_from_session(Session& session, int max_tokens = 0) override;
+    void prefill_session(Session& session) override;
+    void generate_from_prefilled(Session& session, int max_tokens = 0) override;
 
     std::vector<std::string> get_tool_call_markers() const override;
     std::vector<std::string> get_tool_call_end_markers() const override;
@@ -152,6 +154,7 @@ private:
     bool initialized = false;
     int last_assistant_kv_tokens = 0;
     int last_completion_tokens = 0;  // Tokens generated in last response (for KV tracking)
+    std::vector<llama_token> last_generated_tokens;  // Generated tokens for kv_cache_mirror sync
 
     // Server mode context-full signaling (can't throw from C callback)
     bool context_full_in_server_mode = false;

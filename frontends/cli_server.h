@@ -67,9 +67,6 @@ public:
     /// @brief Initialize tools and RAG
     void init(bool no_mcp = false, bool no_tools = false) override;
 
-    /// Tool management
-    Tools tools;
-
 protected:
     /// @brief Register CLI server endpoints
     void register_endpoints() override;

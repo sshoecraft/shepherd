@@ -54,6 +54,8 @@ public:
                     const std::string& tool_name = "", const std::string& tool_id = "",
                     int max_tokens = 0) override;
     void generate_from_session(Session& session, int max_tokens = 0) override;
+    void prefill_session(Session& session) override;
+    void generate_from_prefilled(Session& session, int max_tokens = 0) override;
     int count_message_tokens(Message::Role role, const std::string& content,
                             const std::string& tool_name = "",
                             const std::string& tool_id = "") override;

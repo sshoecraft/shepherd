@@ -130,6 +130,33 @@ std::vector<std::string> thinking_end_markers;    // e.g., "</think>"
 
 ## Generation Flow
 
+### Two-Phase Generation (v2.21.0)
+
+Generation can be split into two phases to support proper HTTP error codes in streaming mode:
+
+1. **`prefill_session(session)`** - Prepares context for generation:
+   - Renders conversation via chat template
+   - Tokenizes the rendered text
+   - Compares with KV cache mirror for prefix caching
+   - Decodes delta tokens into KV cache
+   - Throws `ContextFullException` if context would overflow
+
+2. **`generate_from_prefilled(session, max_tokens)`** - Generates output:
+   - Calls `generate()` with the streaming callback
+   - Updates session token counts
+   - Fires STOP callback
+
+The convenience method `generate_from_session()` simply calls both in sequence:
+
+```cpp
+void generate_from_session(Session& session, int max_tokens) {
+    prefill_session(session);
+    generate_from_prefilled(session, max_tokens);
+}
+```
+
+This split allows the API server to catch `ContextFullException` BEFORE committing to streaming (before HTTP 200 is sent), returning a proper HTTP 400 error response.
+
 ### Sampling Chain
 
 The sampler chain is configured in this order (per llama.cpp recommendations):

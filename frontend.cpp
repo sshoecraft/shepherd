@@ -155,7 +155,7 @@ bool Frontend::connect_provider(const std::string& name) {
     }
 }
 
-void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools) {
+void Frontend::init_tools(bool no_mcp, bool no_tools) {
     // Initialize RAG system using global config
     std::string db_path = config->memory_database;
     if (db_path.empty()) {

@@ -1,5 +1,6 @@
 #include "chat_template.h"
 #include "shepherd.h"
+#include "models.h"
 #include "nlohmann/json.hpp"
 #include <ctime>
 
@@ -224,9 +225,10 @@ ModelFamily GLM4Template::get_family() const {
 // ==================== MinjaTemplate Implementation ====================
 
 MinjaTemplate::MinjaTemplate(const std::string& template_text, void* template_node_ptr,
-                             const std::string& eos_tok, const std::string& bos_tok)
+                             const std::string& eos_tok, const std::string& bos_tok,
+                             ModelFamily fam)
     : template_text(template_text), template_node(template_node_ptr),
-      eos_token(eos_tok), bos_token(bos_tok) {
+      eos_token(eos_tok), bos_token(bos_tok), family(fam) {
 }
 
 MinjaTemplate::~MinjaTemplate() {
@@ -348,6 +350,7 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
             tools_array.push_back(tool_obj);
         }
         context->set("tools", tools_array);
+        context->set("tools_in_user_message", minja::Value(false));
     }
 
     // Render through template
@@ -431,7 +434,7 @@ std::string MinjaTemplate::get_assistant_end_tag() const {
 }
 
 ModelFamily MinjaTemplate::get_family() const {
-    return ModelFamily::GENERIC;
+    return family;
 }
 
 void MinjaTemplate::clear_cache() {
@@ -603,6 +606,7 @@ std::string MinjaTemplate::render_via_minja(
     }
 
     // Add tools to context (always set, even if empty - some templates require it)
+    // Exception: Llama 3.x template checks "tools is not none", empty array triggers tool mode
     auto tools_array = minja::Value::array();
     for (const auto& tool : tools) {
         auto func_obj = minja::Value::object();
@@ -616,7 +620,12 @@ std::string MinjaTemplate::render_via_minja(
 
         tools_array.push_back(tool_obj);
     }
-    context->set("tools", tools_array);
+    // Skip setting empty tools for Llama 3.x (their template treats [] as "enable tool mode")
+    bool skip_empty_tools = (get_family() == ModelFamily::LLAMA_3_X && tools.empty());
+    if (!skip_empty_tools) {
+        context->set("tools", tools_array);
+        context->set("tools_in_user_message", minja::Value(false));
+    }
 
     // Render through template
     std::string rendered = (*template_ptr)->render(context);
@@ -974,7 +983,7 @@ std::unique_ptr<ChatTemplate> ChatTemplateFactory::create(const std::string& tem
         }
 
         dout(1) << "Creating MinjaTemplate with model's embedded Jinja template" << std::endl;
-        return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token);
+        return std::make_unique<MinjaTemplate>(template_text, template_node_ptr, eos_token, bos_token, config.family);
     }
 
     // FALLBACK: Use hardcoded templates only when no embedded template available

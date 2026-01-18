@@ -93,25 +93,31 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
                 const size_t MAX_MCP_RESULT_CHARS = 50000;
                 if (text_content.length() > MAX_MCP_RESULT_CHARS) {
                     size_t original_length = text_content.length();
-                    size_t line_count = std::count(text_content.begin(), text_content.end(), '\n');
+                    size_t original_lines = std::count(text_content.begin(), text_content.end(), '\n');
 
                     // Truncate to limit
                     text_content = text_content.substr(0, MAX_MCP_RESULT_CHARS);
+                    size_t truncated_lines = std::count(text_content.begin(), text_content.end(), '\n');
 
                     // Add truncation notice
                     text_content += "\n\n[TRUNCATED: MCP tool result exceeded " +
                                    std::to_string(MAX_MCP_RESULT_CHARS) + " character limit]\n";
                     text_content += "Original size: " + std::to_string(original_length) +
-                                   " characters (" + std::to_string(line_count) + " lines)\n";
+                                   " characters (" + std::to_string(original_lines) + " lines)\n";
                     text_content += "Consider using pagination, filters, or reading specific sections.";
 
                     dout(1) << "WARNING: Truncated MCP tool result from " + mcp_tool_.name +
                             " (" + std::to_string(original_length) + " chars -> " +
                             std::to_string(MAX_MCP_RESULT_CHARS) + " chars)" << std::endl;
-                }
 
-                result["success"] = true;
-                result["content"] = text_content;
+                    result["success"] = true;
+                    result["content"] = text_content;
+                    result["summary"] = "Truncated: " + std::to_string(truncated_lines) + "/" +
+                                       std::to_string(original_lines) + " lines";
+                } else {
+                    result["success"] = true;
+                    result["content"] = text_content;
+                }
             } else {
                 result["success"] = false;
                 result["error"] = std::string("No text content in MCP response");

@@ -5,13 +5,6 @@
 #include "../backends/chat_template.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
-#include "../tools/filesystem_tools.h"
-#include "../tools/command_tools.h"
-#include "../tools/json_tools.h"
-#include "../tools/http_tools.h"
-#include "../tools/memory_tools.h"
-#include "../tools/mcp_resource_tools.h"
-#include "../tools/core_tools.h"
 #include "../config.h"
 #include <algorithm>
 #include <chrono>
@@ -26,9 +19,8 @@ extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
 APIServer::APIServer(const std::string& host, int port, const std::string& auth_mode,
-                     bool no_mcp, bool no_tools)
-    : Server(host, port, "api", auth_mode),
-      no_mcp(no_mcp), no_tools(no_tools) {
+                     bool, bool)
+    : Server(host, port, "api", auth_mode) {
     // Set up the event callback - routes to request_handler when set
     callback = [this](CallbackEvent event, const std::string& content,
                       const std::string& name, const std::string& id) -> bool {
@@ -42,26 +34,8 @@ APIServer::APIServer(const std::string& host, int port, const std::string& auth_
 APIServer::~APIServer() {
 }
 
-void APIServer::on_server_start() {
-    // Initialize tools for /v1/tools endpoints
-    if (!no_tools) {
-        tools = std::make_unique<Tools>();
-        register_filesystem_tools(*tools);
-        register_command_tools(*tools);
-        register_json_tools(*tools);
-        register_http_tools(*tools);
-        register_memory_tools(*tools);
-        if (!no_mcp) {
-            register_mcp_resource_tools(*tools);
-        }
-        register_core_tools(*tools);
-        tools->build_all_tools();
-        dout(1) << "Tools initialized: " << tools->list().size() << " tools available" << std::endl;
-    }
-}
-
-void APIServer::on_server_stop() {
-    tools.reset();
+void APIServer::init(bool no_mcp, bool no_tools) {
+    init_tools(no_mcp, no_tools);
 }
 
 std::string APIServer::extract_bearer_token(const httplib::Request& req) const {
@@ -264,6 +238,7 @@ static bool is_context_limit_error(const std::string& error_msg) {
 void APIServer::register_endpoints() {
     // POST /v1/chat/completions - OpenAI-compatible chat completions
     tcp_server.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
+        auto request_start_time = std::chrono::high_resolution_clock::now();
         dout(1) << "POST /v1/chat/completions - acquiring lock" << std::endl;
         // Lock to serialize requests (single-threaded processing)
         std::lock_guard<std::mutex> lock(backend_mutex);
@@ -382,8 +357,8 @@ void APIServer::register_endpoints() {
                     msg_role = Message::USER; // fallback
                 }
 
-                // Create Message with estimated tokens
-                Message m(msg_role, content, content.length() / 4);
+                // Create Message - backend will set actual token count during prefill
+                Message m(msg_role, content, 0);
                 if (msg.contains("tool_call_id")) {
                     m.tool_call_id = msg["tool_call_id"];
                 }
@@ -398,13 +373,11 @@ void APIServer::register_endpoints() {
                         << " tool_calls_json_len=" << m.tool_calls_json.length() << std::endl;
                 request_session.messages.push_back(m);
 
-                // Track last user/assistant messages for context preservation
+                // Track last user/assistant message indices - token counts set by backend during prefill
                 if (msg_role == Message::USER) {
                     request_session.last_user_message_index = request_session.messages.size() - 1;
-                    request_session.last_user_message_tokens = m.tokens;
                 } else if (msg_role == Message::ASSISTANT) {
                     request_session.last_assistant_message_index = request_session.messages.size() - 1;
-                    request_session.last_assistant_message_tokens = m.tokens;
                 }
             }
 
@@ -450,16 +423,18 @@ void APIServer::register_endpoints() {
                      " messages and " + std::to_string(request_session.tools.size()) + " tools (stream=" +
                      (stream ? "true" : "false") + ")" << std::endl;
 
+            // Log incoming request details
+            std::cout << "[api] " << request.value("model", "shepherd")
+                      << " msgs=" << request_session.messages.size()
+                      << ", tools=" << request_session.tools.size()
+                      << ", stream=" << (stream ? "true" : "false")
+                      << std::endl;
 
             // Handle streaming vs non-streaming
             if (stream) {
                 // True streaming using set_content_provider
                 std::string request_id = generate_id();
                 std::string model_name = request.value("model", "shepherd");
-
-                res.set_header("Content-Type", "text/event-stream; charset=utf-8");
-                res.set_header("Cache-Control", "no-cache");
-                res.set_header("X-Accel-Buffering", "no");
 
                 // Get thinking markers for streaming filter (for non-channel models)
                 auto thinking_start = backend->get_thinking_start_markers();
@@ -478,10 +453,59 @@ void APIServer::register_endpoints() {
                 Backend* backend_ptr = backend.get();
                 std::mutex* mutex_ptr = &backend_mutex;
 
+                // Phase 1: Prefill BEFORE committing to streaming
+                // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
+                // Note: backend_mutex is already held by the outer lock at handler entry
+                // Set up handler to capture prefill stats
+                request_handler = [this](CallbackEvent type, const std::string& content,
+                                         const std::string&, const std::string&) -> bool {
+                    if (type == CallbackEvent::STATS && config->stats) {
+                        std::cout << "\033[90m" << content << "\033[0m" << std::flush;
+                    }
+                    return true;
+                };
+                try {
+                    backend->prefill_session(request_session);
+                } catch (const ContextFullException& e) {
+                    request_handler = nullptr;
+                    // Context overflow - return proper HTTP 400 (headers not sent yet!)
+                    std::cout << "[api] ERROR: Context overflow during prefill - " << e.what() << std::endl;
+                    res.status = 400;
+                    json error_resp = {
+                        {"error", {
+                            {"message", e.what()},
+                            {"type", "invalid_request_error"},
+                            {"code", "context_length_exceeded"}
+                        }}
+                    };
+                    res.set_content(error_resp.dump(), "application/json");
+                    return;
+                } catch (const std::exception& e) {
+                    request_handler = nullptr;
+                    // Other errors during prefill
+                    std::cout << "[api] ERROR: Prefill failed - " << e.what() << std::endl;
+                    res.status = 500;
+                    json error_resp = {
+                        {"error", {
+                            {"message", e.what()},
+                            {"type", "server_error"},
+                            {"code", "500"}
+                        }}
+                    };
+                    res.set_content(error_resp.dump(), "application/json");
+                    return;
+                }
+                request_handler = nullptr;
+
+                // Phase 2: Prefill succeeded - now safe to commit to streaming
+                res.set_header("Content-Type", "text/event-stream; charset=utf-8");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("X-Accel-Buffering", "no");
+
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, backend_ptr, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, backend_ptr, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time](size_t offset, httplib::DataSink& sink) mutable {
                         // Acquire lock for backend access (serialize with other requests)
                         std::lock_guard<std::mutex> stream_lock(*mutex_ptr);
 
@@ -545,6 +569,13 @@ void APIServer::register_endpoints() {
                             // Handle TOOL_CALL (queue for later)
                             if (type == CallbackEvent::TOOL_CALL) {
                                 return true;  // Tool calls returned in response
+                            }
+                            // Handle STATS - print to server console if enabled
+                            if (type == CallbackEvent::STATS) {
+                                if (config->stats) {
+                                    std::cout << "\033[90m" << content << "\033[0m" << std::flush;
+                                }
+                                return true;
                             }
                             // Only process content-type events
                             if (type != CallbackEvent::CONTENT && type != CallbackEvent::THINKING && type != CallbackEvent::CODEBLOCK) {
@@ -653,23 +684,11 @@ void APIServer::register_endpoints() {
 
                         std::string finish_reason = "stop";
                         try {
-                            backend_ptr->generate_from_session(request_session, max_tokens);
-                        } catch (const ContextFullException& e) {
-                            // Send error in stream format and close
-                            json error_chunk = {
-                                {"error", {
-                                    {"message", e.what()},
-                                    {"type", "invalid_request_error"},
-                                    {"code", "context_length_exceeded"}
-                                }}
-                            };
-                            std::string error_data = "data: " + error_chunk.dump() + "\n\ndata: [DONE]\n\n";
-                            sink.write(error_data.c_str(), error_data.size());
-                            sink.done();
-                            request_handler = nullptr;
-                            return false;
+                            // Use generate_from_prefilled since prefill_session() was called before streaming
+                            backend_ptr->generate_from_prefilled(request_session, max_tokens);
                         } catch (const std::exception& e) {
-                            // Send generic error in stream format
+                            // Errors during generation (prefill already succeeded)
+                            // Note: ContextFullException should have been caught during prefill phase
                             json error_chunk = {
                                 {"error", {
                                     {"message", e.what()},
@@ -759,6 +778,15 @@ void APIServer::register_endpoints() {
                         std::string usage_data = "data: " + usage_chunk.dump() + "\n\n";
                         sink.write(usage_data.c_str(), usage_data.size());
 
+                        // Log streaming completion details
+                        auto stream_end_time = std::chrono::high_resolution_clock::now();
+                        auto stream_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stream_end_time - request_start_time).count();
+                        std::cout << "[api] " << model_name
+                                  << " stream completed: " << prompt_tokens << " prompt + " << completion_tokens << " completion = "
+                                  << (prompt_tokens + completion_tokens) << " tokens"
+                                  << " (" << stream_duration_ms << "ms)"
+                                  << std::endl;
+
                         std::string done = "data: [DONE]\n\n";
                         sink.write(done.c_str(), done.size());
                         sink.done();
@@ -779,6 +807,7 @@ void APIServer::register_endpoints() {
                 const std::string& type, const std::string& id) -> bool {
                 switch (event) {
                     case CallbackEvent::CONTENT:
+                    case CallbackEvent::CODEBLOCK:
                         accumulated_content += data;
                         break;
                     case CallbackEvent::ERROR:
@@ -953,10 +982,23 @@ void APIServer::register_endpoints() {
                 }}
             };
 
+            // Log completion details
+            auto request_end_time = std::chrono::high_resolution_clock::now();
+            auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(request_end_time - request_start_time).count();
+            std::cout << "[api] " << request.value("model", "shepherd")
+                      << " completed: " << prompt_tokens << " prompt + " << completion_tokens << " completion = "
+                      << (prompt_tokens + completion_tokens) << " tokens"
+                      << " (" << duration_ms << "ms)"
+                      << std::endl;
+
             res.set_content(response_body.dump(), "application/json");
 
+        } catch (const ContextFullException& ctx_e) {
+            std::cout << "[api] ERROR: Context overflow - " << ctx_e.what() << std::endl;
+            res.status = 400;
+            res.set_content(create_error_response(400, ctx_e.what()).dump(), "application/json");
         } catch (const std::exception& e) {
-            std::cerr << std::string("Exception in /v1/chat/completions: ") + e.what() << std::endl;
+            std::cout << "[api] ERROR: " << e.what() << std::endl;
             res.status = 500;
             res.set_content(create_error_response(500, e.what()).dump(), "application/json");
         }
@@ -1032,7 +1074,7 @@ void APIServer::register_endpoints() {
                 }
             }
 
-            if (!tools || no_tools) {
+            if (tools.all_tools.empty()) {
                 json response = {{"tools", json::array()}};
                 res.set_content(response.dump(), "application/json");
                 return;
@@ -1040,9 +1082,9 @@ void APIServer::register_endpoints() {
 
             // Build tools list
             json tools_array = json::array();
-            for (const auto& name : tools->list()) {
-                Tool* tool = tools->get(name);
-                if (tool && tools->is_enabled(name)) {
+            for (const auto& name : tools.list()) {
+                Tool* tool = tools.get(name);
+                if (tool && tools.is_enabled(name)) {
                     // Build parameters JSON schema
                     auto params = tool->get_parameters_schema();
                     json schema;
@@ -1103,7 +1145,7 @@ void APIServer::register_endpoints() {
                 }
             }
 
-            if (!tools || no_tools) {
+            if (tools.all_tools.empty()) {
                 res.status = 400;
                 res.set_content(create_error_response(400, "Tools not available").dump(), "application/json");
                 return;
@@ -1147,7 +1189,7 @@ void APIServer::register_endpoints() {
             }
 
             // Check if tool exists
-            Tool* tool = tools->get(tool_name);
+            Tool* tool = tools.get(tool_name);
             if (!tool) {
                 std::cout << "[tool] " << tool_name << ": NOT FOUND (params: " << params_log << ")" << std::endl;
                 res.status = 404;
@@ -1165,7 +1207,7 @@ void APIServer::register_endpoints() {
             std::cout << "[tool] " << tool_name << ": calling with " << params_log << std::endl;
 
             // Execute the tool (uses Frontend::execute_tool for truncation)
-            ToolResult result = execute_tool(*tools, tool_name, arguments_json, tool_call_id);
+            ToolResult result = execute_tool(tools, tool_name, arguments_json, tool_call_id);
 
             // Log result - use summary if available, otherwise truncated content
             std::string log_summary;

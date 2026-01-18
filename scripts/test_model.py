@@ -59,6 +59,25 @@ def clean_latex(text: str) -> str:
     text = text.replace(r'\(', '(').replace(r'\)', ')')
     return text
 
+# Try to import pylatexenc for LaTeX-to-text conversion
+try:
+    from pylatexenc.latex2text import LatexNodes2Text
+    PYLATEXENC_AVAILABLE = True
+except ImportError:
+    PYLATEXENC_AVAILABLE = False
+
+def latex_to_text(latex_str: str) -> str:
+    """Convert LaTeX to plain text, using pylatexenc if available, else regex fallback"""
+    if PYLATEXENC_AVAILABLE:
+        try:
+            # Strip $ delimiters if present
+            latex_str = latex_str.strip('$')
+            return LatexNodes2Text().latex_to_text(latex_str).strip()
+        except:
+            pass
+    # Fallback to regex-based clean_latex
+    return clean_latex(latex_str)
+
 # Try to import datasets library for MMLU
 try:
     from datasets import load_dataset
@@ -822,12 +841,26 @@ class BenchmarkTestRunner:
         filtered_response = re.sub(r'^Loading Provider:.*$', '', filtered_response, flags=re.MULTILINE)
         response_upper = filtered_response.upper()
 
-        # First priority: Look for "< LETTER" pattern (shepherd's answer format)
+        # First priority: LaTeX boxed answer format (e.g., $\boxed{D}$ or \boxed{D})
+        boxed_match = re.search(r'\\boxed\{([^}]+)\}', filtered_response)
+        if boxed_match:
+            boxed_content = boxed_match.group(1).strip()
+            # If it's a single letter A-D, return it directly
+            if len(boxed_content) == 1 and boxed_content.upper() in 'ABCD':
+                return boxed_content.upper()
+            # Otherwise, convert LaTeX to text and try to match against choices
+            boxed_text = latex_to_text(boxed_content).lower()
+            for letter, choice in zip(['A', 'B', 'C', 'D'], choices):
+                choice_text = latex_to_text(choice).lower()
+                if boxed_text == choice_text or boxed_text in choice_text or choice_text in boxed_text:
+                    return letter
+
+        # Second priority: Look for "< LETTER" pattern (shepherd's answer format)
         for letter in ['A', 'B', 'C', 'D']:
             if f"< {letter}" in response_upper:
                 return letter
 
-        # Second priority: Look for explicit answer markers
+        # Third priority: Look for explicit answer markers
         for marker in ["ANSWER:", "THE ANSWER IS", "CORRECT ANSWER:", "ANSWER IS"]:
             if marker in response_upper:
                 # Extract the part after the marker
@@ -837,7 +870,7 @@ class BenchmarkTestRunner:
                     if letter in after_marker[:10]:  # Check first few chars
                         return letter
 
-        # Third priority: Look for standalone letter at start of line
+        # Fourth priority: Look for standalone letter at start of line
         for letter in ['A', 'B', 'C', 'D']:
             if f"\n{letter}\n" in f"\n{response_upper}\n":
                 return letter
@@ -846,7 +879,7 @@ class BenchmarkTestRunner:
             if stripped.startswith(letter) and (len(stripped) == 1 or not stripped[1].isalnum()):
                 return letter
 
-        # Fourth priority: Choice text in store_memory/tool calls
+        # Fifth priority: Choice text in store_memory/tool calls
         choice_map = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
         for letter, idx in choice_map.items():
             if idx < len(choices):
@@ -910,10 +943,11 @@ class BenchmarkTestRunner:
 
                 # For subprocess mode, print response (API mode streams it during send_question)
                 if self.provider and response:
-                    # Print with indentation for continuation lines
-                    lines = response.strip().split('\n')
-                    for i, line in enumerate(lines):
-                        if i == 0:
+                    # Print with indentation for continuation lines, clean up LaTeX
+                    cleaned = latex_to_text(response.strip())
+                    lines = cleaned.split('\n')
+                    for j, line in enumerate(lines):
+                        if j == 0:
                             print(line)
                         else:
                             print(f"    {line}")

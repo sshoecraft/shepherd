@@ -1133,6 +1133,143 @@ void TensorRTBackend::generate_from_session(Session& session, int max_tokens, Ev
     return success_resp;
 }
 
+void TensorRTBackend::prefill_session(Session& session) {
+#ifdef ENABLE_TENSORRT
+    if (!is_ready()) {
+        throw std::runtime_error("TensorRT backend not initialized");
+    }
+
+    dout(1) << "TensorRT prefill_session called with " + std::to_string(session.messages.size()) + " messages" << std::endl;
+
+    // PREFIX CACHING: Compare incoming session with backend_session (what's in KV cache)
+    size_t cached_count = backend_session.messages.size();
+
+    // Account for system message offset
+    size_t backend_offset = 0;
+    if (!backend_session.messages.empty() && backend_session.messages[0].role == Message::SYSTEM) {
+        backend_offset = 1;
+    }
+
+    // Find how many messages match (prefix caching)
+    size_t matching_prefix = 0;
+    for (size_t i = 0; i < session.messages.size(); i++) {
+        size_t backend_idx = i + backend_offset;
+        if (backend_idx >= cached_count) break;
+
+        const auto& cached_msg = backend_session.messages[backend_idx];
+        const auto& session_msg = session.messages[i];
+
+        if (cached_msg.get_role() == session_msg.get_role() &&
+            cached_msg.content == session_msg.content) {
+            matching_prefix++;
+        } else {
+            break;
+        }
+    }
+
+    // Check if backend has more messages than what matched
+    size_t expected_backend_count = backend_offset + matching_prefix;
+
+    if (cached_count > expected_backend_count) {
+        accumulated_tokens.clear();
+        backend_session.messages.clear();
+        matching_prefix = 0;
+        backend_offset = 0;
+    }
+
+    // Set current_session for eviction callbacks
+    current_session = &backend_session;
+
+    // Handle system message if present
+    if (!session.system_message.empty() &&
+        (backend_session.messages.empty() || backend_session.messages[0].role != Message::SYSTEM)) {
+
+        std::string formatted_system = chat_template_->format_system_message(
+            session.system_message,
+            session.tools
+        );
+
+        Message sys_msg(Message::SYSTEM, formatted_system, 0);
+        sys_msg.tokens = count_message_tokens(Message::SYSTEM, formatted_system, "", "");
+
+        if (!tokenize_and_accumulate_message(sys_msg)) {
+            throw std::runtime_error("Failed to tokenize system message");
+        }
+
+        backend_session.messages.push_back(sys_msg);
+        backend_session.system_message = session.system_message;
+    }
+
+    // Add new messages that aren't in cache
+    for (size_t i = matching_prefix; i < session.messages.size(); i++) {
+        Message msg = session.messages[i];
+        bool is_last = (i == session.messages.size() - 1);
+        bool needs_gen_prompt = is_last && (msg.role == Message::USER);
+
+        if (!tokenize_and_accumulate_message(msg, needs_gen_prompt)) {
+            throw std::runtime_error("Failed to tokenize message");
+        }
+
+        backend_session.messages.push_back(msg);
+        backend_session.last_user_message_index = backend_session.messages.size() - 1;
+        backend_session.last_user_message_tokens = msg.tokens;
+    }
+
+    // If nothing new to add but we have cached messages, rebuild tokens
+    if (matching_prefix > 0 && matching_prefix == session.messages.size() && accumulated_tokens.empty()) {
+        for (size_t i = 0; i < backend_session.messages.size(); i++) {
+            Message msg_copy = backend_session.messages[i];
+            bool is_last = (i == backend_session.messages.size() - 1);
+            bool will_generate = is_last && (msg_copy.role == Message::USER);
+            tokenize_and_accumulate_message(msg_copy, will_generate);
+        }
+    }
+
+    // Copy tools and system_message
+    backend_session.tools = session.tools;
+    backend_session.system_message = session.system_message;
+    backend_session.sampling = session.sampling;
+
+    // Proactive context check - throw before generate() is called
+    if (accumulated_tokens.size() > context_size) {
+        throw ContextFullException("This model's maximum context length is " +
+            std::to_string(context_size) + " tokens. However, your messages resulted in " +
+            std::to_string(accumulated_tokens.size()) + " tokens.");
+    }
+
+    dout(1) << "TensorRT prefill_session complete: " + std::to_string(accumulated_tokens.size()) + " tokens accumulated" << std::endl;
+#else
+    throw std::runtime_error("TensorRT backend not compiled in");
+#endif
+}
+
+void TensorRTBackend::generate_from_prefilled(Session& session, int max_tokens) {
+#ifdef ENABLE_TENSORRT
+    if (!is_ready()) {
+        callback(CallbackEvent::ERROR, "TensorRT backend not initialized", "error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+
+    dout(1) << "TensorRT generate_from_prefilled called" << std::endl;
+
+    // Generate response
+    std::string result = generate(backend_session, max_tokens, callback);
+
+    // Add assistant message to backend_session
+    if (!result.empty()) {
+        Message assistant_msg(Message::ASSISTANT, result, 0);
+        assistant_msg.tokens = tokenizer_->count_tokens(result);
+        backend_session.messages.push_back(assistant_msg);
+        backend_session.last_assistant_message_index = backend_session.messages.size() - 1;
+        backend_session.last_assistant_message_tokens = assistant_msg.tokens;
+    }
+#else
+    callback(CallbackEvent::ERROR, "TensorRT backend not compiled in", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
+#endif
+}
+
 // Helper methods
 
 std::string TensorRTBackend::render_message(const Message& msg, bool add_generation_prompt) {
@@ -1224,6 +1361,15 @@ std::string TensorRTBackend::generate(const Session& session, int max_tokens, Ev
         // Convert to int32_t
         std::vector<int32_t> input_tokens(accumulated_tokens.begin(), accumulated_tokens.end());
         dout(1) << "Generating with " + std::to_string(input_tokens.size()) + " accumulated tokens" << std::endl;
+
+        // Proactive context size check - throw before we start generation
+        // This allows API server to return 400 before streaming starts
+        if (input_tokens.size() + static_cast<size_t>(max_tokens) > context_size) {
+            throw ContextFullException("This model's maximum context length is " +
+                std::to_string(context_size) + " tokens. However, your messages resulted in " +
+                std::to_string(input_tokens.size()) + " tokens plus " +
+                std::to_string(max_tokens) + " max generation tokens.");
+        }
 
         // Decode and log the prompt for debugging
         if (tokenizer_) {
@@ -1813,6 +1959,15 @@ void TensorRTBackend::generate_from_session(Session&, int) {
     err_resp.code = Response::ERROR;
     err_resp.error = "TensorRT backend not compiled in";
     callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
+}
+
+void TensorRTBackend::prefill_session(Session&) {
+    throw std::runtime_error("TensorRT backend not compiled in");
+}
+
+void TensorRTBackend::generate_from_prefilled(Session&, int) {
+    callback(CallbackEvent::ERROR, "TensorRT backend not compiled in", "error", "");
+    callback(CallbackEvent::STOP, "error", "", "");
 }
 
 int TensorRTBackend::count_message_tokens(Message::Role, const std::string& content,

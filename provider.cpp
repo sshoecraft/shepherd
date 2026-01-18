@@ -448,10 +448,18 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "add") {
-		if (args.size() < 2) {
-			callback("Usage: provider add <name> --type <type> [options...]\n");
-			callback("Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n");
-			return 1;
+		if (args.size() < 2 || args[1] == "--help" || args[1] == "-h") {
+			callback("Usage: provider add <name> --type <type> [options...]\n\n");
+			callback("Types: llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli\n\n");
+			callback("Options:\n");
+			callback("  --type <type>        Provider type (required)\n");
+			callback("  --model <model>      Model name or path\n");
+			callback("  --api-key <key>      API key for API providers\n");
+			callback("  --base-url <url>     API base URL\n");
+			callback("  --model-path <path>  Path to model file (llamacpp, tensorrt)\n");
+			callback("  --priority <n>       Provider priority (lower = preferred)\n");
+			callback("  --display-name <n>   Display name for /v1/models API\n");
+			return args.size() < 2 ? 1 : 0;
 		}
 
 		std::string name = args[1];
@@ -481,6 +489,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				new_prov.model_path = cmd_args[++i];
 			} else if (cmd_args[i] == "--priority" && i + 1 < cmd_args.size()) {
 				new_prov.priority = std::stoi(cmd_args[++i]);
+			} else if (cmd_args[i] == "--display-name" && i + 1 < cmd_args.size()) {
+				new_prov.display_name = cmd_args[++i];
 			}
 		}
 
@@ -727,7 +737,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 		if (args.size() < 4) {
 			callback("Usage: provider set <name> <field> <value>\n"
 			         "\nCommon fields:\n"
-			         "  type, model, priority, context_size\n"
+			         "  type, model, priority, context_size, display_name\n"
 			         "\nAPI backends (openai, anthropic, gemini, ollama):\n"
 			         "  api_key, base_url, client_id, client_secret, token_url, token_scope\n"
 			         "  deployment_name, api_version, ssl_verify, ca_bundle_path\n"
@@ -768,6 +778,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->priority = std::stoi(value);
 			} else if (field == "context_size") {
 				prov->context_size = std::stoull(value);
+			} else if (field == "display_name") {
+				prov->display_name = value;
 			}
 			// API fields
 			else if (field == "api_key") {

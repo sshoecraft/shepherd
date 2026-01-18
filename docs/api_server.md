@@ -136,8 +136,29 @@ Single mutex serializes all backend requests. One request processed at a time.
 }
 ```
 
+## Two-Phase Streaming (v2.21.0)
+
+Prior to v2.21.0, streaming mode would send HTTP 200 headers before the backend started processing. If context overflow was detected during prefill, the error could only be sent as an SSE event - the HTTP status was already committed.
+
+Now streaming uses a two-phase approach:
+
+1. **Prefill Phase** (before HTTP headers sent):
+   - Call `backend->prefill_session(session)`
+   - If `ContextFullException` thrown → return HTTP 400 with JSON error
+   - This happens BEFORE `set_content_provider()` commits to streaming
+
+2. **Generate Phase** (after 200 committed):
+   - Call `backend->generate_from_prefilled(session, max_tokens)` inside content provider
+   - Tokens stream normally via SSE events
+
+This ensures proper HTTP semantics: context overflow returns HTTP 400, not 200 + SSE error.
+
+**Note:** This only applies to local backends (LlamaCpp, TensorRT). API backends (OpenAI, Anthropic, etc.) use default no-op implementations since they can't validate against the remote server's context limit.
+
 ## Version History
 
+- **2.21.1** - Fix non-streaming responses dropping CODEBLOCK events (content inside markdown code blocks was not accumulated)
+- **2.17.0** - Two-phase streaming for proper HTTP error codes
 - **2.13.0** - Unified EventCallback pattern (no add_message_stream)
 - **2.6.0** - Added APIServer class wrapper
 - **2.5.0** - Original implementation via run_api_server()

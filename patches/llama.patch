@@ -78,13 +78,14 @@ index 816f2d5de..b57b3860a 100644
  void llama_kv_cache::clear(bool data) {
      for (uint32_t s = 0; s < n_stream; ++s) {
          v_cells[s].reset();
-@@ -851,8 +856,21 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
+@@ -851,8 +856,25 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
                  res.idxs[s].clear();
              }
  
 +            // Out of space - try callback before failing
              if (n_tested >= cells.size()) {
 -                //LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
++                bool callback_aborted = false;
 +                if (need_space_callback && !cont) {
 +                    // Call Shepherd to free space by removing old sequences
 +                    uint32_t new_head = need_space_callback(n_tokens, need_space_callback_data);
@@ -94,10 +95,13 @@ index 816f2d5de..b57b3860a 100644
 +                        n_tested = 0;  // Reset search counter and continue from new head
 +                        continue;
 +                    }
-+                    // Note: If callback didn't free enough, we'll return empty below
++                    // Callback returned >= cells.size() - intentional abort, don't print error
++                    callback_aborted = true;
 +                }
-+                // No space available (or callback didn't free enough)
-+                LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
++                // Only print error if callback wasn't called or didn't intentionally abort
++                if (!callback_aborted) {
++                    LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
++                }
                  return { };
              }
          }

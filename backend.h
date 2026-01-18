@@ -95,6 +95,23 @@ public:
     // All output flows through callback, session token counts are updated
     virtual void generate_from_session(Session& session, int max_tokens = 0) = 0;
 
+    /// @brief Prefill session into KV cache (render, tokenize, decode)
+    /// Throws ContextFullException if context would overflow
+    /// For local backends: actually decodes into KV cache
+    /// For API backends: no-op (validation happens on remote server)
+    /// Call before generate_from_prefilled() in streaming mode
+    virtual void prefill_session(Session& session) {
+        // Default: no-op for backends that don't support separate prefill
+    }
+
+    /// @brief Generate from a prefilled session
+    /// Assumes prefill_session() was called first for local backends
+    /// For API backends: just calls generate_from_session()
+    virtual void generate_from_prefilled(Session& session, int max_tokens = 0) {
+        // Default: just call generate_from_session for backwards compatibility
+        generate_from_session(session, max_tokens);
+    }
+
     /// @brief Count tokens for a message (without adding to context)
     /// Formats exactly as add_message() would, but only returns token count
     /// Used for proactive eviction to determine if message will fit

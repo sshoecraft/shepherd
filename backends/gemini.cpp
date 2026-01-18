@@ -792,8 +792,27 @@ void GeminiBackend::add_message(Session& session,
 
         // Success - update session with messages
         if (stream_complete && accumulated_resp.success) {
-            // Estimate token counts
-            int new_message_tokens = estimate_message_tokens(content);
+            // Calculate token counts using delta (like OpenAI/Anthropic)
+            int new_message_tokens;
+            if (accumulated_resp.prompt_tokens > 0 && session.last_prompt_tokens > 0) {
+                new_message_tokens = accumulated_resp.prompt_tokens - session.last_prompt_tokens;
+                if (new_message_tokens < 0) new_message_tokens = 1;
+            } else {
+                new_message_tokens = estimate_message_tokens(content);
+            }
+
+            // Update EMA ratio
+            if (new_message_tokens > 0 && content.length() > 0) {
+                float actual_ratio = (float)content.length() / new_message_tokens;
+                float deviation_ratio = actual_ratio / chars_per_token;
+
+                if (deviation_ratio >= 0.5f && deviation_ratio <= 2.0f) {
+                    const float alpha = 0.2f;
+                    chars_per_token = (1.0f - alpha) * chars_per_token + alpha * actual_ratio;
+                    if (chars_per_token < 2.0f) chars_per_token = 2.0f;
+                    if (chars_per_token > 5.0f) chars_per_token = 5.0f;
+                }
+            }
 
             // Add user message to session
             Message user_msg(role, content, new_message_tokens);

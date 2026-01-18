@@ -209,6 +209,33 @@ last_decoded_len = full_decoded.length();
 
 This ensures the tokenizer has full context to correctly place spaces.
 
+## Two-Phase Generation (v2.21.0)
+
+Similar to LlamaCpp, TensorRT supports two-phase generation for proper HTTP error codes:
+
+1. **`prefill_session(session)`** - Prepares context for generation:
+   - Performs prefix caching comparison with backend_session
+   - Tokenizes and accumulates new messages
+   - Throws `ContextFullException` if accumulated tokens exceed context_size
+
+2. **`generate_from_prefilled(session, max_tokens)`** - Generates output:
+   - Calls `generate()` with the streaming callback
+   - Updates backend_session with generated assistant message
+
+The convenience method `generate_from_session()` calls both in sequence.
+
+### Proactive Context Check
+
+The `generate()` method includes a proactive size check before `enqueueRequest()`:
+
+```cpp
+if (input_tokens.size() + max_tokens > context_size) {
+    throw ContextFullException("Context would overflow...");
+}
+```
+
+This catches context overflow before TensorRT-LLM starts processing, allowing proper error responses.
+
 ## Streaming Support
 
 ### add_message_stream()

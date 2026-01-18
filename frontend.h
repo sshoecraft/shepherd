@@ -100,9 +100,8 @@ public:
     virtual void init(bool no_mcp = false, bool no_tools = false) {}
 
 protected:
-    /// @brief Common tool initialization for CLI and CLIServer
-    /// Extracted to eliminate code duplication
-    static void init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools);
+    /// @brief Common tool initialization - initializes RAG and registers all tools
+    void init_tools(bool no_mcp, bool no_tools);
 
 public:
 
@@ -162,6 +161,9 @@ public:
 
     // Backend owned by frontend after connect
     std::unique_ptr<Backend> backend;
+
+    // Tools owned by frontend
+    Tools tools;
 
     // Callback for streaming output - must be set by subclass before connecting
     Backend::EventCallback callback;

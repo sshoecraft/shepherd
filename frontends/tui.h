@@ -31,9 +31,6 @@ public:
     void init(bool no_mcp = false, bool no_tools = false) override;
     int run(Provider* cmdline_provider = nullptr) override;
 
-    // Tool management (owned by this frontend)
-    Tools tools;
-
     // Legacy init/shutdown for backwards compatibility with main.cpp
     bool init_ncurses();
     void shutdown();

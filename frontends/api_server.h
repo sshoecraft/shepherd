@@ -26,15 +26,12 @@ public:
               bool no_tools = false);
     ~APIServer();
 
+    /// @brief Initialize tools and RAG
+    void init(bool no_mcp = false, bool no_tools = false) override;
+
 protected:
     /// @brief Register OpenAI-compatible API endpoints
     void register_endpoints() override;
-
-    /// @brief Initialize tools after backend is connected
-    void on_server_start() override;
-
-    /// @brief Cleanup
-    void on_server_stop() override;
 
 private:
     // Mutex to serialize backend requests (single-threaded processing)
@@ -43,11 +40,6 @@ private:
     // Per-request output routing - set before generate, cleared after
     // The callback routes events through this function when set
     std::function<bool(CallbackEvent, const std::string&, const std::string&, const std::string&)> request_handler;
-
-    // Tools for /v1/tools endpoints
-    std::unique_ptr<Tools> tools;
-    bool no_mcp;
-    bool no_tools;
 
     /// @brief Handle chat completion request (standard OpenAI behavior)
     /// @param req HTTP request

@@ -23,6 +23,7 @@ find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(CURL REQUIRED libcurl)
+pkg_check_modules(NCURSES REQUIRED ncursesw)
 
 # Core source files (from current Makefile)
 set(SHEPHERD_SOURCES
@@ -118,6 +119,7 @@ target_include_directories(shepherd PRIVATE
     ${SQLITE3_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
+    ${NCURSES_INCLUDE_DIRS}
 )
 
 # TensorRT-LLM setup - find Python first
@@ -196,13 +198,14 @@ if(ENABLE_TENSORRT)
 endif()
 
 # Link standard libraries
+target_link_directories(shepherd PRIVATE ${NCURSES_LIBRARY_DIRS})
 target_link_libraries(shepherd PRIVATE
     ${SQLITE3_LIBRARIES}
     ${CURL_LIBRARIES}
     OpenSSL::Crypto
     pthread
     dl
-    ncursesw
+    ${NCURSES_LIBRARIES}
 )
 
 # TensorRT-LLM library from pip installation

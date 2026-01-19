@@ -33,6 +33,9 @@ public:
 	                const std::string& tool_id = "",
 	                int max_tokens = 0) override;
 
+	// Override generate_from_session to provide streaming for API server mode
+	void generate_from_session(Session& session, int max_tokens = 0) override;
+
 	// Implement pure virtual methods from ApiBackend
 	Response parse_http_response(const HttpResponse& http_response) override;
 

@@ -1269,6 +1269,198 @@ void OpenAIBackend::add_message(Session& session,
     callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
 }
 
+void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::generate_from_session(session, max_tokens);
+        return;
+    }
+
+    reset_output_state();
+
+    dout(1) << "OpenAIBackend::generate_from_session (streaming): max_tokens=" + std::to_string(max_tokens) << std::endl;
+
+    // Build request from session
+    nlohmann::json request = build_request_from_session(session, max_tokens);
+
+    // Add streaming flag
+    request["stream"] = true;
+
+    // Request usage information in streaming response (Azure OpenAI support)
+    request["stream_options"] = {{"include_usage", true}};
+
+    dout(1) << "Sending streaming request to OpenAI API (generate_from_session)" << std::endl;
+
+    // Get headers and endpoint
+    auto headers = get_api_headers();
+    std::string endpoint = get_api_endpoint();
+
+    // Enforce rate limits before making request
+    enforce_rate_limits();
+
+    // Streaming state
+    std::string accumulated_content;
+    SSEParser sse_parser;
+    bool stream_complete = false;
+    std::string finish_reason = "stop";
+    int prompt_tokens = 0;
+    int completion_tokens = 0;
+    std::vector<ToolParser::ToolCall> tool_calls;
+    clear_tool_calls();  // Clear any previous tool calls
+
+    // Streaming callback to process SSE chunks
+    auto stream_handler = [&](const std::string& chunk, void* user_data) -> bool {
+        sse_parser.process_chunk(chunk,
+            [&](const std::string& event, const std::string& data, const std::string& id) -> bool {
+                // Handle [DONE] sentinel
+                if (data == "[DONE]") {
+                    stream_complete = true;
+                    return false;
+                }
+
+                try {
+                    dout(3) << "SSE raw data: " << data.substr(0, 300) << std::endl;
+
+                    // Sanitize UTF-8 before parsing JSON
+                    std::string sanitized_data = utf8_sanitizer::sanitize_utf8(data);
+                    json delta_json = json::parse(sanitized_data);
+
+                    dout(3) << "SSE JSON: " << delta_json.dump().substr(0, 200) << std::endl;
+
+                    // Extract delta content
+                    if (delta_json.contains("choices") && !delta_json["choices"].empty()) {
+                        const auto& choice = delta_json["choices"][0];
+
+                        // Get finish_reason if present
+                        if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
+                            finish_reason = choice["finish_reason"].get<std::string>();
+                        }
+
+                        // Get delta content
+                        if (choice.contains("delta")) {
+                            const auto& delta = choice["delta"];
+
+                            // Handle content delta
+                            if (delta.contains("content") && !delta["content"].is_null()) {
+                                std::string delta_text = delta["content"].get<std::string>();
+                                accumulated_content += delta_text;
+
+                                // Only stream content if we haven't seen tool calls
+                                if (tool_calls.empty()) {
+                                    if (!output(delta_text)) {
+                                        return false;  // User cancelled
+                                    }
+                                }
+                            }
+
+                            // Handle tool_calls delta (incremental)
+                            if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
+                                for (const auto& tc_delta : delta["tool_calls"]) {
+                                    int index = tc_delta.value("index", 0);
+
+                                    while (tool_calls.size() <= static_cast<size_t>(index)) {
+                                        tool_calls.push_back(ToolParser::ToolCall());
+                                    }
+
+                                    auto& tool_call = tool_calls[index];
+
+                                    if (tc_delta.contains("id")) {
+                                        tool_call.tool_call_id = tc_delta["id"].get<std::string>();
+                                    }
+
+                                    if (tc_delta.contains("function")) {
+                                        const auto& func = tc_delta["function"];
+                                        if (func.contains("name")) {
+                                            tool_call.name = func["name"].get<std::string>();
+                                        }
+                                        if (func.contains("arguments")) {
+                                            tool_call.raw_json += func["arguments"].get<std::string>();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Extract usage data (usually in final chunk)
+                    if (delta_json.contains("usage") && delta_json["usage"].is_object()) {
+                        const auto& usage = delta_json["usage"];
+                        prompt_tokens = usage.value("prompt_tokens", 0);
+                        completion_tokens = usage.value("completion_tokens", 0);
+                        dout(1) << "SSE parsed usage: prompt_tokens=" << prompt_tokens
+                                << ", completion_tokens=" << completion_tokens << std::endl;
+                    }
+                    // Fallback: parse llama.cpp timings format
+                    else if (delta_json.contains("timings")) {
+                        const auto& timings = delta_json["timings"];
+                        prompt_tokens = timings.value("prompt_n", 0);
+                        completion_tokens = timings.value("predicted_n", 0);
+                    }
+
+                } catch (const std::exception& e) {
+                    dout(1) << std::string("WARNING: ") + "Failed to parse SSE data: " + std::string(e.what()) << std::endl;
+                }
+
+                return true;
+            });
+
+        return true;
+    };
+
+    // Make streaming HTTP call
+    HttpResponse http_response = http_client->post_stream_cancellable(endpoint, request.dump(), headers,
+                                                                       stream_handler, nullptr);
+
+    // Check for HTTP errors
+    if (!http_response.is_success()) {
+        std::string error_msg = http_response.error_message;
+        if (error_msg.empty() && !http_response.body.empty()) {
+            try {
+                auto json_body = nlohmann::json::parse(http_response.body);
+                if (json_body.contains("error") && json_body["error"].contains("message")) {
+                    error_msg = json_body["error"]["message"].get<std::string>();
+                }
+            } catch (...) {
+                error_msg = http_response.body;
+            }
+        }
+        if (error_msg.empty()) {
+            error_msg = "HTTP error " + std::to_string(http_response.status_code);
+        }
+
+        callback(CallbackEvent::ERROR, error_msg, "api_error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return;
+    }
+
+    flush_output();
+
+    // Update session token counts from streaming response
+    if (prompt_tokens > 0 || completion_tokens > 0) {
+        session.total_tokens = prompt_tokens + completion_tokens;
+        session.last_prompt_tokens = prompt_tokens;
+        session.last_assistant_message_tokens = completion_tokens;
+    }
+
+    // Record tool calls for emission after STOP
+    for (const auto& tc : tool_calls) {
+        if (!tc.name.empty()) {
+            record_tool_call(tc.name, tc.raw_json.empty() ? "{}" : tc.raw_json, tc.tool_call_id);
+        }
+    }
+
+    // Signal completion
+    callback(CallbackEvent::STOP, finish_reason, "", "");
+
+    // Send tool calls AFTER STOP
+    for (const auto& tc : tool_calls) {
+        if (!tc.name.empty()) {
+            std::string args = tc.raw_json.empty() ? "{}" : tc.raw_json;
+            callback(CallbackEvent::TOOL_CALL, args, tc.name, tc.tool_call_id);
+        }
+    }
+}
+
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
     // Check prerequisites for making API call
     if (!http_client) {

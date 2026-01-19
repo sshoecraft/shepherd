@@ -4,6 +4,7 @@
 #include "backend.h"
 #include "../session.h"
 #include "../tools/tools.h"
+#include "../backends/shared_oauth_cache.h"
 #include <string>
 #include <mutex>
 #include <functional>
@@ -34,8 +35,14 @@ protected:
     void register_endpoints() override;
 
 private:
-    // Mutex to serialize backend requests (single-threaded processing)
+    // Mutex to serialize backend requests (single-threaded processing for GPU backends)
     std::mutex backend_mutex;
+
+    // Shared OAuth cache for per-request API backends
+    std::shared_ptr<SharedOAuthCache> shared_oauth_cache_;
+
+    // Flag indicating if current provider is an API backend (supports per-request backends)
+    bool is_api_provider_ = false;
 
     // Per-request output routing - set before generate, cleared after
     // The callback routes events through this function when set

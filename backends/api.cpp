@@ -1,6 +1,7 @@
 
 #include "shepherd.h"
 #include "api.h"
+#include "shared_oauth_cache.h"
 #include "session.h"
 #include "message.h"
 #include "sse_parser.h"
@@ -637,6 +638,22 @@ bool ApiBackend::ensure_valid_oauth_token() {
         return true;
     }
 
+    // Use shared OAuth cache if available (for per-request backend mode)
+    if (shared_oauth_cache_) {
+        auto cached_token = shared_oauth_cache_->get_token(
+            oauth_client_id_, oauth_client_secret_, oauth_token_url_, oauth_scope_);
+        if (!cached_token.access_token.empty()) {
+            // Copy token to local storage for get_api_headers() to use
+            oauth_token_.access_token = cached_token.access_token;
+            oauth_token_.token_type = cached_token.token_type;
+            oauth_token_.expires_at = cached_token.expires_at;
+            return true;
+        }
+        std::cerr << "Failed to acquire OAuth token from shared cache" << std::endl;
+        return false;
+    }
+
+    // Fall back to per-backend token management
     // Check if current token is valid
     if (oauth_token_.is_valid()) {
         dout(1) << "OAuth token is valid" << std::endl;
@@ -655,6 +672,10 @@ bool ApiBackend::ensure_valid_oauth_token() {
 
     std::cerr << "Failed to acquire OAuth token" << std::endl;
     return false;
+}
+
+void ApiBackend::set_shared_oauth_cache(std::shared_ptr<SharedOAuthCache> cache) {
+    shared_oauth_cache_ = cache;
 }
 
 void ApiBackend::add_tool_response(Session& session,

@@ -83,6 +83,7 @@ set(SHEPHERD_SOURCES
 if(ENABLE_API_BACKENDS)
     list(APPEND SHEPHERD_SOURCES
         backends/api.cpp
+        backends/shared_oauth_cache.cpp
         backends/openai.cpp
         backends/ollama.cpp
         backends/anthropic.cpp

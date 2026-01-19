@@ -11,6 +11,10 @@
 #include <chrono>
 #include <mutex>
 #include <thread>
+#include <memory>
+
+// Forward declaration
+class SharedOAuthCache;
 
 class ApiBackend : public Backend {
 public:
@@ -57,6 +61,11 @@ public:
     /// Used to correct estimator based on actual backend measurements
     /// @param ratio New chars/token ratio to set
     void set_chars_per_token(float ratio) { chars_per_token = ratio; }
+
+    /// @brief Set shared OAuth cache for per-request backend mode
+    /// When set, OAuth tokens are cached globally instead of per-backend
+    /// @param cache Shared OAuth cache instance
+    void set_shared_oauth_cache(std::shared_ptr<SharedOAuthCache> cache);
 
     // Override to provide default tool call filtering for API backends
     // Include common formats used by various models:
@@ -201,6 +210,9 @@ protected:
     std::string oauth_token_url_;
     std::string oauth_scope_;
     OAuthToken oauth_token_;
+
+    // Shared OAuth cache for per-request backend mode
+    std::shared_ptr<SharedOAuthCache> shared_oauth_cache_;
 
     // Rate limiting tracking
     std::deque<std::chrono::steady_clock::time_point> request_timestamps_;

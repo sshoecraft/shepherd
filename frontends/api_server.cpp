@@ -3,9 +3,11 @@
 #include "../session.h"
 #include "backend.h"
 #include "../backends/chat_template.h"
+#include "../backends/api.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
 #include "../config.h"
+#include "../provider.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>
@@ -236,13 +238,54 @@ static bool is_context_limit_error(const std::string& error_msg) {
 }
 
 void APIServer::register_endpoints() {
+    // Check if current provider is an API type (supports per-request backends)
+    Provider* provider = get_provider(current_provider);
+    if (provider && provider->is_api()) {
+        is_api_provider_ = true;
+        shared_oauth_cache_ = std::make_shared<SharedOAuthCache>();
+        dout(1) << "API provider detected - using per-request backends with shared OAuth cache" << std::endl;
+    }
+
     // POST /v1/chat/completions - OpenAI-compatible chat completions
     tcp_server.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
         auto request_start_time = std::chrono::high_resolution_clock::now();
-        dout(1) << "POST /v1/chat/completions - acquiring lock" << std::endl;
-        // Lock to serialize requests (single-threaded processing)
-        std::lock_guard<std::mutex> lock(backend_mutex);
-        dout(1) << "POST /v1/chat/completions - lock acquired" << std::endl;
+
+        // Per-request backend for API providers (nullptr for GPU providers)
+        std::unique_ptr<Backend> request_backend;
+        Backend* active_backend = nullptr;
+
+        // Optional lock - only needed for GPU backends (shared backend)
+        std::unique_ptr<std::lock_guard<std::mutex>> lock_guard;
+
+        if (is_api_provider_) {
+            // API provider - create per-request backend (no mutex needed)
+            dout(1) << "POST /v1/chat/completions - creating per-request backend" << std::endl;
+            Provider* provider = get_provider(current_provider);
+            if (provider) {
+                // Create a temporary session for backend creation
+                Session temp_session;
+                request_backend = provider->connect(temp_session, callback);
+                if (request_backend) {
+                    // Set shared OAuth cache on API backends
+                    auto* api_backend = dynamic_cast<ApiBackend*>(request_backend.get());
+                    if (api_backend && shared_oauth_cache_) {
+                        api_backend->set_shared_oauth_cache(shared_oauth_cache_);
+                    }
+                    active_backend = request_backend.get();
+                }
+            }
+            if (!active_backend) {
+                res.status = 500;
+                res.set_content(create_error_response(500, "Failed to create backend").dump(), "application/json");
+                return;
+            }
+        } else {
+            // GPU provider - use shared backend with mutex
+            dout(1) << "POST /v1/chat/completions - acquiring lock for GPU backend" << std::endl;
+            lock_guard = std::make_unique<std::lock_guard<std::mutex>>(backend_mutex);
+            dout(1) << "POST /v1/chat/completions - lock acquired" << std::endl;
+            active_backend = backend.get();
+        }
 
         // Increment request counter
         requests_processed++;
@@ -437,25 +480,36 @@ void APIServer::register_endpoints() {
                 std::string model_name = request.value("model", "shepherd");
 
                 // Get thinking markers for streaming filter (for non-channel models)
-                auto thinking_start = backend->get_thinking_start_markers();
-                auto thinking_end = backend->get_thinking_end_markers();
+                auto thinking_start = active_backend->get_thinking_start_markers();
+                auto thinking_end = active_backend->get_thinking_end_markers();
                 bool filter_thinking = !config->thinking && !thinking_start.empty();
 
                 // Channel parsing is now handled by the backend's process_output()
                 // No need for a separate channel parser here - content arrives already filtered
-                const auto* caps = backend->get_chat_template_caps();
+                const auto* caps = active_backend->get_chat_template_caps();
                 bool has_channels = caps && caps->has_channels;
                 if (has_channels) {
                     dout(1) << "Streaming with backend channel parsing, thinking=" << (config->thinking ? "true" : "false") << std::endl;
                 }
 
-                // Capture backend pointer and mutex for lambda
-                Backend* backend_ptr = backend.get();
-                std::mutex* mutex_ptr = &backend_mutex;
+                // For streaming, we need to keep the backend alive for the duration of the stream
+                // Convert unique_ptr to shared_ptr for API providers (so lambda can own it)
+                // For GPU providers, use a non-owning shared_ptr to the shared backend
+                std::shared_ptr<Backend> stream_backend;
+                std::mutex* mutex_ptr = nullptr;
+
+                if (is_api_provider_ && request_backend) {
+                    // API provider - transfer ownership to shared_ptr for lambda capture
+                    stream_backend = std::move(request_backend);
+                    // No mutex needed - each request has its own backend
+                } else {
+                    // GPU provider - use shared backend with mutex
+                    stream_backend = std::shared_ptr<Backend>(backend.get(), [](Backend*){});  // Non-owning
+                    mutex_ptr = &backend_mutex;
+                }
 
                 // Phase 1: Prefill BEFORE committing to streaming
                 // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
-                // Note: backend_mutex is already held by the outer lock at handler entry
                 // Set up handler to capture prefill stats
                 request_handler = [this](CallbackEvent type, const std::string& content,
                                          const std::string&, const std::string&) -> bool {
@@ -465,7 +519,7 @@ void APIServer::register_endpoints() {
                     return true;
                 };
                 try {
-                    backend->prefill_session(request_session);
+                    active_backend->prefill_session(request_session);
                 } catch (const ContextFullException& e) {
                     request_handler = nullptr;
                     // Context overflow - return proper HTTP 400 (headers not sent yet!)
@@ -505,9 +559,13 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, backend_ptr, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time](size_t offset, httplib::DataSink& sink) mutable {
-                        // Acquire lock for backend access (serialize with other requests)
-                        std::lock_guard<std::mutex> stream_lock(*mutex_ptr);
+                    [this, stream_backend, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time](size_t offset, httplib::DataSink& sink) mutable {
+                        // Acquire lock for backend access only for GPU backends (shared backend)
+                        // API backends have their own per-request backend, no mutex needed
+                        std::unique_ptr<std::lock_guard<std::mutex>> stream_lock;
+                        if (mutex_ptr) {
+                            stream_lock = std::make_unique<std::lock_guard<std::mutex>>(*mutex_ptr);
+                        }
 
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
@@ -685,7 +743,7 @@ void APIServer::register_endpoints() {
                         std::string finish_reason = "stop";
                         try {
                             // Use generate_from_prefilled since prefill_session() was called before streaming
-                            backend_ptr->generate_from_prefilled(request_session, max_tokens);
+                            stream_backend->generate_from_prefilled(request_session, max_tokens);
                         } catch (const std::exception& e) {
                             // Errors during generation (prefill already succeeded)
                             // Note: ContextFullException should have been caught during prefill phase
@@ -706,8 +764,8 @@ void APIServer::register_endpoints() {
 
                         // Check for accumulated tool calls (for channel-based models like GPT-OSS)
                         // These are captured by the channel parser during streaming
-                        if (!backend_ptr->accumulated_tool_calls.empty()) {
-                            const auto& tc = backend_ptr->accumulated_tool_calls[0];
+                        if (!stream_backend->accumulated_tool_calls.empty()) {
+                            const auto& tc = stream_backend->accumulated_tool_calls[0];
                             std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
                             std::string tc_name = tc["function"].value("name", "");
                             std::string tc_args = tc["function"].value("arguments", "{}");
@@ -823,7 +881,7 @@ void APIServer::register_endpoints() {
             };
 
             try {
-                backend->generate_from_session(request_session, max_tokens);
+                active_backend->generate_from_session(request_session, max_tokens);
             } catch (const ContextFullException& e) {
                 request_handler = nullptr;
                 res.status = 400;
@@ -842,7 +900,7 @@ void APIServer::register_endpoints() {
             // Build Response from accumulated content
             Response resp;
             bool has_content = !accumulated_content.empty();
-            bool has_tool_calls = !backend->accumulated_tool_calls.empty();
+            bool has_tool_calls = !active_backend->accumulated_tool_calls.empty();
             if (error_message.empty() && (has_content || has_tool_calls)) {
                 resp.success = true;
                 resp.content = accumulated_content;
@@ -882,8 +940,8 @@ void APIServer::register_endpoints() {
             std::string response_content = resp.content;
             std::string reasoning_content;
             if (!config->thinking) {
-                auto thinking_start = backend->get_thinking_start_markers();
-                auto thinking_end = backend->get_thinking_end_markers();
+                auto thinking_start = active_backend->get_thinking_start_markers();
+                auto thinking_end = active_backend->get_thinking_end_markers();
                 auto [content, reasoning] = strip_thinking_blocks(response_content, thinking_start, thinking_end);
                 response_content = content;
                 reasoning_content = reasoning;
@@ -892,7 +950,7 @@ void APIServer::register_endpoints() {
             // Check for tool calls (use stripped content)
             Response stripped_resp = resp;
             stripped_resp.content = response_content;
-            auto tool_call_opt = extract_tool_call(stripped_resp, backend.get());
+            auto tool_call_opt = extract_tool_call(stripped_resp, active_backend);
 
             // Build OpenAI-compatible response
             json choice = {
@@ -944,9 +1002,9 @@ void APIServer::register_endpoints() {
 
                 tc["function"] = function_obj;
                 choice["message"]["tool_calls"] = json::array({tc});
-            } else if (!backend->accumulated_tool_calls.empty()) {
+            } else if (!active_backend->accumulated_tool_calls.empty()) {
                 // Use accumulated_tool_calls from channel parser (already in OpenAI format)
-                choice["message"]["tool_calls"] = backend->accumulated_tool_calls;
+                choice["message"]["tool_calls"] = active_backend->accumulated_tool_calls;
                 choice["finish_reason"] = "tool_calls";
                 dout(1) << "Using accumulated_tool_calls from channel parser" << std::endl;
             } else {
@@ -965,7 +1023,7 @@ void APIServer::register_endpoints() {
 
             // If backend didn't provide token counts, estimate them
             if (prompt_tokens == 0 && completion_tokens == 0 && !accumulated_content.empty()) {
-                completion_tokens = backend->count_message_tokens(Message::ASSISTANT, accumulated_content, "", "");
+                completion_tokens = active_backend->count_message_tokens(Message::ASSISTANT, accumulated_content, "", "");
                 dout(1) << "API server estimated completion_tokens=" << completion_tokens << std::endl;
             }
 

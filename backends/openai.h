@@ -19,6 +19,9 @@ public:
     std::string deployment_name;  // Azure deployment name (replaces model in URL)
     std::string api_version;      // Azure API version (e.g., "2024-06-01")
 
+    // OpenAI strict mode - skip non-standard params like top_k, repetition_penalty
+    bool openai_strict = false;
+
     OpenAIBackend(size_t context_size, Session& session, EventCallback callback);
     ~OpenAIBackend() override;
 

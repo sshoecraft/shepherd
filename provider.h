@@ -81,6 +81,9 @@ public:
     std::string deployment_name;
     std::string api_version;
 
+    // OpenAI compatibility mode (skip non-standard params like top_k, repetition_penalty)
+    bool openai_strict = false;
+
     // Ollama specific
     int num_ctx = 0;                // Context window (0=auto)
     int num_predict = -1;           // Max tokens (-1=unlimited)

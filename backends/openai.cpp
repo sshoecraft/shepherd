@@ -23,6 +23,10 @@ OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallbac
             api_version = config->json["api_version"].get<std::string>();
             dout(1) << "Azure api_version: " + api_version << std::endl;
         }
+        if (config->json.contains("openai_strict")) {
+            openai_strict = config->json["openai_strict"].get<bool>();
+            dout(1) << "OpenAI strict mode: " + std::string(openai_strict ? "enabled" : "disabled") << std::endl;
+        }
     }
 
     // Initialize model_config with generic defaults to avoid uninitialized memory
@@ -75,9 +79,17 @@ OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallbac
 
     // --- Initialization (formerly in initialize()) ---
 
-    // Validate API key (only required for actual OpenAI API, not local servers)
-    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
-    if (api_key.empty() && is_openai_api) {
+    // Auto-detect Azure if deployment_name and api_version are set
+    bool is_azure = (!deployment_name.empty() && !api_version.empty());
+    if (is_azure && !openai_strict) {
+        openai_strict = true;  // Azure endpoints don't support non-standard params
+        dout(1) << "Auto-enabled openai_strict for Azure endpoint" << std::endl;
+    }
+
+    // Validate API key (only required for actual OpenAI API, not OAuth-based endpoints)
+    bool requires_api_key = (api_endpoint.find("api.openai.com") != std::string::npos) ||
+                            (api_endpoint.find("openai.azure.com") != std::string::npos);
+    if (api_key.empty() && requires_api_key) {
         std::cerr << "OpenAI API key is required for api.openai.com" << std::endl;
         throw std::runtime_error("OpenAI API key not configured");
     }
@@ -652,24 +664,22 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     // Add sampling parameters
     // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
     // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
-
-    if (!is_openai_api || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+    if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
         request["temperature"] = temperature;
     }
-    if (!is_openai_api || (top_p < 0.99f)) {
+    if (!openai_strict || (top_p < 0.99f)) {
         request["top_p"] = top_p;
     }
-    if (!is_openai_api || frequency_penalty != 0.0f) {
+    if (!openai_strict || frequency_penalty != 0.0f) {
         request["frequency_penalty"] = frequency_penalty;
     }
-    if (!is_openai_api || presence_penalty != 0.0f) {
+    if (!openai_strict || presence_penalty != 0.0f) {
         request["presence_penalty"] = presence_penalty;
     }
 
-    // Only send non-standard parameters to non-OpenAI endpoints (Shepherd servers, vLLM, etc.)
-    // OpenAI rejects unknown parameters like top_k and repetition_penalty
-    if (!is_openai_api) {
+    // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
+    // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
+    if (!openai_strict) {
         if (top_k > 0) {
             request["top_k"] = top_k;
         }
@@ -795,24 +805,22 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     // Add sampling parameters
     // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
     // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-    bool is_openai_api = (api_endpoint.find("api.openai.com") != std::string::npos);
-
-    if (!is_openai_api || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+    if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
         request["temperature"] = temperature;
     }
-    if (!is_openai_api || (top_p < 0.99f)) {
+    if (!openai_strict || (top_p < 0.99f)) {
         request["top_p"] = top_p;
     }
-    if (!is_openai_api || frequency_penalty != 0.0f) {
+    if (!openai_strict || frequency_penalty != 0.0f) {
         request["frequency_penalty"] = frequency_penalty;
     }
-    if (!is_openai_api || presence_penalty != 0.0f) {
+    if (!openai_strict || presence_penalty != 0.0f) {
         request["presence_penalty"] = presence_penalty;
     }
 
-    // Only send non-standard parameters to non-OpenAI endpoints (Shepherd servers, vLLM, etc.)
-    // OpenAI rejects unknown parameters like top_k and repetition_penalty
-    if (!is_openai_api) {
+    // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
+    // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
+    if (!openai_strict) {
         if (top_k > 0) {
             request["top_k"] = top_k;
         }

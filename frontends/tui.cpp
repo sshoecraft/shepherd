@@ -1257,12 +1257,9 @@ int TUI::run(Provider* cmdline_provider) {
         return 1;
     }
 
-    // Output loading message (no newline - we'll add completion indicator)
-    callback(CallbackEvent::SYSTEM, "Loading Provider: " + provider_to_use->name, "", "");
-
     // Connect to provider
     if (!connect_provider(provider_to_use->name)) {
-        callback(CallbackEvent::SYSTEM, " - FAILED\n", "", "");
+        callback(CallbackEvent::SYSTEM, "Failed to connect to provider '" + provider_to_use->name + "'\n", "", "");
         return 1;
     }
     // Register other providers as tools (unless tools disabled)

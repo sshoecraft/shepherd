@@ -2,7 +2,9 @@
 #include "shepherd.h"
 #include "tools/tools.h"
 #include "tools/api_tools.h"
+#ifdef ENABLE_LLAMACPP
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
+#endif
 #include "mcp/mcp.h"
 #include "mcp/mcp_config.h"
 #include "provider.h"

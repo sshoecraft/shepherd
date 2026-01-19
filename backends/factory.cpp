@@ -1,6 +1,8 @@
 
 #include "backends/factory.h"
+#ifdef ENABLE_LLAMACPP
 #include "backends/llamacpp.h"
+#endif
 #ifdef ENABLE_TENSORRT
 #include "backends/tensorrt.h"
 #endif

@@ -661,30 +661,32 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
         request[model_config.max_tokens_param_name] = max_tokens;
     }
 
-    // Add sampling parameters
-    // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
-    // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-    if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
-        request["temperature"] = temperature;
-    }
-    if (!openai_strict || (top_p < 0.99f)) {
-        request["top_p"] = top_p;
-    }
-    if (!openai_strict || frequency_penalty != 0.0f) {
-        request["frequency_penalty"] = frequency_penalty;
-    }
-    if (!openai_strict || presence_penalty != 0.0f) {
-        request["presence_penalty"] = presence_penalty;
-    }
-
-    // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
-    // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
-    if (!openai_strict) {
-        if (top_k > 0) {
-            request["top_k"] = top_k;
+    // Add sampling parameters (only if sampling is enabled)
+    if (sampling) {
+        // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
+        // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
+        if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+            request["temperature"] = temperature;
         }
-        if (repeat_penalty != 0.0f) {
-            request["repetition_penalty"] = repeat_penalty;
+        if (!openai_strict || (top_p < 0.99f)) {
+            request["top_p"] = top_p;
+        }
+        if (!openai_strict || frequency_penalty != 0.0f) {
+            request["frequency_penalty"] = frequency_penalty;
+        }
+        if (!openai_strict || presence_penalty != 0.0f) {
+            request["presence_penalty"] = presence_penalty;
+        }
+
+        // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
+        // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
+        if (!openai_strict) {
+            if (top_k > 0) {
+                request["top_k"] = top_k;
+            }
+            if (repeat_penalty != 0.0f) {
+                request["repetition_penalty"] = repeat_penalty;
+            }
         }
     }
 
@@ -802,30 +804,32 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
         request[model_config.max_tokens_param_name] = max_tokens;
     }
 
-    // Add sampling parameters
-    // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
-    // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-    if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
-        request["temperature"] = temperature;
-    }
-    if (!openai_strict || (top_p < 0.99f)) {
-        request["top_p"] = top_p;
-    }
-    if (!openai_strict || frequency_penalty != 0.0f) {
-        request["frequency_penalty"] = frequency_penalty;
-    }
-    if (!openai_strict || presence_penalty != 0.0f) {
-        request["presence_penalty"] = presence_penalty;
-    }
-
-    // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
-    // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
-    if (!openai_strict) {
-        if (top_k > 0) {
-            request["top_k"] = top_k;
+    // Add sampling parameters (only if sampling is enabled)
+    if (sampling) {
+        // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
+        // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
+        if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
+            request["temperature"] = temperature;
         }
-        if (repeat_penalty != 0.0f) {
-            request["repetition_penalty"] = repeat_penalty;
+        if (!openai_strict || (top_p < 0.99f)) {
+            request["top_p"] = top_p;
+        }
+        if (!openai_strict || frequency_penalty != 0.0f) {
+            request["frequency_penalty"] = frequency_penalty;
+        }
+        if (!openai_strict || presence_penalty != 0.0f) {
+            request["presence_penalty"] = presence_penalty;
+        }
+
+        // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
+        // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
+        if (!openai_strict) {
+            if (top_k > 0) {
+                request["top_k"] = top_k;
+            }
+            if (repeat_penalty != 0.0f) {
+                request["repetition_penalty"] = repeat_penalty;
+            }
         }
     }
 

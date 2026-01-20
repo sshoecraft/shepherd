@@ -32,6 +32,9 @@ public:
     float repeat_penalty = 1.2f;     // Ollama, TensorRT-LLM (as repetition_penalty)
     std::vector<std::string> stop_sequences;  // Stop generation at these sequences
 
+    // Sampling mode: when false, don't send sampling parameters in requests
+    bool sampling = true;
+
     ApiBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     virtual ~ApiBackend() = default;
 

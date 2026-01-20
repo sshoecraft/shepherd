@@ -66,6 +66,7 @@ void ApiBackend::parse_backend_config() {
         if (config->json.contains("frequency_penalty")) frequency_penalty = config->json["frequency_penalty"].get<float>();
         if (config->json.contains("presence_penalty")) presence_penalty = config->json["presence_penalty"].get<float>();
         if (config->json.contains("repeat_penalty")) repeat_penalty = config->json["repeat_penalty"].get<float>();
+        if (config->json.contains("sampling")) sampling = config->json["sampling"].get<bool>();
         if (config->json.contains("stop")) {
             stop_sequences.clear();  // Clear defaults when user explicitly sets stop
             if (config->json["stop"].is_array() && !config->json["stop"].empty()) {
@@ -83,7 +84,8 @@ void ApiBackend::parse_backend_config() {
         }
 
         dout(1) << "Loaded API backend config: timeout=" + std::to_string(timeout_seconds) +
-                  "s, temperature=" + std::to_string(temperature) +
+                  "s, sampling=" + std::string(sampling ? "true" : "false") +
+                  ", temperature=" + std::to_string(temperature) +
                   ", top_p=" + std::to_string(top_p) +
                   ", top_k=" + std::to_string(top_k) +
                   ", frequency_penalty=" + std::to_string(frequency_penalty) +

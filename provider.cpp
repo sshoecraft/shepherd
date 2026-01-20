@@ -143,6 +143,7 @@ Provider Provider::from_json(const json& j) {
     p.deployment_name = j.value("deployment_name", "");
     p.api_version = j.value("api_version", "");
     p.openai_strict = j.value("openai_strict", false);
+    p.sampling = j.value("sampling", true);
 
     // Ollama
     p.num_ctx = j.value("num_ctx", 0);
@@ -219,6 +220,7 @@ json Provider::to_json() const {
         if (!deployment_name.empty()) j["deployment_name"] = deployment_name;
         if (!api_version.empty()) j["api_version"] = api_version;
         if (openai_strict) j["openai_strict"] = openai_strict;
+        if (!sampling) j["sampling"] = sampling;
     }
 
     if (type == "ollama") {
@@ -327,6 +329,7 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         if (!deployment_name.empty()) config->json["deployment_name"] = deployment_name;
         if (!api_version.empty()) config->json["api_version"] = api_version;
         if (openai_strict) config->json["openai_strict"] = openai_strict;
+        config->json["sampling"] = sampling;
     } else if (type == "llamacpp") {
         config->model_path = model_path;
         config->json["tp"] = tp;
@@ -572,20 +575,23 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		// Sampling parameters (not used by CLI backend)
 		if (prov->type != "cli") {
-			callback("temperature = " + std::to_string(prov->temperature) + "\n");
-			callback("top_p = " + std::to_string(prov->top_p) + "\n");
-			callback("top_k = " + std::to_string(prov->top_k) + "\n");
-			callback("repeat_penalty = " + std::to_string(prov->repeat_penalty) + "\n");
-			callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
-			callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
-			callback("max_tokens = " + std::to_string(prov->max_tokens) + (prov->max_tokens == 0 ? " (auto)" : "") + "\n");
-			std::string stops = "stop_sequences = [";
-			for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
-				if (i > 0) stops += ", ";
-				stops += "\"" + prov->stop_sequences[i] + "\"";
+			callback("sampling = " + std::string(prov->sampling ? "true" : "false") + "\n");
+			if (prov->sampling) {
+				callback("temperature = " + std::to_string(prov->temperature) + "\n");
+				callback("top_p = " + std::to_string(prov->top_p) + "\n");
+				callback("top_k = " + std::to_string(prov->top_k) + "\n");
+				callback("repeat_penalty = " + std::to_string(prov->repeat_penalty) + "\n");
+				callback("frequency_penalty = " + std::to_string(prov->frequency_penalty) + "\n");
+				callback("presence_penalty = " + std::to_string(prov->presence_penalty) + "\n");
+				callback("max_tokens = " + std::to_string(prov->max_tokens) + (prov->max_tokens == 0 ? " (auto)" : "") + "\n");
+				std::string stops = "stop_sequences = [";
+				for (size_t i = 0; i < prov->stop_sequences.size(); i++) {
+					if (i > 0) stops += ", ";
+					stops += "\"" + prov->stop_sequences[i] + "\"";
+				}
+				stops += "]\n";
+				callback(stops);
 			}
-			stops += "]\n";
-			callback(stops);
 		}
 
 		// Rate limits
@@ -750,7 +756,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			         "\nOllama:\n"
 			         "  num_ctx, num_predict\n"
 			         "\nSampling:\n"
-			         "  temperature, top_p, top_k, repeat_penalty, frequency_penalty,\n"
+			         "  sampling, temperature, top_p, top_k, repeat_penalty, frequency_penalty,\n"
 			         "  presence_penalty, max_tokens\n"
 			         "\nRate limits:\n"
 			         "  requests_per_second, requests_per_minute, tokens_per_minute,\n"
@@ -840,7 +846,9 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->num_predict = std::stoi(value);
 			}
 			// Sampling parameters
-			else if (field == "temperature") {
+			else if (field == "sampling") {
+				prov->sampling = (value == "true" || value == "1" || value == "yes");
+			} else if (field == "temperature") {
 				prov->temperature = std::stof(value);
 			} else if (field == "top_p") {
 				prov->top_p = std::stof(value);

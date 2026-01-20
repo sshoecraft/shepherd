@@ -84,6 +84,9 @@ public:
     // OpenAI compatibility mode (skip non-standard params like top_k, repetition_penalty)
     bool openai_strict = false;
 
+    // Sampling mode: when false, don't send sampling parameters to backend
+    bool sampling = true;
+
     // Ollama specific
     int num_ctx = 0;                // Context window (0=auto)
     int num_predict = -1;           // Max tokens (-1=unlimited)

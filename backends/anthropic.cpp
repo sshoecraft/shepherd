@@ -366,19 +366,22 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
         request["tools"] = tools;
     }
 
-    // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
-    // Note: Anthropic doesn't allow both temperature and top_p to be set
-    // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
-    bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
-    bool top_p_is_default = (top_p >= 0.99f);
+    // Add sampling parameters (only if sampling is enabled)
+    if (sampling) {
+        // Anthropic supports: temperature, top_p, top_k
+        // Note: Anthropic doesn't allow both temperature and top_p to be set
+        // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
+        bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
+        bool top_p_is_default = (top_p >= 0.99f);
 
-    if (temp_is_default && !top_p_is_default) {
-        request["top_p"] = top_p;
-    } else {
-        request["temperature"] = temperature;
-    }
-    if (top_k > 0) {
-        request["top_k"] = top_k;
+        if (temp_is_default && !top_p_is_default) {
+            request["top_p"] = top_p;
+        } else {
+            request["temperature"] = temperature;
+        }
+        if (top_k > 0) {
+            request["top_k"] = top_k;
+        }
     }
 
     return request;
@@ -573,19 +576,22 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
         request["tools"] = tools;
     }
 
-    // Add sampling parameters (Anthropic supports: temperature, top_p, top_k)
-    // Note: Anthropic doesn't allow both temperature and top_p to be set
-    // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
-    bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
-    bool top_p_is_default = (top_p >= 0.99f);
+    // Add sampling parameters (only if sampling is enabled)
+    if (sampling) {
+        // Anthropic supports: temperature, top_p, top_k
+        // Note: Anthropic doesn't allow both temperature and top_p to be set
+        // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
+        bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
+        bool top_p_is_default = (top_p >= 0.99f);
 
-    if (temp_is_default && !top_p_is_default) {
-        request["top_p"] = top_p;
-    } else {
-        request["temperature"] = temperature;
-    }
-    if (top_k > 0) {
-        request["top_k"] = top_k;
+        if (temp_is_default && !top_p_is_default) {
+            request["top_p"] = top_p;
+        } else {
+            request["temperature"] = temperature;
+        }
+        if (top_k > 0) {
+            request["top_k"] = top_k;
+        }
     }
 
     return request;

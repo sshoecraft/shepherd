@@ -2106,7 +2106,7 @@ void LlamaCppBackend::prefill_session(Session& session) {
         }
 
         // Also check hard limit
-        if (total_after_prefill > context_size) {
+        if (static_cast<size_t>(total_after_prefill) > context_size) {
 #ifdef _DEBUG
             // Log token breakdown before throwing so we can debug context overflow
             if (g_debug_level >= 1) {

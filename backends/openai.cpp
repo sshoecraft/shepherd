@@ -350,7 +350,7 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
 std::vector<std::string> OpenAIBackend::fetch_models() {
     std::vector<std::string> result;
 
-    if (!http_client || api_key.empty()) {
+    if (!http_client) {
         return result;
     }
 

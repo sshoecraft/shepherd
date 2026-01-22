@@ -41,6 +41,7 @@ set(SHEPHERD_SOURCES
     backend.cpp
     server.cpp
     auth.cpp
+    azure_msi.cpp
     session_manager.cpp
 
     # Frontend sources

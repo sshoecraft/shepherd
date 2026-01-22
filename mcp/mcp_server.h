@@ -19,6 +19,7 @@ public:
         std::string command;                       // Executable path
         std::vector<std::string> args;            // Command line arguments
         std::map<std::string, std::string> env;   // Environment variables
+        std::map<std::string, std::string> smcp_credentials;  // SMCP credentials (sent as JSON)
     };
 
     explicit MCPServer(const Config& config);
@@ -54,4 +55,8 @@ private:
     std::string stderr_buffer_;
 
     void close_fds();
+
+    // SMCP handshake support
+    bool perform_smcp_handshake();
+    std::string read_line_timeout(int timeout_ms);
 };

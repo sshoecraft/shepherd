@@ -204,119 +204,7 @@ void Config::load() {
         }
 
         file >> json;
-        dout(1) << "Config file loaded, checking for mcp_servers key..." << std::endl;
-
-        // Load values with fallbacks to defaults
-        if (json.contains("backend")) {
-            backend = json["backend"];
-        }
-        if (json.contains("model")) {
-            model = json["model"];
-        }
-        if (json.contains("model_path") || json.contains("path")) {
-            model_path = json.contains("model_path") ?
-                json["model_path"].get<std::string>() :
-                json["path"].get<std::string>();
-        }
-        if (json.contains("context_size")) {
-            context_size = json["context_size"];
-        }
-        if (json.contains("key")) {
-            key = json["key"];
-        }
-        if (json.contains("api_key")) {
-            key = json["api_key"];
-        }
-        if (json.contains("api_base")) {
-            api_base = json["api_base"];
-        }
-        if (json.contains("models_file")) {
-            models_file = json["models_file"];
-        }
-        if (json.contains("system")) {
-            system_prompt = json["system"];
-        }
-        if (json.contains("mcp_servers")) {
-            // Store MCP servers as JSON string for MCPManager to parse
-            mcp_config = json["mcp_servers"].dump();
-            dout(1) << "Loaded MCP config: " + mcp_config << std::endl;
-        } else {
-            dout(1) << "No mcp_servers found in config file" << std::endl;
-        }
-
-        // Load web search configuration (optional)
-        if (json.contains("web_search_provider")) {
-            web_search_provider = json["web_search_provider"];
-        }
-        if (json.contains("web_search_api_key")) {
-            web_search_api_key = json["web_search_api_key"];
-        }
-        if (json.contains("web_search_instance_url")) {
-            web_search_instance_url = json["web_search_instance_url"];
-        }
-
-        // Load tool result truncation limit
-        if (json.contains("truncate_limit")) {
-            truncate_limit = json["truncate_limit"].get<int>();
-        }
-
-        // Load streaming flag
-        if (json.contains("streaming")) {
-            streaming = json["streaming"].get<bool>();
-        }
-
-        // Load warmup setting
-        if (json.contains("warmup")) {
-            warmup = json["warmup"].get<bool>();
-        }
-
-        // Load calibration setting
-        if (json.contains("calibration")) {
-            calibration = json["calibration"].get<bool>();
-        }
-
-        // Load thinking setting (show/hide reasoning blocks)
-        if (json.contains("thinking")) {
-            thinking = json["thinking"].get<bool>();
-        }
-
-        // Load auto_provider setting (auto-switch on connection failure)
-        if (json.contains("auto_provider")) {
-            auto_provider = json["auto_provider"].get<bool>();
-        }
-
-        // Load TUI mode setting
-        if (json.contains("tui")) {
-            tui = json["tui"].get<bool>();
-        }
-
-        // Load RAG memory database path (optional)
-        if (json.contains("memory_database")) {
-            memory_database = json["memory_database"];
-        }
-
-        // Load RAG database size limit (optional, supports both string and numeric formats)
-        if (json.contains("max_db_size")) {
-            if (json["max_db_size"].is_string()) {
-                max_db_size_str = json["max_db_size"].get<std::string>();
-                max_db_size = parse_size_string(max_db_size_str);
-            } else if (json["max_db_size"].is_number()) {
-                // Backward compatibility: numeric format
-                max_db_size = json["max_db_size"].get<size_t>();
-                // Convert to string format
-                if (max_db_size >= 1024ULL * 1024 * 1024 * 1024) {
-                    max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024 * 1024 * 1024)) + "T";
-                } else if (max_db_size >= 1024ULL * 1024 * 1024) {
-                    max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024 * 1024)) + "G";
-                } else if (max_db_size >= 1024ULL * 1024) {
-                    max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024)) + "M";
-                } else if (max_db_size >= 1024) {
-                    max_db_size_str = std::to_string(max_db_size / 1024) + "K";
-                } else {
-                    max_db_size_str = std::to_string(max_db_size);
-                }
-            }
-        }
+        load_from_json(json);
 
         dout(1) << "Loaded configuration from: " + config_path << std::endl;
 
@@ -324,6 +212,145 @@ void Config::load() {
         throw ConfigError("Invalid JSON in config file: " + std::string(e.what()));
     } catch (const std::exception& e) {
         throw ConfigError("Error loading config: " + std::string(e.what()));
+    }
+}
+
+void Config::load_from_json_string(const std::string& json_str) {
+    try {
+        json = nlohmann::json::parse(json_str);
+        load_from_json(json);
+        dout(1) << "Loaded configuration from JSON string" << std::endl;
+    } catch (const json::exception& e) {
+        throw ConfigError("Invalid JSON: " + std::string(e.what()));
+    }
+}
+
+void Config::load_from_json(const nlohmann::json& j) {
+    // Load values with fallbacks to defaults
+    if (j.contains("backend")) {
+        backend = j["backend"];
+    }
+    if (j.contains("model")) {
+        model = j["model"];
+    }
+    if (j.contains("model_path") || j.contains("path")) {
+        model_path = j.contains("model_path") ?
+            j["model_path"].get<std::string>() :
+            j["path"].get<std::string>();
+    }
+    if (j.contains("context_size")) {
+        context_size = j["context_size"];
+    }
+    if (j.contains("key")) {
+        key = j["key"];
+    }
+    if (j.contains("api_key")) {
+        key = j["api_key"];
+    }
+    if (j.contains("api_base")) {
+        api_base = j["api_base"];
+    }
+    if (j.contains("models_file")) {
+        models_file = j["models_file"];
+    }
+    if (j.contains("system")) {
+        system_prompt = j["system"];
+    }
+    if (j.contains("mcp_servers")) {
+        // Store MCP servers as JSON string for MCPManager to parse
+        mcp_config = j["mcp_servers"].dump();
+        dout(1) << "Loaded MCP config: " + mcp_config << std::endl;
+    } else {
+        dout(1) << "No mcp_servers found in config" << std::endl;
+    }
+
+    // Load web search configuration (optional)
+    if (j.contains("web_search_provider")) {
+        web_search_provider = j["web_search_provider"];
+    }
+    if (j.contains("web_search_api_key")) {
+        web_search_api_key = j["web_search_api_key"];
+    }
+    if (j.contains("web_search_instance_url")) {
+        web_search_instance_url = j["web_search_instance_url"];
+    }
+
+    // Load tool result truncation limit
+    if (j.contains("truncate_limit")) {
+        truncate_limit = j["truncate_limit"].get<int>();
+    }
+
+    // Load streaming flag
+    if (j.contains("streaming")) {
+        streaming = j["streaming"].get<bool>();
+    }
+
+    // Load warmup setting
+    if (j.contains("warmup")) {
+        warmup = j["warmup"].get<bool>();
+    }
+
+    // Load calibration setting
+    if (j.contains("calibration")) {
+        calibration = j["calibration"].get<bool>();
+    }
+
+    // Load thinking setting (show/hide reasoning blocks)
+    if (j.contains("thinking")) {
+        thinking = j["thinking"].get<bool>();
+    }
+
+    // Load auto_provider setting (auto-switch on connection failure)
+    if (j.contains("auto_provider")) {
+        auto_provider = j["auto_provider"].get<bool>();
+    }
+
+    // Load TUI mode setting
+    if (j.contains("tui")) {
+        tui = j["tui"].get<bool>();
+    }
+
+    // Load RAG memory database path (optional)
+    if (j.contains("memory_database")) {
+        memory_database = j["memory_database"];
+    }
+
+    // Load RAG database size limit (optional, supports both string and numeric formats)
+    if (j.contains("max_db_size")) {
+        if (j["max_db_size"].is_string()) {
+            max_db_size_str = j["max_db_size"].get<std::string>();
+            max_db_size = parse_size_string(max_db_size_str);
+        } else if (j["max_db_size"].is_number()) {
+            // Backward compatibility: numeric format
+            max_db_size = j["max_db_size"].get<size_t>();
+            // Convert to string format
+            if (max_db_size >= 1024ULL * 1024 * 1024 * 1024) {
+                max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024 * 1024 * 1024)) + "T";
+            } else if (max_db_size >= 1024ULL * 1024 * 1024) {
+                max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024 * 1024)) + "G";
+            } else if (max_db_size >= 1024ULL * 1024) {
+                max_db_size_str = std::to_string(max_db_size / (1024ULL * 1024)) + "M";
+            } else if (max_db_size >= 1024) {
+                max_db_size_str = std::to_string(max_db_size / 1024) + "K";
+            } else {
+                max_db_size_str = std::to_string(max_db_size);
+            }
+        }
+    }
+
+    // Load providers from unified config
+    if (j.contains("providers") && j["providers"].is_array()) {
+        providers_json.clear();
+        for (const auto& p : j["providers"]) {
+            providers_json.push_back(p);
+        }
+        dout(1) << "Loaded " << providers_json.size() << " providers from config" << std::endl;
+    }
+
+    // Load SMCP servers (store as JSON string like mcp_config)
+    if (j.contains("smcp_servers") && j["smcp_servers"].is_array()) {
+        smcp_config = j["smcp_servers"].dump();
+        dout(1) << "Loaded SMCP config: " << smcp_config << std::endl;
     }
 }
 
@@ -364,6 +391,12 @@ void Config::save() const {
         }
         if (!web_search_instance_url.empty()) {
             save_json["web_search_instance_url"] = web_search_instance_url;
+        }
+        if (!providers_json.empty()) {
+            save_json["providers"] = providers_json;
+        }
+        if (!smcp_config.empty()) {
+            save_json["smcp_servers"] = nlohmann::json::parse(smcp_config);
         }
 
         std::ofstream file(config_path);
@@ -469,6 +502,12 @@ int handle_config_args(const std::vector<std::string>& args,
     }
 
     if (args[0] == "set" && args.size() >= 3) {
+        // Check for read-only mode (Key Vault config)
+        if (config && config->is_read_only()) {
+            callback("Error: Cannot modify config in read-only mode (config from Key Vault)\n");
+            return 1;
+        }
+
         std::string key = args[1];
         std::string value = args[2];
 

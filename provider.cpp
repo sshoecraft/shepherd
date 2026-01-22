@@ -37,27 +37,41 @@ std::string Provider::get_providers_dir() {
 
 std::vector<Provider> Provider::load_providers() {
     std::vector<Provider> result;
-    std::string providers_dir = get_providers_dir();
 
-    if (!fs::exists(providers_dir)) {
-        fs::create_directories(providers_dir);
-        return result;
-    }
-
-    for (const auto& entry : fs::directory_iterator(providers_dir)) {
-        if (entry.path().extension() == ".json") {
+    // First, try to load from unified config (Key Vault or config.json)
+    if (config && !config->providers_json.empty()) {
+        dout(1) << "Loading " << config->providers_json.size() << " providers from config" << std::endl;
+        for (const auto& pj : config->providers_json) {
             try {
-                std::ifstream file(entry.path());
-                json j;
-                file >> j;
-
-                Provider p = Provider::from_json(j);
-                if (p.name.empty()) {
-                    p.name = entry.path().stem().string();
-                }
+                Provider p = Provider::from_json(pj);
                 result.push_back(std::move(p));
             } catch (const std::exception& e) {
-                std::cerr << "Failed to load provider " + entry.path().string() + ": " + e.what() << std::endl;
+                std::cerr << "Failed to load provider from config: " << e.what() << std::endl;
+            }
+        }
+    }
+
+    // Fallback: load from legacy provider files if no providers in config
+    if (result.empty()) {
+        std::string providers_dir = get_providers_dir();
+
+        if (fs::exists(providers_dir)) {
+            for (const auto& entry : fs::directory_iterator(providers_dir)) {
+                if (entry.path().extension() == ".json") {
+                    try {
+                        std::ifstream file(entry.path());
+                        json j;
+                        file >> j;
+
+                        Provider p = Provider::from_json(j);
+                        if (p.name.empty()) {
+                            p.name = entry.path().stem().string();
+                        }
+                        result.push_back(std::move(p));
+                    } catch (const std::exception& e) {
+                        std::cerr << "Failed to load provider " + entry.path().string() + ": " + e.what() << std::endl;
+                    }
+                }
             }
         }
     }
@@ -275,6 +289,26 @@ Provider Provider::from_config() {
 }
 
 void Provider::save() const {
+    // If using unified config (providers in config.json), update there
+    if (config && !config->providers_json.empty()) {
+        // Find and update this provider in the config
+        bool found = false;
+        for (auto& pj : config->providers_json) {
+            if (pj.value("name", "") == name) {
+                pj = to_json();
+                found = true;
+                break;
+            }
+        }
+        // If not found, add it
+        if (!found) {
+            config->providers_json.push_back(to_json());
+        }
+        config->save();
+        return;
+    }
+
+    // Legacy: save to individual provider files
     std::string providers_dir = get_providers_dir();
     fs::create_directories(providers_dir);
 
@@ -288,6 +322,21 @@ void Provider::save() const {
 }
 
 void Provider::remove(const std::string& name) {
+    // If using unified config, remove from there
+    if (config && !config->providers_json.empty()) {
+        auto& providers = config->providers_json;
+        providers.erase(
+            std::remove_if(providers.begin(), providers.end(),
+                [&name](const nlohmann::json& pj) {
+                    return pj.value("name", "") == name;
+                }),
+            providers.end()
+        );
+        config->save();
+        return;
+    }
+
+    // Legacy: remove from provider files
     std::string providers_dir = get_providers_dir();
     std::string filename = providers_dir + "/" + name + ".json";
 
@@ -421,6 +470,14 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	std::string subcmd = args[0];
+
+	// Check for read-only mode (Key Vault config) for modifying commands
+	if (config && config->is_read_only()) {
+		if (subcmd == "add" || subcmd == "set" || subcmd == "edit" || subcmd == "remove") {
+			callback("Error: Cannot modify providers in read-only mode (config from Key Vault)\n");
+			return 1;
+		}
+	}
 
 	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
 		callback("Usage: /provider [subcommand]\n"

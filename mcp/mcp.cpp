@@ -14,44 +14,81 @@ MCP& MCP::instance() {
 bool MCP::initialize(Tools& tools) {
     dout(1) << "Initializing MCP Manager..." << std::endl;
 
+    std::vector<ServerConfig> server_configs;
+
+    // Parse standard MCP servers
     std::string mcp_json = config->mcp_config;
     dout(1) << "MCP config string: " + (mcp_json.empty() ? "(empty)" : mcp_json) << std::endl;
-    if (mcp_json.empty()) {
-        dout(1) << "No MCP servers configured" << std::endl;
+
+    if (!mcp_json.empty()) {
+        try {
+            nlohmann::json servers = nlohmann::json::parse(mcp_json);
+
+            for (const auto& server : servers) {
+                ServerConfig sc;
+                sc.name = server.value("name", "unnamed");
+                sc.command = server.value("command", "");
+
+                if (server.contains("args") && server["args"].is_array()) {
+                    for (const auto& arg : server["args"]) {
+                        sc.args.push_back(arg.get<std::string>());
+                    }
+                }
+
+                if (server.contains("env") && server["env"].is_object()) {
+                    for (auto it = server["env"].begin(); it != server["env"].end(); ++it) {
+                        sc.env[it.key()] = it.value().get<std::string>();
+                    }
+                }
+
+                server_configs.push_back(sc);
+            }
+        } catch (const nlohmann::json::exception& e) {
+            std::cerr << "Failed to parse MCP configuration: " + std::string(e.what()) << std::endl;
+        }
+    }
+
+    // Parse SMCP servers (with credentials)
+    std::string smcp_json = config->smcp_config;
+    dout(1) << "SMCP config string: " + (smcp_json.empty() ? "(empty)" : smcp_json) << std::endl;
+
+    if (!smcp_json.empty()) {
+        try {
+            nlohmann::json servers = nlohmann::json::parse(smcp_json);
+
+            for (const auto& server : servers) {
+                ServerConfig sc;
+                sc.name = server.value("name", "unnamed");
+                sc.command = server.value("command", "");
+
+                if (server.contains("args") && server["args"].is_array()) {
+                    for (const auto& arg : server["args"]) {
+                        sc.args.push_back(arg.get<std::string>());
+                    }
+                }
+
+                // SMCP servers use credentials instead of env
+                if (server.contains("credentials") && server["credentials"].is_object()) {
+                    for (auto it = server["credentials"].begin(); it != server["credentials"].end(); ++it) {
+                        sc.smcp_credentials[it.key()] = it.value().get<std::string>();
+                    }
+                }
+
+                server_configs.push_back(sc);
+                dout(1) << "Added SMCP server: " << sc.name << " with "
+                        << sc.smcp_credentials.size() << " credentials" << std::endl;
+            }
+        } catch (const nlohmann::json::exception& e) {
+            std::cerr << "Failed to parse SMCP configuration: " + std::string(e.what()) << std::endl;
+        }
+    }
+
+    if (server_configs.empty()) {
+        dout(1) << "No MCP/SMCP servers configured" << std::endl;
         return true;
     }
 
-    try {
-        // Parse MCP server configurations
-        nlohmann::json servers = nlohmann::json::parse(mcp_json);
-        std::vector<ServerConfig> server_configs;
-
-        for (const auto& server : servers) {
-            ServerConfig sc;
-            sc.name = server.value("name", "unnamed");
-            sc.command = server.value("command", "");
-
-            if (server.contains("args") && server["args"].is_array()) {
-                for (const auto& arg : server["args"]) {
-                    sc.args.push_back(arg.get<std::string>());
-                }
-            }
-
-            if (server.contains("env") && server["env"].is_object()) {
-                for (auto it = server["env"].begin(); it != server["env"].end(); ++it) {
-                    sc.env[it.key()] = it.value().get<std::string>();
-                }
-            }
-
-            server_configs.push_back(sc);
-        }
-
-        return initialize(tools, server_configs);
-
-    } catch (const nlohmann::json::exception& e) {
-        std::cerr << "Failed to parse MCP configuration: " + std::string(e.what()) << std::endl;
-        return false;
-    }
+    return initialize(tools, server_configs);
 }
 
 bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_configs) {
@@ -88,6 +125,7 @@ bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
         server_config.command = sconfig.command;
         server_config.args = sconfig.args;
         server_config.env = sconfig.env;
+        server_config.smcp_credentials = sconfig.smcp_credentials;
 
         // Create and start server
         auto server = std::make_unique<MCPServer>(server_config);

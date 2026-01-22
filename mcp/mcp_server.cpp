@@ -1,12 +1,15 @@
 #include "shepherd.h"
 #include "mcp_server.h"
+#include "nlohmann/json.hpp"
 #include <unistd.h>
 
 #include <sys/wait.h>
+#include <sys/select.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <cstring>
 #include <sstream>
+#include <chrono>
 
 MCPServer::MCPServer(const Config& config)
     : config_(config), pid_(-1), stdin_fd_(-1), stdout_fd_(-1), stderr_fd_(-1) {
@@ -115,6 +118,16 @@ void MCPServer::start() {
     stdin_fd_ = stdin_pipe[1];
     stdout_fd_ = stdout_pipe[0];
     stderr_fd_ = stderr_pipe[0];
+
+    // Perform SMCP handshake if credentials are configured
+    // (must happen before making stdout non-blocking)
+    if (!config_.smcp_credentials.empty()) {
+        dout(1) << "Performing SMCP handshake for '" + config_.name + "'" << std::endl;
+        if (!perform_smcp_handshake()) {
+            stop();
+            throw MCPServerError("SMCP handshake failed for " + config_.name);
+        }
+    }
 
     // Make stdout and stderr non-blocking
     fcntl(stdout_fd_, F_SETFL, fcntl(stdout_fd_, F_GETFL) | O_NONBLOCK);
@@ -266,5 +279,93 @@ void MCPServer::close_fds() {
     if (stderr_fd_ >= 0) {
         close(stderr_fd_);
         stderr_fd_ = -1;
+    }
+}
+
+std::string MCPServer::read_line_timeout(int timeout_ms) {
+    std::string line;
+    char buffer[4096];
+    auto start = std::chrono::steady_clock::now();
+
+    while (true) {
+        // Check timeout
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= timeout_ms) {
+            throw MCPServerError("Timeout waiting for response from " + config_.name);
+        }
+
+        // Use select to wait for data with remaining timeout
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(stdout_fd_, &fds);
+
+        int remaining_ms = timeout_ms - elapsed;
+        struct timeval tv;
+        tv.tv_sec = remaining_ms / 1000;
+        tv.tv_usec = (remaining_ms % 1000) * 1000;
+
+        int ret = select(stdout_fd_ + 1, &fds, nullptr, nullptr, &tv);
+        if (ret < 0) {
+            throw MCPServerError("select() failed: " + std::string(strerror(errno)));
+        }
+        if (ret == 0) {
+            continue;  // Timeout, loop will check total elapsed time
+        }
+
+        // Data available
+        ssize_t n = read(stdout_fd_, buffer, sizeof(buffer) - 1);
+        if (n < 0) {
+            throw MCPServerError("Failed to read from server: " + std::string(strerror(errno)));
+        }
+        if (n == 0) {
+            throw MCPServerError("Server closed stdout during SMCP handshake");
+        }
+
+        buffer[n] = '\0';
+        line += buffer;
+
+        // Check for newline
+        auto newline_pos = line.find('\n');
+        if (newline_pos != std::string::npos) {
+            return line.substr(0, newline_pos);
+        }
+    }
+}
+
+bool MCPServer::perform_smcp_handshake() {
+    try {
+        // Wait for +READY (10s timeout)
+        std::string line = read_line_timeout(10000);
+        if (line != "+READY") {
+            std::cerr << "SMCP: Expected +READY from " << config_.name
+                      << ", got: " << line << std::endl;
+            return false;
+        }
+
+        dout(1) << "SMCP: Received +READY from " << config_.name << std::endl;
+
+        // Send credentials as JSON object
+        nlohmann::json creds_json(config_.smcp_credentials);
+        write_line(creds_json.dump());
+
+        dout(1) << "SMCP: Sent " << config_.smcp_credentials.size()
+                << " credentials to " << config_.name << std::endl;
+
+        // Wait for +OK (5s timeout)
+        line = read_line_timeout(5000);
+        if (line != "+OK") {
+            std::cerr << "SMCP: Expected +OK from " << config_.name
+                      << ", got: " << line << std::endl;
+            return false;
+        }
+
+        dout(1) << "SMCP: Handshake complete for " << config_.name << std::endl;
+        return true;
+
+    } catch (const MCPServerError& e) {
+        std::cerr << "SMCP handshake error for " << config_.name
+                  << ": " << e.what() << std::endl;
+        return false;
     }
 }

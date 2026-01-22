@@ -18,6 +18,17 @@ struct MCPServerEntry {
     static MCPServerEntry from_json(const nlohmann::json& j);
 };
 
+/// @brief SMCP server configuration entry (MCP with secure credential injection)
+struct SMCPServerEntry {
+    std::string name;
+    std::string command;
+    std::vector<std::string> args;
+    std::map<std::string, std::string> credentials;  // Sent as JSON via SMCP handshake
+
+    nlohmann::json to_json() const;
+    static SMCPServerEntry from_json(const nlohmann::json& j);
+};
+
 /// @brief MCP configuration manager
 class MCPConfig {
 public:

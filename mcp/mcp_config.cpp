@@ -41,6 +41,43 @@ MCPServerEntry MCPServerEntry::from_json(const nlohmann::json& j) {
     return entry;
 }
 
+nlohmann::json SMCPServerEntry::to_json() const {
+    nlohmann::json j = {
+        {"name", name},
+        {"command", command}
+    };
+
+    if (!args.empty()) {
+        j["args"] = args;
+    }
+
+    if (!credentials.empty()) {
+        j["credentials"] = credentials;
+    }
+
+    return j;
+}
+
+SMCPServerEntry SMCPServerEntry::from_json(const nlohmann::json& j) {
+    SMCPServerEntry entry;
+    entry.name = j.value("name", "");
+    entry.command = j.value("command", "");
+
+    if (j.contains("args") && j["args"].is_array()) {
+        for (const auto& arg : j["args"]) {
+            entry.args.push_back(arg.get<std::string>());
+        }
+    }
+
+    if (j.contains("credentials") && j["credentials"].is_object()) {
+        for (auto it = j["credentials"].begin(); it != j["credentials"].end(); ++it) {
+            entry.credentials[it.key()] = it.value().get<std::string>();
+        }
+    }
+
+    return entry;
+}
+
 std::vector<MCPServerEntry> MCPConfig::load(const std::string& config_path) {
     std::vector<MCPServerEntry> servers;
 
@@ -204,6 +241,14 @@ int handle_mcp_args(const std::vector<std::string>& args,
     }
 
     std::string subcmd = args[0];
+
+    // Check for read-only mode (Key Vault config) for modifying commands
+    if (config && config->is_read_only()) {
+        if (subcmd == "add" || subcmd == "remove") {
+            callback("Error: Cannot modify MCP servers in read-only mode (config from Key Vault)\n");
+            return 1;
+        }
+    }
 
     if (subcmd == "add") {
         if (args.size() < 3) {

@@ -19,6 +19,7 @@
 #include "version.h"
 #include "scheduler.h"
 #include "auth.h"
+#include "azure_msi.h"
 
 #include <iostream>
 #include <fstream>
@@ -119,11 +120,14 @@ static void print_usage(int, char** argv) {
 	printf("	%s provider <add|list|show|remove|use> [args...]\n", argv[0]);
 	printf("	%s config <show|set> [args...]\n", argv[0]);
 	printf("	%s mcp <add|remove|list> [args...]\n", argv[0]);
+	printf("	%s smcp <add|remove|list> [args...]\n", argv[0]);
 	printf("	%s sched <list|add|remove|enable|disable|show|next> [args...]\n", argv[0]);
 	printf("	%s ctl <status|shutdown> [--socket PATH]\n", argv[0]);
 	printf("	%s apikey <create|list|remove> [options]\n", argv[0]);
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
+	printf("	                   Use '--config msi --kv <vault>' to load from Azure Key Vault\n");
+	printf("	--kv VAULT         Azure Key Vault name (requires --config msi)\n");
 #ifdef _DEBUG
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
 #endif
@@ -217,9 +221,18 @@ static int handle_provider_subcommand(int argc, char** argv) {
 		args.push_back(argv[i]);
 	}
 
+	// Initialize config if not already done (for CLI subcommands)
+	if (!config) {
+		config = std::make_unique<Config>();
+		config->load();
+	}
+
+	// Load providers for CLI commands
+	std::vector<Provider> providers = Provider::load_providers();
+
 	// Call common implementation with stdout output
 	auto out = [](const std::string& msg) { std::cout << msg; };
-	return handle_provider_args(args, out, nullptr, nullptr, nullptr, nullptr, nullptr);
+	return handle_provider_args(args, out, nullptr, nullptr, &providers, nullptr, nullptr);
 }
 
 static int handle_mcp_subcommand(int argc, char** argv) {
@@ -232,6 +245,112 @@ static int handle_mcp_subcommand(int argc, char** argv) {
 	// Call common implementation with stdout output
 	auto out = [](const std::string& msg) { std::cout << msg; };
 	return handle_mcp_args(args, out);
+}
+
+static int handle_smcp_subcommand(int argc, char** argv) {
+	// SMCP management - works directly with config file, no server connection
+	std::string config_path = Config::get_default_config_path();
+
+	// Load config
+	std::ifstream infile(config_path);
+	nlohmann::json config_json;
+	if (infile.is_open()) {
+		try {
+			config_json = nlohmann::json::parse(infile);
+		} catch (const std::exception& e) {
+			std::cerr << "Failed to parse config: " << e.what() << std::endl;
+			return 1;
+		}
+		infile.close();
+	}
+
+	// Ensure smcp_servers array exists
+	if (!config_json.contains("smcp_servers") || !config_json["smcp_servers"].is_array()) {
+		config_json["smcp_servers"] = nlohmann::json::array();
+	}
+
+	// No args or "list" - show SMCP servers
+	if (argc < 3 || std::string(argv[2]) == "list") {
+		auto& servers = config_json["smcp_servers"];
+		if (servers.empty()) {
+			std::cout << "No SMCP servers configured" << std::endl;
+		} else {
+			std::cout << "SMCP servers:" << std::endl;
+			for (const auto& s : servers) {
+				std::cout << "  " << s.value("name", "unnamed") << ": "
+				          << s.value("command", "") << std::endl;
+			}
+		}
+		return 0;
+	}
+
+	std::string subcmd = argv[2];
+
+	if (subcmd == "add") {
+		if (argc < 5) {
+			std::cout << "Usage: smcp add <name> <command> [--cred KEY=VALUE ...]" << std::endl;
+			return 1;
+		}
+
+		nlohmann::json server;
+		server["name"] = argv[3];
+		server["command"] = argv[4];
+		server["credentials"] = nlohmann::json::object();
+
+		// Parse --cred arguments
+		for (int i = 5; i < argc; i++) {
+			if (std::string(argv[i]) == "--cred" && i + 1 < argc) {
+				i++;
+				std::string pair = argv[i];
+				size_t eq = pair.find('=');
+				if (eq != std::string::npos) {
+					server["credentials"][pair.substr(0, eq)] = pair.substr(eq + 1);
+				}
+			}
+		}
+
+		config_json["smcp_servers"].push_back(server);
+
+		// Save config
+		std::ofstream outfile(config_path);
+		outfile << config_json.dump(4) << std::endl;
+		std::cout << "Added SMCP server '" << argv[3] << "'" << std::endl;
+		return 0;
+	}
+
+	if (subcmd == "remove") {
+		if (argc < 4) {
+			std::cout << "Usage: smcp remove <name>" << std::endl;
+			return 1;
+		}
+
+		std::string name = argv[3];
+		auto& servers = config_json["smcp_servers"];
+		bool found = false;
+
+		for (auto it = servers.begin(); it != servers.end(); ++it) {
+			if ((*it).value("name", "") == name) {
+				servers.erase(it);
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			std::cerr << "SMCP server '" << name << "' not found" << std::endl;
+			return 1;
+		}
+
+		// Save config
+		std::ofstream outfile(config_path);
+		outfile << config_json.dump(4) << std::endl;
+		std::cout << "Removed SMCP server '" << name << "'" << std::endl;
+		return 0;
+	}
+
+	std::cerr << "Unknown smcp subcommand: " << subcmd << std::endl;
+	std::cerr << "Available: list, add, remove" << std::endl;
+	return 1;
 }
 
 static int handle_sched_command(int argc, char** argv) {
@@ -424,6 +543,11 @@ int main(int argc, char** argv) {
 		return handle_mcp_subcommand(argc, argv);
 	}
 
+	// Handle SMCP subcommand (config-only, no server connection)
+	if (argc >= 2 && std::string(argv[1]) == "smcp") {
+		return handle_smcp_subcommand(argc, argv);
+	}
+
 	// Handle sched subcommand
 	if (argc >= 2 && std::string(argv[1]) == "sched") {
 		return handle_sched_command(argc, argv);
@@ -455,6 +579,7 @@ int main(int argc, char** argv) {
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string config_file_path;
+	std::string keyvault_name;  // Azure Key Vault name for --config msi --kv <vault>
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	std::string auth_mode = "none";
@@ -531,6 +656,7 @@ int main(int argc, char** argv) {
 		{"tui", no_argument, 0, 1038},
 		{"no-tui", no_argument, 0, 1039},
 		{"calibration", no_argument, 0, 1034},
+		{"kv", required_argument, 0, 1046},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -701,6 +827,9 @@ int main(int argc, char** argv) {
 			case 1034: // --calibration
 				override.calibration = true;
 				break;
+			case 1046: // --kv (Azure Key Vault name for MSI config)
+				keyvault_name = optarg;
+				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
 				return 0;
@@ -716,16 +845,41 @@ int main(int argc, char** argv) {
 	// Load configuration early (before terminal init to get TUI setting)
 	config = std::make_unique<Config>();
 
-	// Set custom config path if specified
-	if (!config_file_path.empty()) {
-		config->set_config_path(config_file_path);
-	}
+	// Check for Azure Managed Identity config source
+	if (config_file_path == "msi") {
+		// Load config from Azure Key Vault using Managed Identity
+		if (keyvault_name.empty()) {
+			fprintf(stderr, "Error: --config msi requires --kv <vault-name>\n");
+			return 1;
+		}
 
-	try {
-		config->load();
-	} catch (const ConfigError& e) {
-		fprintf(stderr, "Configuration error: %s\n", e.what());
-		return 1;
+		auto secret = azure::get_keyvault_secret(keyvault_name, "shepherd-config");
+		if (!secret) {
+			fprintf(stderr, "Error: Failed to fetch config from Key Vault '%s'\n",
+			        keyvault_name.c_str());
+			return 1;
+		}
+
+		try {
+			config->load_from_json_string(*secret);
+			config->source_mode = Config::SourceMode::KEY_VAULT;
+			dout(1) << "Loaded config from Key Vault (read-only mode)" << std::endl;
+		} catch (const ConfigError& e) {
+			fprintf(stderr, "Error parsing Key Vault config: %s\n", e.what());
+			return 1;
+		}
+	} else {
+		// Standard file-based config loading
+		if (!config_file_path.empty()) {
+			config->set_config_path(config_file_path);
+		}
+
+		try {
+			config->load();
+		} catch (const ConfigError& e) {
+			fprintf(stderr, "Configuration error: %s\n", e.what());
+			return 1;
+		}
 	}
 
 	// Determine if we need TUI mode

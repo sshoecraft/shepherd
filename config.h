@@ -19,6 +19,9 @@ public:
     // Load configuration from $HOME/.shepherd/config.json
     void load();
 
+    // Load configuration from a JSON string (for Key Vault, etc.)
+    void load_from_json_string(const std::string& json_str);
+
     // Save current configuration
     void save() const;
 
@@ -70,6 +73,19 @@ public:
     int tui_history;      // TUI scrollback buffer size (lines)
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
+    // Unified config: providers loaded from config (Key Vault or file)
+    std::vector<nlohmann::json> providers_json;
+
+    // SMCP servers config (JSON string, like mcp_config)
+    std::string smcp_config;
+
+    // Config source mode
+    enum class SourceMode { LOCAL_FILE, KEY_VAULT };
+    SourceMode source_mode = SourceMode::LOCAL_FILE;
+
+    // Check if config is read-only (Key Vault mode)
+    bool is_read_only() const { return source_mode != SourceMode::LOCAL_FILE; }
+
     // Legacy/runtime fields (not saved to config, only used for command-line overrides)
     std::string backend;
     std::string model;
@@ -85,6 +101,7 @@ private:
     std::string get_config_path() const;
     std::string get_default_model_path() const;
     void set_defaults();
+    void load_from_json(const nlohmann::json& j);  // Shared JSON parsing logic
     bool is_backend_available(const std::string& backend) const;
 
     // Internal state

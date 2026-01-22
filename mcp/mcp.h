@@ -25,6 +25,7 @@ public:
         std::string command;
         std::vector<std::string> args;
         std::map<std::string, std::string> env;
+        std::map<std::string, std::string> smcp_credentials;  // For SMCP servers
     };
 
     static MCP& instance();

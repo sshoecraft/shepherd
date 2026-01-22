@@ -8,8 +8,8 @@ The API Server provides an OpenAI-compatible HTTP API for inference using local 
 
 ### Files
 
-- `server/api_server.h` - Class declaration
-- `server/api_server.cpp` - HTTP server implementation
+- `frontends/api_server.h` - Class declaration
+- `frontends/api_server.cpp` - HTTP server implementation
 
 ### Class Structure
 
@@ -28,8 +28,103 @@ public:
 Start API server mode:
 
 ```bash
-shepherd --apiserver --host 0.0.0.0 --port 8000
+shepherd --server --port 8000
 ```
+
+With a specific provider:
+
+```bash
+shepherd --server --port 8000 --provider mylocal
+```
+
+## Authentication
+
+By default, the API server requires no authentication. For remote access, enable API key authentication:
+
+```bash
+# Start server with authentication
+./shepherd --server --auth-mode json
+
+# Generate an API key
+shepherd apikey add mykey
+# Output: sk-shep-abc123...
+
+# Use the key in requests
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer sk-shep-abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+**API Key Management:**
+```bash
+shepherd apikey add <name>      # Generate new key
+shepherd apikey list            # List all keys
+shepherd apikey remove <name>   # Remove a key
+```
+
+## Server-Side Tools
+
+By default, the API server does **not** expose Shepherd's tools via HTTP endpoints. Tools are provided by the client in each request and executed client-side.
+
+To enable server-side tool access (for MCP proxy use cases):
+
+```bash
+./shepherd --server --server-tools
+```
+
+When `--server-tools` is enabled, two additional endpoints become available:
+
+- `GET /v1/tools` - List all available tools
+- `POST /v1/tools/execute` - Execute a tool by name
+
+**Security Warning**: Only enable `--server-tools` when you need remote tool execution. These endpoints expose shell commands, file system access, and MCP server tools to anyone who can reach the API.
+
+## Session Management
+
+The API server implements a **single persistent session** that maintains conversation state in the KV cache.
+
+### How It Works
+
+1. **Single Session**: The server maintains one active conversation
+2. **Message Replacement**: Each request sends the **full conversation history** (OpenAI protocol)
+3. **KV Cache Reuse**: Server maintains KV cache between requests for fast responses
+4. **Prefix Matching**: Only new messages are processed; cached messages are skipped
+
+**Important**: Unlike multi-tenant servers (vLLM, TGI), Shepherd's API server is designed for **personal use** - think of it as remote access to your interactive Shepherd session, not as a production inference server.
+
+### Prefix Caching (vLLM-style)
+
+When a new request arrives, the server:
+
+1. **Compares** incoming messages with cached tokens
+2. **Detects** the longest matching prefix
+3. **Reuses** KV cache for matching tokens
+4. **Only processes** new tokens after the prefix
+
+**Example:**
+
+```
+Request 1: [system, user_1]
+  → Server processes: system (4141 tokens) + user_1 (10 tokens)
+  → KV cache: 4151 tokens
+  → Time: ~1.5s (full processing)
+
+Request 2: [system, user_1, assistant_1, user_2]
+  → Server detects: system + user_1 match cached (4151 tokens)
+  → Server processes ONLY: assistant_1 (27 tokens) + user_2 (8 tokens)
+  → KV cache: 4151 + 35 = 4186 tokens
+  → Time: ~200ms (90% faster!)
+```
+
+**Performance Comparison:**
+
+| Scenario | Without Prefix Caching | With Prefix Caching | Speedup |
+|----------|------------------------|---------------------|---------|
+| Turn 1 (4151 tokens) | 1.5s | 1.5s | 1x |
+| Turn 2 (35 new tokens) | 1.6s | 0.2s | **8x** |
+| Turn 3 (117 new tokens) | 1.7s | 0.18s | **9x** |
+| Turn 10 (50 new tokens) | 2.1s | 0.15s | **14x** |
 
 ## API Endpoints
 
@@ -80,6 +175,60 @@ List available models.
 ### GET /health
 
 Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "backend": "llamacpp",
+  "model": "/models/qwen-3-30b.gguf"
+}
+```
+
+### GET /v1/tools (requires `--server-tools`)
+
+List available tools for remote execution.
+
+**Response:**
+```json
+{
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read the contents of a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Path to the file"}
+        },
+        "required": ["path"]
+      }
+    }
+  ]
+}
+```
+
+### POST /v1/tools/execute (requires `--server-tools`)
+
+Execute a tool by name.
+
+**Request:**
+```json
+{
+  "name": "read_file",
+  "tool_call_id": "call_123",
+  "arguments": {"path": "/tmp/example.txt"}
+}
+```
+
+**Response:**
+```json
+{
+  "tool_call_id": "call_123",
+  "success": true,
+  "content": "File contents here..."
+}
+```
 
 ## Streaming (v2.13.0)
 
@@ -154,6 +303,96 @@ Now streaming uses a two-phase approach:
 This ensures proper HTTP semantics: context overflow returns HTTP 400, not 200 + SSE error.
 
 **Note:** This only applies to local backends (LlamaCpp, TensorRT). API backends (OpenAI, Anthropic, etc.) use default no-op implementations since they can't validate against the remote server's context limit.
+
+## Client Examples
+
+### Python (OpenAI Library)
+
+```python
+import openai
+
+client = openai.OpenAI(
+    api_key="sk-shep-abc123...",  # Or "dummy" if --auth-mode none
+    base_url="http://localhost:8000/v1"
+)
+
+# Multi-turn conversation
+messages = []
+
+while True:
+    user_input = input("You: ")
+    if user_input.lower() == 'quit':
+        break
+
+    messages.append({"role": "user", "content": user_input})
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=messages
+    )
+
+    assistant_msg = response.choices[0].message.content
+    messages.append({"role": "assistant", "content": assistant_msg})
+
+    print(f"Assistant: {assistant_msg}")
+```
+
+### curl
+
+```bash
+# Single request
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
+
+# With tools
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "List files in /tmp"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "list_directory",
+          "description": "List files",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"}
+            }
+          }
+        }
+      }
+    ]
+  }'
+```
+
+## Important Notes
+
+- **Single-User Architecture**: Designed for one user accessing their Shepherd instance remotely
+  - Not multi-tenant: Only one conversation at a time
+  - Not for production multi-user serving: Use vLLM, TGI, or similar
+  - Use case: Remote access to your local Shepherd (e.g., laptop to home server)
+
+- **Tools**: In server mode, tools are provided by the **client** in each request
+  - Server does NOT execute tools by default (client-side execution)
+  - Server returns tool calls to client for execution
+  - Client executes tools and sends results back in next request
+  - Use `--server-tools` to enable server-side tool execution
+
+- **KV Cache Persistence**: The session's KV cache persists across requests
+  - Full conversation history maintained in memory
+  - Prefix matching provides vLLM-like performance
+  - Clear cache by restarting the server
 
 ## Version History
 

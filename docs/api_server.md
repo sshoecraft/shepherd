@@ -82,16 +82,20 @@ When `--server-tools` is enabled, two additional endpoints become available:
 
 ## Session Management
 
-The API server implements a **single persistent session** that maintains conversation state in the KV cache.
+The API server follows standard OpenAI protocol - each request contains the full conversation history, and the server processes it accordingly.
 
-### How It Works
+### With Local Backends (llamacpp, TensorRT)
 
-1. **Single Session**: The server maintains one active conversation
-2. **Message Replacement**: Each request sends the **full conversation history** (OpenAI protocol)
-3. **KV Cache Reuse**: Server maintains KV cache between requests for fast responses
-4. **Prefix Matching**: Only new messages are processed; cached messages are skipped
+When using local backends, Shepherd maintains a KV cache for efficient multi-turn conversations:
 
-**Important**: Unlike multi-tenant servers (vLLM, TGI), Shepherd's API server is designed for **personal use** - think of it as remote access to your interactive Shepherd session, not as a production inference server.
+1. **Message Comparison**: Each request sends the full conversation history (OpenAI protocol)
+2. **Prefix Matching**: Server compares incoming messages with cached tokens
+3. **KV Cache Reuse**: Matching prefix is skipped; only new tokens are processed
+4. **Optimization**: Subsequent turns in the same conversation are much faster
+
+### With API Backends (OpenAI, Anthropic, etc.)
+
+With cloud API backends, each request is forwarded to the upstream provider - fully stateless on the Shepherd side.
 
 ### Prefix Caching (vLLM-style)
 
@@ -378,20 +382,14 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## Important Notes
 
-- **Single-User Architecture**: Designed for one user accessing their Shepherd instance remotely
-  - Not multi-tenant: Only one conversation at a time
-  - Not for production multi-user serving: Use vLLM, TGI, or similar
-  - Use case: Remote access to your local Shepherd (e.g., laptop to home server)
-
 - **Tools**: In server mode, tools are provided by the **client** in each request
   - Server does NOT execute tools by default (client-side execution)
   - Server returns tool calls to client for execution
   - Client executes tools and sends results back in next request
   - Use `--server-tools` to enable server-side tool execution
 
-- **KV Cache Persistence**: The session's KV cache persists across requests
-  - Full conversation history maintained in memory
-  - Prefix matching provides vLLM-like performance
+- **KV Cache (Local Backends)**: With llamacpp/TensorRT, the KV cache persists across requests
+  - Prefix matching provides fast multi-turn conversations
   - Clear cache by restarting the server
 
 ## Version History

@@ -208,8 +208,6 @@ Generate API keys for clients to authenticate against the server (OpenAI-compati
 shepherd apikey add mykey    # Generates sk-shep-...
 ```
 
-**Note:** API server is single-session (one user at a time). For multi-tenant serving, use vLLM or TGI.
-
 For full documentation, see [docs/api_server.md](docs/api_server.md).
 
 ### 🖥️ CLI Server (Persistent Session)
@@ -231,6 +229,66 @@ Runs a persistent AI session with server-side tool execution and multi-client ac
 ```
 
 For full documentation, see [docs/cli_server.md](docs/cli_server.md).
+
+### 🔗 Server Composability
+
+Shepherd's architecture allows **any backend** with **any frontend**, and servers can be chained together.
+
+**Key principle**: With API backends, each incoming connection creates a new backend connection - no session contention, fully scalable.
+
+#### Example: API Proxy with Credential Isolation
+
+Hide your Azure OpenAI credentials while adding tools and your own API keys:
+
+```bash
+# Shepherd connects to Azure OpenAI (credentials stay on server)
+# Clients connect to Shepherd with your API keys
+./shepherd --backend openai \
+           --api-base https://mycompany.openai.azure.com/v1 \
+           --api-key $AZURE_KEY \
+           --server --port 8000 --auth-mode json --server-tools
+
+# Generate keys for your clients
+shepherd apikey add client1
+shepherd apikey add client2
+```
+
+Clients get:
+- Access to Azure OpenAI without knowing the Azure credentials
+- Server-side tools (filesystem, shell, MCP servers)
+- Your access control via Shepherd API keys
+
+#### Example: Persistent Session on vLLM
+
+Use vLLM's multi-user capabilities with a persistent CLI session:
+
+```bash
+# vLLM server running on port 5000 (handles multiple users efficiently)
+# Shepherd CLI server on top for persistent session + tools
+./shepherd --backend openai \
+           --api-base http://localhost:5000/v1 \
+           --cliserver --port 8000
+```
+
+Now you have:
+- vLLM's PagedAttention for efficient multi-conversation handling
+- Shepherd's persistent session (all clients see same conversation)
+- Server-side tools executing locally
+
+#### Example: Multi-Level Chaining
+
+```bash
+# Level 1: llamacpp backend
+./shepherd --backend llamacpp -m /models/qwen-72b.gguf --server --port 5000
+
+# Level 2: API server proxy (adds tools + API keys)
+./shepherd --backend openai --api-base http://localhost:5000/v1 \
+           --server --port 6000 --auth-mode json --server-tools
+
+# Level 3: CLI server for persistent session
+./shepherd --backend openai --api-base http://localhost:6000/v1 \
+           --cliserver --port 7000
+```
 
 ---
 
@@ -295,6 +353,35 @@ Local backends (llama.cpp, TensorRT) use intelligent KV cache eviction for indef
 - **Position shift management** maintains cache consistency
 
 For implementation details, see [docs/llamacpp.md](docs/llamacpp.md).
+
+### ⏰ Scheduling
+
+Shepherd includes a cron-like scheduler that injects prompts into the session automatically. Works with CLI, TUI, and CLI server modes.
+
+```bash
+# Add a scheduled task (runs daily at 9am)
+shepherd sched add morning-news "0 9 * * *" "Get me the top 5 tech news headlines"
+
+# List scheduled tasks
+shepherd sched list
+
+# Enable/disable without removing
+shepherd sched disable morning-news
+shepherd sched enable morning-news
+```
+
+**24/7 Operation**: Run a CLI server and schedules execute automatically, even with no clients connected:
+
+```bash
+./shepherd --cliserver --port 8000
+
+# Scheduled prompts run in the session:
+# - "Check server disk usage" every hour
+# - "Summarize overnight logs" at 6am
+# - "Generate daily report" at 5pm
+```
+
+Clients connect to see results from scheduled tasks in the conversation history.
 
 ---
 

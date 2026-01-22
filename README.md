@@ -10,7 +10,7 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 
 **Local model:**
 ```bash
-./shepherd /path/to/model.gguf
+./shepherd -m /path/to/model.gguf
 ```
 
 **Cloud provider:**
@@ -200,6 +200,9 @@ Exposes an OpenAI-compatible REST API for remote access to your local Shepherd i
 - `GET /health` - Health check
 
 **Authentication:**
+
+Generate API keys for clients to authenticate against the server (OpenAI-compatible `Authorization: Bearer` header). See [docs/api_server.md](docs/api_server.md) for details.
+
 ```bash
 ./shepherd --server --auth-mode json
 shepherd apikey add mykey    # Generates sk-shep-...

@@ -46,6 +46,13 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 - **Resource Access**: Read resources from MCP servers (files, databases, APIs)
 - **Prompt Templates**: Reusable prompt templates from MCP servers
 
+### 🔐 SMCP (Secure MCP Credential Protocol)
+- **Secure Credential Injection**: Pass secrets to MCP servers via stdin, never in env vars or CLI args
+- **Simple Handshake**: 3-message protocol (+READY, credentials JSON, +OK)
+- **Memory Only**: Credentials exist only in process memory, never written to disk
+- **Zero Exposure**: Not visible in `/proc/<pid>/environ`, `ps aux`, or config files
+- **SMCP Spec**: See [SMCP specification](https://github.com/sshoecraft/smcp) for protocol details
+
 ### 🤝 Multi-Model Collaboration (Automatic API Tools)
 - **Automatic ask_* Tools**: Configured providers automatically become tools (e.g., `ask_sonnet`, `ask_flash`)
 - **Dynamic Tool Registration**: Switch providers and tools update automatically
@@ -109,9 +116,10 @@ Shepherd is a production-grade C++ LLM inference system supporting both local mo
 
 | Backend | Models | Context | Tools | Notes |
 |---------|--------|---------|-------|-------|
-| **OpenAI** | GPT-4, GPT-3.5-Turbo | 128K-200K | ✓ | Function calling |
-| **Anthropic** | Claude 3/3.5 (Opus, Sonnet, Haiku) | 200K | ✓ | Separate system field |
-| **Gemini** | Gemini Pro, 1.5 Pro/Flash, 2.0 | 32K-2M | ✓ | SentencePiece tokens |
+| **OpenAI** | GPT-5, GPT-4o, GPT-4 Turbo | 128K-200K | ✓ | Function calling |
+| **Anthropic** | Claude Opus 4.5, Sonnet 4, Haiku | 200K | ✓ | Separate system field |
+| **Gemini** | Gemini 3, 2.5 Pro/Flash | 32K-2M | ✓ | SentencePiece tokens |
+| **Azure OpenAI** | GPT-5, GPT-4o (via deployment) | 128K-200K | ✓ | OAuth 2.0 / MSI auth |
 | **Ollama** | Any Ollama model | 8K-128K | ✓ | Local/containerized |
 
 ---
@@ -325,6 +333,43 @@ shepherd mcp add mydb python /path/to/mcp_server.py -e DB_HOST=localhost
 # Remove an MCP server
 shepherd mcp remove mydb
 ```
+
+### SMCP Servers
+
+Configure MCP servers that receive credentials via the SMCP protocol (secure credential injection):
+
+```json
+{
+    "smcp_servers": [
+        {
+            "name": "database",
+            "command": "smcp-server-postgres",
+            "credentials": {
+                "DATABASE_URL": "postgresql://user:pass@host:5432/db",
+                "LOG_LEVEL": "INFO"
+            }
+        }
+    ]
+}
+```
+
+Credentials are sent to the child process via stdin after the `+READY` handshake, never exposed in environment variables or command-line arguments. See the [SMCP specification](https://github.com/sshoecraft/smcp) for protocol details.
+
+### Azure Key Vault Configuration (MSI)
+
+Load Shepherd's entire configuration from Azure Key Vault using Managed Identity:
+
+```bash
+# Run on Azure VM with managed identity
+shepherd --config msi --kv my-vault-name
+```
+
+**Setup**:
+1. Create a Key Vault secret named `shepherd-config` containing the unified JSON config
+2. Grant the VM's managed identity the "Key Vault Secrets User" role on the Key Vault
+3. Run Shepherd with `--config msi --kv <vault-name>`
+
+**Read-Only Mode**: When running from Key Vault, config-modifying commands (`/config set`, `/provider add`, `/mcp add`) are disabled to prevent accidental changes in production.
 
 ---
 
@@ -1157,10 +1202,12 @@ shepherd/
 │   ├── command_tools.{cpp,h}
 │   ├── json_tools.{cpp,h}
 │   └── memory_tools.{cpp,h}
-├── mcp/                # Model Context Protocol
+├── mcp/                # Model Context Protocol + SMCP
 │   ├── mcp_client.{cpp,h}
-│   ├── mcp_server.{cpp,h}
+│   ├── mcp_server.{cpp,h}       # Includes SMCP handshake
+│   ├── mcp_config.{cpp,h}       # MCP and SMCP server config
 │   └── mcp_manager.{cpp,h}
+├── azure_msi.{cpp,h}   # Azure Managed Identity (IMDS tokens, Key Vault)
 ├── server/             # HTTP REST API Server
 │   ├── api_server.py            # FastAPI wrapper (spawned by C++)
 │   ├── requirements.txt         # Python dependencies

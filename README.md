@@ -87,7 +87,7 @@ Shepherd includes built-in tools across several categories:
 | **HTTP** | http_get, http_post, http_put, http_delete |
 | **JSON** | json_parse, json_validate, json_extract |
 | **Memory** | search_memory, set_fact, get_fact, store_memory |
-| **MCP** | list_resources, read_resource, call_mcp_tool |
+| **MCP** | list_mcp_resources, read_mcp_resource, plus dynamic `server:tool` |
 
 ```bash
 # List tools
@@ -333,26 +333,38 @@ When multiple providers are configured, Shepherd creates `ask_*` tools for cross
 
 ```bash
 # Using local model, ask Claude for code review
-> Read main.cpp and ask_sonnet to review it for bugs
+> ask_sonnet to read main.cpp and suggest improvements
 
-* read(path="main.cpp")
-* ask_sonnet(prompt="Review this code for bugs: ...")
+* ask_sonnet(prompt="read main.cpp and suggest improvements")
+  → Sonnet calls read(path="main.cpp")
+  → Sonnet analyzes and responds
 
 Claude's analysis appears in your local model's context.
 ```
 
+**Key feature**: The `ask_*` tools have full tool access - the consulted model can read files, run commands, search memory, etc. You can chain consultations: ask Sonnet to ask GPT to analyze something.
+
 The current provider is excluded (you don't ask yourself). Switch providers and the tools update automatically.
 
-### 🧠 KV Cache Management
+### 🧠 Automatic Session Eviction
 
-Local backends (llama.cpp, TensorRT) use intelligent KV cache eviction for indefinite conversations:
+Shepherd supports automatic eviction for indefinite conversations with **any backend**:
 
-- **Automatic eviction** when GPU memory fills
-- **Oldest messages first** (LRU), protecting system prompt and current context
-- **Automatic archival** to RAG database before eviction
-- **Position shift management** maintains cache consistency
+- **Local backends**: Evicts when GPU KV cache fills
+- **API backends**: Evicts when API returns context full error, then retries
+- **Manual limit**: Use `--context-size N` to set a limit smaller than the backend's maximum
 
-For implementation details, see [docs/llamacpp.md](docs/llamacpp.md).
+```bash
+# Force eviction at 32K tokens even if backend supports more
+./shepherd --provider azure --context-size 32768
+```
+
+**Eviction behavior**:
+- Oldest messages first (LRU), protecting system prompt and current context
+- Automatic archival to RAG database before eviction
+- Seamless continuation - conversation keeps going
+
+For local backend implementation details, see [docs/llamacpp.md](docs/llamacpp.md).
 
 ### ⏰ Scheduling
 

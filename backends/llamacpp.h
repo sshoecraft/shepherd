@@ -70,6 +70,14 @@ public:
     // KV cache type (f16, f32, q8_0, q4_0)
     std::string cache_type = "f16";
 
+    // Flash Attention
+    bool flash_attn = false;
+
+    // Speculative Decoding
+    std::string model_draft;
+    int draft_max = 16;
+    float draft_p_min = 0.75f;
+
 protected:
     void parse_backend_config() override;
 
@@ -139,6 +147,11 @@ private:
     void* model_ctx = nullptr; // llama_context*
     void* model = nullptr;     // llama_model*
     std::string model_path;
+
+    // Speculative decoding (draft model)
+    void* draft_model = nullptr;      // llama_model* for draft
+    void* draft_model_ctx = nullptr;  // llama_context* for draft
+    void* spec_state = nullptr;       // common_speculative*
     std::string chat_template_text; // Cached chat template from model
     int n_batch = 512;  // Logical batch size for prompt processing
     int n_ubatch = 512; // Physical micro-batch size (must be <= n_batch)

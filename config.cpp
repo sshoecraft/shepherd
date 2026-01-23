@@ -465,6 +465,63 @@ void Config::validate() const {
     dout(1) << "Configuration validation passed" << std::endl;
 }
 
+// Helper to get config value by key
+static std::string get_config_value(const Config& cfg, const std::string& key) {
+    if (key == "warmup") return cfg.warmup ? "true" : "false";
+    if (key == "calibration") return cfg.calibration ? "true" : "false";
+    if (key == "streaming") return cfg.streaming ? "true" : "false";
+    if (key == "thinking") return cfg.thinking ? "true" : "false";
+    if (key == "tui") return cfg.tui ? "true" : "false";
+    if (key == "truncate_limit") return std::to_string(cfg.truncate_limit);
+    if (key == "max_db_size") return cfg.max_db_size_str;
+    if (key == "web_search_provider") return cfg.web_search_provider;
+    if (key == "web_search_api_key") return cfg.web_search_api_key.empty() ? "" : "(set)";
+    if (key == "web_search_instance_url") return cfg.web_search_instance_url;
+    if (key == "memory_database") return cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database;
+    return "";
+}
+
+// Helper to set config value by key
+static bool set_config_value(Config& cfg, const std::string& key, const std::string& value) {
+    if (key == "warmup") {
+        cfg.warmup = (value == "true" || value == "1" || value == "on");
+    } else if (key == "calibration") {
+        cfg.calibration = (value == "true" || value == "1" || value == "on");
+    } else if (key == "streaming") {
+        cfg.streaming = (value == "true" || value == "1" || value == "on");
+    } else if (key == "thinking") {
+        cfg.thinking = (value == "true" || value == "1" || value == "on");
+    } else if (key == "tui") {
+        cfg.tui = (value == "true" || value == "1" || value == "on");
+    } else if (key == "truncate_limit") {
+        cfg.truncate_limit = std::stoi(value);
+    } else if (key == "max_db_size") {
+        cfg.set_max_db_size(value);
+    } else if (key == "web_search_provider") {
+        cfg.web_search_provider = value;
+    } else if (key == "web_search_api_key") {
+        cfg.web_search_api_key = value;
+    } else if (key == "web_search_instance_url") {
+        cfg.web_search_instance_url = value;
+    } else if (key == "memory_database") {
+        cfg.memory_database = value;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Valid config keys
+static const std::vector<std::string> CONFIG_KEYS = {
+    "warmup", "calibration", "streaming", "thinking", "tui",
+    "truncate_limit", "max_db_size", "web_search_provider",
+    "web_search_api_key", "web_search_instance_url", "memory_database"
+};
+
+static bool is_config_key(const std::string& s) {
+    return std::find(CONFIG_KEYS.begin(), CONFIG_KEYS.end(), s) != CONFIG_KEYS.end();
+}
+
 // Common config command implementation
 int handle_config_args(const std::vector<std::string>& args,
                        std::function<void(const std::string&)> callback) {
@@ -473,77 +530,71 @@ int handle_config_args(const std::vector<std::string>& args,
 
     // Help
     if (!args.empty() && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")) {
-        callback("Usage: /config [subcommand]\n"
-            "Subcommands:\n"
-            "  show              - Show all config values\n"
-            "  set <key> <value> - Set config value\n"
-            "  (no args)         - Show all config values\n"
-            "Keys: warmup, calibration, streaming, thinking, tui,\n"
+        callback("Usage: shepherd config [key] [value]\n"
+            "\nExamples:\n"
+            "  shepherd config              - Show all config values\n"
+            "  shepherd config show         - Show all config values\n"
+            "  shepherd config streaming    - Show streaming value\n"
+            "  shepherd config streaming true - Set streaming to true\n"
+            "\nKeys: warmup, calibration, streaming, thinking, tui,\n"
             "      truncate_limit, max_db_size, web_search_provider,\n"
             "      web_search_api_key, web_search_instance_url, memory_database\n");
         return 0;
     }
 
-    // No args or "show" displays configuration
+    // No args or "show" displays all configuration
     if (args.empty() || args[0] == "show") {
         callback("=== Shepherd Configuration ===\n");
-        callback("warmup = " + std::string(cfg.warmup ? "true" : "false") + "\n");
-        callback("calibration = " + std::string(cfg.calibration ? "true" : "false") + "\n");
-        callback("streaming = " + std::string(cfg.streaming ? "true" : "false") + "\n");
-        callback("thinking = " + std::string(cfg.thinking ? "true" : "false") + "\n");
-        callback("tui = " + std::string(cfg.tui ? "true" : "false") + "\n");
-        callback("truncate_limit = " + std::to_string(cfg.truncate_limit) + "\n");
-        callback("max_db_size = " + cfg.max_db_size_str + "\n");
-        callback("web_search_provider = " + cfg.web_search_provider + "\n");
-        callback("web_search_api_key = " + std::string(cfg.web_search_api_key.empty() ? "" : "(set)") + "\n");
-        callback("web_search_instance_url = " + cfg.web_search_instance_url + "\n");
-        callback("memory_database = " + (cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database) + "\n");
+        for (const auto& key : CONFIG_KEYS) {
+            callback(key + " = " + get_config_value(cfg, key) + "\n");
+        }
         return 0;
     }
 
+    // Check if first arg is a config key
+    std::string key = args[0];
+    if (is_config_key(key)) {
+        if (args.size() == 1) {
+            // Show single key value
+            callback(key + " = " + get_config_value(cfg, key) + "\n");
+            return 0;
+        } else {
+            // Set key value: config KEY VALUE
+            if (config && config->is_read_only()) {
+                callback("Error: Cannot modify config in read-only mode (config from Key Vault)\n");
+                return 1;
+            }
+
+            std::string value = args[1];
+            if (set_config_value(cfg, key, value)) {
+                cfg.save();
+                callback("Config updated: " + key + " = " + value + "\n");
+                return 0;
+            }
+        }
+    }
+
+    // Legacy: config set KEY VALUE
     if (args[0] == "set" && args.size() >= 3) {
-        // Check for read-only mode (Key Vault config)
         if (config && config->is_read_only()) {
             callback("Error: Cannot modify config in read-only mode (config from Key Vault)\n");
             return 1;
         }
 
-        std::string key = args[1];
+        key = args[1];
         std::string value = args[2];
 
-        if (key == "warmup") {
-            cfg.warmup = (value == "true" || value == "1" || value == "on");
-        } else if (key == "calibration") {
-            cfg.calibration = (value == "true" || value == "1" || value == "on");
-        } else if (key == "streaming") {
-            cfg.streaming = (value == "true" || value == "1" || value == "on");
-        } else if (key == "thinking") {
-            cfg.thinking = (value == "true" || value == "1" || value == "on");
-        } else if (key == "tui") {
-            cfg.tui = (value == "true" || value == "1" || value == "on");
-        } else if (key == "truncate_limit") {
-            cfg.truncate_limit = std::stoi(value);
-        } else if (key == "max_db_size") {
-            cfg.set_max_db_size(value);
-        } else if (key == "web_search_provider") {
-            cfg.web_search_provider = value;
-        } else if (key == "web_search_api_key") {
-            cfg.web_search_api_key = value;
-        } else if (key == "web_search_instance_url") {
-            cfg.web_search_instance_url = value;
-        } else if (key == "memory_database") {
-            cfg.memory_database = value;
+        if (set_config_value(cfg, key, value)) {
+            cfg.save();
+            callback("Config updated: " + key + " = " + value + "\n");
+            return 0;
         } else {
             callback("Unknown config key: " + key + "\n");
             return 1;
         }
-
-        cfg.save();
-        callback("Config updated: " + key + " = " + value + "\n");
-        return 0;
     }
 
-    callback("Unknown config subcommand: " + args[0] + "\n");
-    callback("Available: show, set\n");
+    callback("Unknown config key or command: " + args[0] + "\n");
+    callback("Use 'shepherd config help' to see available keys\n");
     return 1;
 }

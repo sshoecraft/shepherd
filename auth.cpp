@@ -192,26 +192,66 @@ static std::string mask_key(const std::string& key) {
 
 int handle_apikey_args(const std::vector<std::string>& args,
                        std::function<void(const std::string&)> callback) {
-    // No args or help
-    if (args.empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
-        callback("Usage: shepherd apikey <command> [options]\n");
-        callback("\nCommands:\n");
-        callback("  create <name> [--notes <notes>] [--perms <json>]\n");
-        callback("  list             List all keys (masked)\n");
-        callback("  show <name>      Show full details of a key\n");
-        callback("  set <name> [--notes <notes>] [--perms <json>]\n");
-        callback("  remove <name>    Remove key by name\n");
-        callback("\nExamples:\n");
-        callback("  shepherd apikey create production\n");
-        callback("  shepherd apikey create internal --notes 'Internal testing key'\n");
-        callback("  shepherd apikey list\n");
-        callback("  shepherd apikey show internal\n");
-        callback("  shepherd apikey set internal --notes 'Updated notes'\n");
-        callback("  shepherd apikey remove production\n");
+    // No args shows list
+    if (args.empty()) {
+        auto keys = JsonKeyStore::load_keys();
+        if (keys.empty()) {
+            callback("No API keys configured.\n");
+            callback("Create one with: shepherd apikey create <name>\n");
+            return 0;
+        }
+
+        callback("NAME           KEY               CREATED      NOTES\n");
+        for (const auto& [key, entry] : keys) {
+            std::string line = entry.name;
+            while (line.length() < 14) line += " ";
+            line += " " + mask_key(key);
+            while (line.length() < 32) line += " ";
+            std::string date = entry.created.length() >= 10 ? entry.created.substr(0, 10) : entry.created;
+            line += " " + date;
+            while (line.length() < 45) line += " ";
+            line += " " + entry.notes + "\n";
+            callback(line);
+        }
         return 0;
     }
 
-    std::string subcmd = args[0];
+    // Determine if first arg is an action (action-first) or a name (name-first)
+    std::string first_arg = args[0];
+    bool action_first = (first_arg == "list" || first_arg == "create" ||
+                         first_arg == "help" || first_arg == "--help" || first_arg == "-h");
+
+    std::string name;
+    std::string subcmd;
+
+    if (action_first) {
+        subcmd = first_arg;
+        name = (args.size() >= 2) ? args[1] : "";
+    } else {
+        // Name-first: apikey NAME [action]
+        name = first_arg;
+        subcmd = (args.size() >= 2) ? args[1] : "help";  // No action = show help
+    }
+
+    if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+        if (!name.empty()) {
+            callback("Usage: shepherd apikey " + name + " <action>\n");
+            callback("\nActions:\n");
+            callback("  show     - Show full details of this key\n");
+            callback("  set      - Update notes/permissions\n");
+            callback("  remove   - Remove this key\n");
+        } else {
+            callback("Usage: shepherd apikey <name> <action>\n");
+            callback("\nActions (after name):\n");
+            callback("  show     - Show full details\n");
+            callback("  set [--notes <notes>] [--perms <json>] - Update\n");
+            callback("  remove   - Remove key\n");
+            callback("\nOther commands:\n");
+            callback("  list     - List all keys\n");
+            callback("  create <name> [--notes <notes>] [--perms <json>]\n");
+        }
+        return 0;
+    }
 
     // List keys
     if (subcmd == "list") {
@@ -242,13 +282,11 @@ int handle_apikey_args(const std::vector<std::string>& args,
 
     // Show key details
     if (subcmd == "show") {
-        if (args.size() < 2) {
-            callback("Error: Missing key name\n");
-            callback("Usage: shepherd apikey show <name>\n");
+        if (name.empty()) {
+            callback("Usage: shepherd apikey <name> show\n");
             return 1;
         }
 
-        std::string name = args[1];
         auto keys = JsonKeyStore::load_keys();
 
         // Find key by name
@@ -269,19 +307,17 @@ int handle_apikey_args(const std::vector<std::string>& args,
 
     // Set key (update notes/perms)
     if (subcmd == "set") {
-        if (args.size() < 2) {
-            callback("Error: Missing key name\n");
-            callback("Usage: shepherd apikey set <name> [--notes <notes>] [--perms <json>]\n");
+        if (name.empty()) {
+            callback("Usage: shepherd apikey <name> set [--notes <notes>] [--perms <json>]\n");
             return 1;
         }
 
-        std::string name = args[1];
         std::string notes;
         json permissions;
         bool has_notes = false;
         bool has_perms = false;
 
-        // Parse optional arguments
+        // Parse optional arguments (start at args[2] in name-first mode)
         for (size_t i = 2; i < args.size(); i++) {
             if (args[i] == "--notes" && i + 1 < args.size()) {
                 notes = args[++i];
@@ -321,13 +357,11 @@ int handle_apikey_args(const std::vector<std::string>& args,
 
     // Remove key
     if (subcmd == "remove") {
-        if (args.size() < 2) {
-            callback("Error: Missing key name\n");
-            callback("Usage: shepherd apikey remove <name>\n");
+        if (name.empty()) {
+            callback("Usage: shepherd apikey <name> remove\n");
             return 1;
         }
 
-        std::string name = args[1];
         auto keys = JsonKeyStore::load_keys();
 
         // Find key by name

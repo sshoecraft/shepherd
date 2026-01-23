@@ -63,16 +63,19 @@ Providers define backends you can switch between at runtime.
 # List configured providers
 shepherd provider list
 
-# Add providers
-shepherd provider add local llamacpp --model /models/qwen-72b.gguf
-shepherd provider add sonnet anthropic --model claude-sonnet-4 --api-key sk-ant-...
-shepherd provider add gpt openai --model gpt-4o --api-key sk-...
+# Add providers (action-first for creating new)
+shepherd provider add local --type llamacpp --model /models/qwen-72b.gguf
+shepherd provider add sonnet --type anthropic --model claude-sonnet-4 --api-key sk-ant-...
+shepherd provider add gpt --type openai --model gpt-4o --api-key sk-...
 
-# Switch providers
-shepherd provider use sonnet
+# View/modify providers (name-first pattern)
+shepherd provider sonnet show        # Show details
+shepherd provider sonnet set model claude-sonnet-4-20250514  # Modify setting
+shepherd provider sonnet use         # Switch to this provider
+shepherd provider sonnet             # Show help for this provider
 
 # In interactive mode
-> /provider use local
+> /provider local use
 > /provider next
 ```
 
@@ -123,13 +126,19 @@ Configuration is stored at `~/.config/shepherd/config.json`:
 # View configuration
 shepherd config show
 
-# Set values
+# Set values (key-first shortcut)
+shepherd config streaming true       # Set streaming to true
+shepherd config max_db_size 20G      # Set max_db_size
+
+# Or use explicit set
 shepherd config set streaming true
-shepherd config set max_db_size 20G
+
+# View single value
+shepherd config streaming            # Shows current streaming value
 
 # In interactive mode
 > /config show
-> /config set thinking true
+> /config streaming true
 ```
 
 ### MCP Servers
@@ -140,11 +149,14 @@ Configure [Model Context Protocol](https://modelcontextprotocol.io/) servers for
 # List MCP servers
 shepherd mcp list
 
-# Add an MCP server
+# Add an MCP server (action-first for creating new)
 shepherd mcp add mydb python /path/to/mcp_server.py -e DB_HOST=localhost
 
-# Remove an MCP server
-shepherd mcp remove mydb
+# View/modify servers (name-first pattern)
+shepherd mcp mydb show               # Show server details
+shepherd mcp mydb test               # Test connection
+shepherd mcp mydb remove             # Remove server
+shepherd mcp mydb                    # Show help for this server
 ```
 
 ### SMCP Servers (Secure Credentials)
@@ -371,15 +383,17 @@ For local backend implementation details, see [docs/llamacpp.md](docs/llamacpp.m
 Shepherd includes a cron-like scheduler that injects prompts into the session automatically. Works with CLI, TUI, and CLI server modes.
 
 ```bash
-# Add a scheduled task (runs daily at 9am)
+# Add a scheduled task (action-first for creating new)
 shepherd sched add morning-news "0 9 * * *" "Get me the top 5 tech news headlines"
 
 # List scheduled tasks
 shepherd sched list
 
-# Enable/disable without removing
-shepherd sched disable morning-news
-shepherd sched enable morning-news
+# View/modify schedules (name-first pattern)
+shepherd sched morning-news show     # Show schedule details
+shepherd sched morning-news disable  # Disable schedule
+shepherd sched morning-news enable   # Enable schedule
+shepherd sched morning-news remove   # Remove schedule
 ```
 
 **24/7 Operation**: Run a CLI server and schedules execute automatically, even with no clients connected:

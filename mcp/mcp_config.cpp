@@ -234,13 +234,28 @@ int handle_mcp_args(const std::vector<std::string>& args,
                     std::function<void(const std::string&)> callback) {
     std::string config_path = Config::get_default_config_path();
 
-    // No args or "list" shows servers
-    if (args.empty() || args[0] == "list") {
+    // No args shows servers
+    if (args.empty()) {
         MCPConfig::list_servers(config_path, callback, true);  // Check health
         return 0;
     }
 
-    std::string subcmd = args[0];
+    // Determine if first arg is an action (action-first) or a name (name-first)
+    std::string first_arg = args[0];
+    bool action_first = (first_arg == "list" || first_arg == "add" ||
+                         first_arg == "help" || first_arg == "--help" || first_arg == "-h");
+
+    std::string name;
+    std::string subcmd;
+
+    if (action_first) {
+        subcmd = first_arg;
+        name = (args.size() >= 2) ? args[1] : "";
+    } else {
+        // Name-first: mcp NAME [action] [args...]
+        name = first_arg;
+        subcmd = (args.size() >= 2) ? args[1] : "help";  // No action = show help
+    }
 
     // Check for read-only mode (Key Vault config) for modifying commands
     if (config && config->is_read_only()) {
@@ -250,9 +265,35 @@ int handle_mcp_args(const std::vector<std::string>& args,
         }
     }
 
+    if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+        if (!name.empty()) {
+            callback("Usage: shepherd mcp " + name + " <action>\n"
+                "\nActions:\n"
+                "  show    - Show server details\n"
+                "  test    - Test server connection\n"
+                "  remove  - Remove server\n");
+        } else {
+            callback("Usage: shepherd mcp <name> <action> [args...]\n"
+                "\nActions (after name):\n"
+                "  show    - Show server details\n"
+                "  test    - Test server connection\n"
+                "  remove  - Remove server\n"
+                "\nOther commands:\n"
+                "  list    - List all servers\n"
+                "  add <name> <command> [args...] [-e KEY=VALUE ...]\n");
+        }
+        return 0;
+    }
+
+    if (subcmd == "list") {
+        MCPConfig::list_servers(config_path, callback, true);
+        return 0;
+    }
+
     if (subcmd == "add") {
+        // Action-first: mcp add NAME COMMAND [args...]
         if (args.size() < 3) {
-            callback("Usage: mcp add <name> <command> [args...] [-e KEY=VALUE ...]\n");
+            callback("Usage: shepherd mcp add <name> <command> [args...] [-e KEY=VALUE ...]\n");
             return 1;
         }
 
@@ -290,13 +331,42 @@ int handle_mcp_args(const std::vector<std::string>& args,
         return 1;
     }
 
-    if (subcmd == "remove") {
-        if (args.size() < 2) {
-            callback("Usage: mcp remove <name>\n");
+    if (subcmd == "show") {
+        if (name.empty()) {
+            callback("Usage: shepherd mcp <name> show\n");
             return 1;
         }
 
-        std::string name = args[1];
+        auto servers = MCPConfig::load(config_path);
+        for (const auto& server : servers) {
+            if (server.name == name) {
+                callback("=== MCP Server: " + name + " ===\n");
+                callback("command = " + server.command + "\n");
+                callback("args = [");
+                for (size_t i = 0; i < server.args.size(); i++) {
+                    if (i > 0) callback(", ");
+                    callback("\"" + server.args[i] + "\"");
+                }
+                callback("]\n");
+                if (!server.env.empty()) {
+                    callback("env:\n");
+                    for (const auto& [k, v] : server.env) {
+                        callback("  " + k + " = " + v + "\n");
+                    }
+                }
+                return 0;
+            }
+        }
+        callback("MCP server '" + name + "' not found\n");
+        return 1;
+    }
+
+    if (subcmd == "remove") {
+        if (name.empty()) {
+            callback("Usage: shepherd mcp <name> remove\n");
+            return 1;
+        }
+
         if (MCPConfig::remove_server(config_path, name)) {
             callback("Removed MCP server '" + name + "'\n");
             return 0;
@@ -305,12 +375,11 @@ int handle_mcp_args(const std::vector<std::string>& args,
     }
 
     if (subcmd == "test") {
-        if (args.size() < 2) {
-            callback("Usage: mcp test <name>\n");
+        if (name.empty()) {
+            callback("Usage: shepherd mcp <name> test\n");
             return 1;
         }
 
-        std::string name = args[1];
         auto servers = MCPConfig::load(config_path);
 
         for (const auto& server : servers) {
@@ -346,7 +415,7 @@ int handle_mcp_args(const std::vector<std::string>& args,
         return 1;
     }
 
-    callback("Unknown mcp subcommand: " + subcmd + "\n");
-    callback("Available: list, add, remove, test\n");
+    callback("Unknown mcp command: " + subcmd + "\n");
+    callback("Use 'shepherd mcp help' to see available commands\n");
     return 1;
 }

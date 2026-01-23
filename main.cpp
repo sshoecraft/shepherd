@@ -144,6 +144,13 @@ static void print_usage(int, char** argv) {
 	printf("	--n_batch N		   Logical batch size for prompt processing (llamacpp only, default: auto)\n");
 	printf("	--ubatch N		   Physical micro-batch size (llamacpp only, default: 512)\n");
 	printf("	--cache-type TYPE  KV cache data type: f16, f32, q8_0, q4_0 (llamacpp only, default: f16)\n");
+	printf("	--flash-attn       Force Flash Attention on (faster TTFT, slightly slower decode)\n");
+	printf("	--model-draft PATH Draft model for speculative decoding (llamacpp only)\n");
+	printf("	--draft-max N      Max tokens to draft per iteration (default: 16)\n");
+	printf("	--temperature F    Sampling temperature (default: 0.7)\n");
+	printf("	--top-p F          Top-p (nucleus) sampling (default: 0.95)\n");
+	printf("	--top-k N          Top-k sampling (default: 40)\n");
+	printf("	--freq F           Frequency penalty (default: 0.1)\n");
 	printf("	--models-file FILE Path to models database JSON file (default: ~/.config/shepherd/models.json)\n");
 	printf("	--max-tokens	   Set max generation tokens (default: auto)\n");
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.local/share/shepherd/memory.db)\n");
@@ -159,6 +166,7 @@ static void print_usage(int, char** argv) {
 	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
+	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
 	printf("	--auth-mode MODE   Authentication mode: none (default), json\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
@@ -269,8 +277,8 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 		config_json["smcp_servers"] = nlohmann::json::array();
 	}
 
-	// No args or "list" - show SMCP servers
-	if (argc < 3 || std::string(argv[2]) == "list") {
+	// No args - show SMCP servers
+	if (argc < 3) {
 		auto& servers = config_json["smcp_servers"];
 		if (servers.empty()) {
 			std::cout << "No SMCP servers configured" << std::endl;
@@ -284,11 +292,61 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 		return 0;
 	}
 
-	std::string subcmd = argv[2];
+	// Determine if first arg is an action (action-first) or a name (name-first)
+	std::string first_arg = argv[2];
+	bool action_first = (first_arg == "list" || first_arg == "add" ||
+	                     first_arg == "help" || first_arg == "--help" || first_arg == "-h");
 
+	std::string name;
+	std::string subcmd;
+
+	if (action_first) {
+		subcmd = first_arg;
+		name = (argc >= 4) ? argv[3] : "";
+	} else {
+		// Name-first: smcp NAME [action]
+		name = first_arg;
+		subcmd = (argc >= 4) ? argv[3] : "help";  // No action = show help
+	}
+
+	// Help
+	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+		if (!name.empty()) {
+			std::cout << "Usage: shepherd smcp " << name << " <action>" << std::endl;
+			std::cout << "\nActions:" << std::endl;
+			std::cout << "  show     - Show server details" << std::endl;
+			std::cout << "  remove   - Remove server" << std::endl;
+		} else {
+			std::cout << "Usage: shepherd smcp <name> <action>" << std::endl;
+			std::cout << "\nActions (after name):" << std::endl;
+			std::cout << "  show     - Show server details" << std::endl;
+			std::cout << "  remove   - Remove server" << std::endl;
+			std::cout << "\nOther commands:" << std::endl;
+			std::cout << "  list     - List all servers" << std::endl;
+			std::cout << "  add <name> <command> [--cred KEY=VALUE ...]" << std::endl;
+		}
+		return 0;
+	}
+
+	// List
+	if (subcmd == "list") {
+		auto& servers = config_json["smcp_servers"];
+		if (servers.empty()) {
+			std::cout << "No SMCP servers configured" << std::endl;
+		} else {
+			std::cout << "SMCP servers:" << std::endl;
+			for (const auto& s : servers) {
+				std::cout << "  " << s.value("name", "unnamed") << ": "
+				          << s.value("command", "") << std::endl;
+			}
+		}
+		return 0;
+	}
+
+	// Add (action-first: smcp add NAME COMMAND ...)
 	if (subcmd == "add") {
 		if (argc < 5) {
-			std::cout << "Usage: smcp add <name> <command> [--cred KEY=VALUE ...]" << std::endl;
+			std::cout << "Usage: shepherd smcp add <name> <command> [--cred KEY=VALUE ...]" << std::endl;
 			return 1;
 		}
 
@@ -318,13 +376,38 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 		return 0;
 	}
 
-	if (subcmd == "remove") {
-		if (argc < 4) {
-			std::cout << "Usage: smcp remove <name>" << std::endl;
+	// Show (name-first)
+	if (subcmd == "show") {
+		if (name.empty()) {
+			std::cout << "Usage: shepherd smcp <name> show" << std::endl;
 			return 1;
 		}
 
-		std::string name = argv[3];
+		auto& servers = config_json["smcp_servers"];
+		for (const auto& s : servers) {
+			if (s.value("name", "") == name) {
+				std::cout << "=== SMCP Server: " << name << " ===" << std::endl;
+				std::cout << "command = " << s.value("command", "") << std::endl;
+				if (s.contains("credentials") && !s["credentials"].empty()) {
+					std::cout << "credentials:" << std::endl;
+					for (auto& [k, v] : s["credentials"].items()) {
+						std::cout << "  " << k << " = " << v.get<std::string>() << std::endl;
+					}
+				}
+				return 0;
+			}
+		}
+		std::cerr << "SMCP server '" << name << "' not found" << std::endl;
+		return 1;
+	}
+
+	// Remove (name-first)
+	if (subcmd == "remove") {
+		if (name.empty()) {
+			std::cout << "Usage: shepherd smcp <name> remove" << std::endl;
+			return 1;
+		}
+
 		auto& servers = config_json["smcp_servers"];
 		bool found = false;
 
@@ -348,8 +431,8 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 		return 0;
 	}
 
-	std::cerr << "Unknown smcp subcommand: " << subcmd << std::endl;
-	std::cerr << "Available: list, add, remove" << std::endl;
+	std::cerr << "Unknown smcp command: " << subcmd << std::endl;
+	std::cerr << "Use 'shepherd smcp help' to see available commands" << std::endl;
 	return 1;
 }
 
@@ -576,6 +659,7 @@ int main(int argc, char** argv) {
 	bool no_mcp = false;
 	bool no_stream = false;
 	bool no_tools = false;
+	bool server_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string config_file_path;
@@ -612,6 +696,13 @@ int main(int argc, char** argv) {
 		std::string models_file;
 		std::string system_prompt;
 		std::string cache_type;
+		bool flash_attn = false;
+		std::string model_draft;
+		int draft_max = -1;
+		float temperature = -1.0f;
+		float top_p = -1.0f;
+		int top_k = -1;
+		float freq_penalty = -1.0f;
 	} override;
 
 	static struct option long_options[] = {
@@ -642,6 +733,7 @@ int main(int argc, char** argv) {
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
 		{"auth-mode", required_argument, 0, 1045},
+		{"server-tools", no_argument, 0, 1047},
 		{"truncate", required_argument, 0, 1019},
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
@@ -649,6 +741,13 @@ int main(int argc, char** argv) {
 		{"n_batch", required_argument, 0, 1044},
 		{"ubatch", required_argument, 0, 1035},
 		{"cache-type", required_argument, 0, 1040},
+		{"flash-attn", no_argument, 0, 1048},
+		{"model-draft", required_argument, 0, 1049},
+		{"draft-max", required_argument, 0, 1050},
+		{"temperature", required_argument, 0, 1051},
+		{"top-p", required_argument, 0, 1052},
+		{"top-k", required_argument, 0, 1053},
+		{"freq", required_argument, 0, 1054},
 		{"thinking", no_argument, 0, 1031},
 		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
@@ -758,6 +857,9 @@ int main(int argc, char** argv) {
 					return 1;
 				}
 				break;
+			case 1047: // --server-tools
+				server_tools = true;
+				break;
 			case 1019: // --truncate
 				override.truncate_limit = std::atoi(optarg);
 				break;
@@ -805,6 +907,27 @@ int main(int argc, char** argv) {
 					printf("Error: cache-type must be one of: f16, f32, q8_0, q4_0\n");
 					return 1;
 				}
+				break;
+			case 1048: // --flash-attn
+				override.flash_attn = true;
+				break;
+			case 1049: // --model-draft
+				override.model_draft = optarg;
+				break;
+			case 1050: // --draft-max
+				override.draft_max = std::atoi(optarg);
+				break;
+			case 1051: // --temperature
+				override.temperature = std::atof(optarg);
+				break;
+			case 1052: // --top-p
+				override.top_p = std::atof(optarg);
+				break;
+			case 1053: // --top-k
+				override.top_k = std::atoi(optarg);
+				break;
+			case 1054: // --freq
+				override.freq_penalty = std::atof(optarg);
 				break;
 			case 1031: // --thinking
 				override.thinking = true;
@@ -987,6 +1110,27 @@ int main(int argc, char** argv) {
 	if (!override.cache_type.empty()) {
 		config->json["cache_type"] = override.cache_type;
 	}
+	if (override.flash_attn) {
+		config->json["flash_attn"] = true;
+	}
+	if (!override.model_draft.empty()) {
+		config->json["model_draft"] = override.model_draft;
+	}
+	if (override.draft_max > 0) {
+		config->json["draft_max"] = override.draft_max;
+	}
+	if (override.temperature >= 0.0f) {
+		config->json["temperature"] = override.temperature;
+	}
+	if (override.top_p >= 0.0f) {
+		config->json["top_p"] = override.top_p;
+	}
+	if (override.top_k >= 0) {
+		config->json["top_k"] = override.top_k;
+	}
+	if (override.freq_penalty >= 0.0f) {
+		config->json["penalty_freq"] = override.freq_penalty;
+	}
 
 	// Validate configuration (skip model path check if overridden)
 	if (override.model.empty() && override.model_path.empty()) {
@@ -1085,7 +1229,7 @@ int main(int argc, char** argv) {
 		// Create and initialize frontend (loads providers, registers tools)
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
-		                                 cmdline_provider_ptr, no_mcp, no_tools, auth_mode);
+		                                 cmdline_provider_ptr, no_mcp, no_tools, auth_mode, server_tools);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

@@ -602,17 +602,43 @@ int handle_sched_args(const std::vector<std::string>& args,
 		return 0;
 	}
 
-	std::string subcmd = args[0];
+	// Determine if first arg is an action (action-first) or a name (name-first)
+	std::string first_arg = args[0];
+	bool action_first = (first_arg == "list" || first_arg == "add" || first_arg == "next" ||
+	                     first_arg == "help" || first_arg == "--help" || first_arg == "-h");
+
+	std::string name;
+	std::string subcmd;
+
+	if (action_first) {
+		subcmd = first_arg;
+		name = (args.size() >= 2) ? args[1] : "";
+	} else {
+		// Name-first: sched NAME [action]
+		name = first_arg;
+		subcmd = (args.size() >= 2) ? args[1] : "help";  // No action = show help
+	}
 
 	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
-		callback("Usage: /sched [subcommand]\n"
-		    "Subcommands:\n"
-		    "  list                           - List all schedules\n"
-		    "  add <name> \"<cron>\" \"<prompt>\" - Add schedule\n"
-		    "  remove <name>                  - Remove schedule\n"
-		    "  enable <name>                  - Enable schedule\n"
-		    "  disable <name>                 - Disable schedule\n"
-		    "  (no args)                      - List all schedules\n");
+		if (!name.empty()) {
+			callback("Usage: shepherd sched " + name + " <action>\n"
+			    "\nActions:\n"
+			    "  show     - Show schedule details\n"
+			    "  enable   - Enable schedule\n"
+			    "  disable  - Disable schedule\n"
+			    "  remove   - Remove schedule\n");
+		} else {
+			callback("Usage: shepherd sched <name> <action>\n"
+			    "\nActions (after name):\n"
+			    "  show     - Show schedule details\n"
+			    "  enable   - Enable schedule\n"
+			    "  disable  - Disable schedule\n"
+			    "  remove   - Remove schedule\n"
+			    "\nOther commands:\n"
+			    "  list     - List all schedules\n"
+			    "  add <name> \"<cron>\" \"<prompt>\" - Add schedule\n"
+			    "  next     - Show next runs\n");
+		}
 		return 0;
 	}
 
@@ -630,8 +656,9 @@ int handle_sched_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "add") {
+		// Action-first: sched add NAME "cron" "prompt"
 		if (args.size() < 4) {
-			callback("Usage: /sched add <name> \"<cron>\" \"<prompt>\"\n"
+			callback("Usage: shepherd sched add <name> \"<cron>\" \"<prompt>\"\n"
 			    "\nCron format: minute hour day month weekday\n"
 			    "  minute:  0-59\n"
 			    "  hour:    0-23\n"
@@ -640,12 +667,12 @@ int handle_sched_args(const std::vector<std::string>& args,
 			    "  weekday: 0-6 (0=Sunday)\n"
 			    "\nSpecial characters: * (any), - (range), , (list), / (step)\n"
 			    "\nExamples:\n"
-			    "  /sched add daily-summary \"0 9 * * *\" \"Give me a summary\"\n"
-			    "  /sched add hourly \"0 * * * *\" \"What time is it?\"\n");
+			    "  shepherd sched add daily-summary \"0 9 * * *\" \"Give me a summary\"\n"
+			    "  shepherd sched add hourly \"0 * * * *\" \"What time is it?\"\n");
 			return 0;
 		}
 
-		std::string name = args[1];
+		std::string add_name = args[1];
 		std::string cron = args[2];
 		std::string prompt = args[3];
 
@@ -655,75 +682,71 @@ int handle_sched_args(const std::vector<std::string>& args,
 			return 1;
 		}
 
-		std::string id = scheduler.add(name, cron, prompt);
+		std::string id = scheduler.add(add_name, cron, prompt);
 		if (id.empty()) {
 			callback("Error: Failed to add schedule (name may already exist)\n");
 			return 1;
 		}
 
-		callback("Added schedule '" + name + "' (id: " + id + ")\n");
+		callback("Added schedule '" + add_name + "' (id: " + id + ")\n");
 		callback("Next run: " + Scheduler::format_next_run(cron) + "\n");
 		return 0;
 	}
 
 	if (subcmd == "remove") {
-		if (args.size() < 2) {
-			callback("Usage: /sched remove <name|id>\n");
-			return 0;
+		if (name.empty()) {
+			callback("Usage: shepherd sched <name> remove\n");
+			return 1;
 		}
 
-		std::string id_or_name = args[1];
-		if (scheduler.remove(id_or_name)) {
-			callback("Removed schedule '" + id_or_name + "'\n");
+		if (scheduler.remove(name)) {
+			callback("Removed schedule '" + name + "'\n");
 			return 0;
 		} else {
-			callback("Error: Schedule not found: " + id_or_name + "\n");
+			callback("Error: Schedule not found: " + name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "enable") {
-		if (args.size() < 2) {
-			callback("Usage: /sched enable <name|id>\n");
-			return 0;
+		if (name.empty()) {
+			callback("Usage: shepherd sched <name> enable\n");
+			return 1;
 		}
 
-		std::string id_or_name = args[1];
-		if (scheduler.enable(id_or_name)) {
-			callback("Enabled schedule '" + id_or_name + "'\n");
+		if (scheduler.enable(name)) {
+			callback("Enabled schedule '" + name + "'\n");
 			return 0;
 		} else {
-			callback("Error: Schedule not found: " + id_or_name + "\n");
+			callback("Error: Schedule not found: " + name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "disable") {
-		if (args.size() < 2) {
-			callback("Usage: /sched disable <name|id>\n");
-			return 0;
+		if (name.empty()) {
+			callback("Usage: shepherd sched <name> disable\n");
+			return 1;
 		}
 
-		std::string id_or_name = args[1];
-		if (scheduler.disable(id_or_name)) {
-			callback("Disabled schedule '" + id_or_name + "'\n");
+		if (scheduler.disable(name)) {
+			callback("Disabled schedule '" + name + "'\n");
 			return 0;
 		} else {
-			callback("Error: Schedule not found: " + id_or_name + "\n");
+			callback("Error: Schedule not found: " + name + "\n");
 			return 1;
 		}
 	}
 
 	if (subcmd == "show") {
-		if (args.size() < 2) {
-			callback("Usage: /sched show <name|id>\n");
-			return 0;
+		if (name.empty()) {
+			callback("Usage: shepherd sched <name> show\n");
+			return 1;
 		}
 
-		std::string id_or_name = args[1];
-		const auto* entry = scheduler.get(id_or_name);
+		const auto* entry = scheduler.get(name);
 		if (!entry) {
-			callback("Error: Schedule not found: " + id_or_name + "\n");
+			callback("Error: Schedule not found: " + name + "\n");
 			return 1;
 		}
 
@@ -739,7 +762,8 @@ int handle_sched_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "next") {
-		if (args.size() < 2) {
+		// Action-first: sched next [name]
+		if (name.empty()) {
 			// Show next run for all schedules
 			auto entries = scheduler.list();
 			if (entries.empty()) {
@@ -755,10 +779,10 @@ int handle_sched_args(const std::vector<std::string>& args,
 			return 0;
 		}
 
-		std::string id_or_name = args[1];
-		const auto* entry = scheduler.get(id_or_name);
+		// Show next for specific schedule (action-first: sched next NAME)
+		const auto* entry = scheduler.get(name);
 		if (!entry) {
-			callback("Error: Schedule not found: " + id_or_name + "\n");
+			callback("Error: Schedule not found: " + name + "\n");
 			return 1;
 		}
 
@@ -766,8 +790,8 @@ int handle_sched_args(const std::vector<std::string>& args,
 		return 0;
 	}
 
-	callback("Unknown sched subcommand: " + subcmd + "\n");
-	callback("Available: list, add, remove, enable, disable, show, next\n");
+	callback("Unknown sched command: " + subcmd + "\n");
+	callback("Use 'shepherd sched help' to see available commands\n");
 	return 1;
 }
 

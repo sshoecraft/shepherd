@@ -469,7 +469,23 @@ int handle_provider_args(const std::vector<std::string>& args,
 		return 0;
 	}
 
-	std::string subcmd = args[0];
+	// Determine if first arg is an action (action-first) or a name (name-first)
+	// Action-first commands: list, add, next, help
+	std::string first_arg = args[0];
+	bool action_first = (first_arg == "list" || first_arg == "add" || first_arg == "next" ||
+	                     first_arg == "help" || first_arg == "--help" || first_arg == "-h");
+
+	std::string name;
+	std::string subcmd;
+
+	if (action_first) {
+		subcmd = first_arg;
+		name = (args.size() >= 2) ? args[1] : "";
+	} else {
+		// Name-first: provider NAME [action] [args...]
+		name = first_arg;
+		subcmd = (args.size() >= 2) ? args[1] : "help";  // No action = show help
+	}
 
 	// Check for read-only mode (Key Vault config) for modifying commands
 	if (config && config->is_read_only()) {
@@ -480,17 +496,30 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
-		callback("Usage: /provider [subcommand]\n"
-		    "Subcommands:\n"
-		    "  list           - List all providers\n"
-		    "  use <name>     - Switch to provider\n"
-		    "  show <name>    - Show provider details\n"
-		    "  add <name>     - Add new provider\n"
-		    "  set <name>     - Modify provider settings\n"
-		    "  edit <name>    - Edit provider JSON in $EDITOR\n"
-		    "  remove <name>  - Remove provider\n"
-		    "  next           - Try next provider\n"
-		    "  (no args)      - Show current provider\n");
+		if (!name.empty()) {
+			// Name-specific help
+			callback("Usage: shepherd provider " + name + " <action> [args...]\n"
+			    "\nActions:\n"
+			    "  show           - Show provider details\n"
+			    "  set <k> <v>    - Modify provider setting\n"
+			    "  edit           - Edit provider JSON in $EDITOR\n"
+			    "  use            - Switch to this provider\n"
+			    "  remove         - Remove provider\n");
+		} else {
+			// General help
+			callback("Usage: shepherd provider <name> <action> [args...]\n"
+			    "\nActions (after name):\n"
+			    "  show           - Show provider details\n"
+			    "  set <k> <v>    - Modify provider setting\n"
+			    "  edit           - Edit provider JSON in $EDITOR\n"
+			    "  use            - Switch to this provider\n"
+			    "  remove         - Remove provider\n"
+			    "\nOther commands:\n"
+			    "  list           - List all providers\n"
+			    "  add <name>     - Add new provider\n"
+			    "  next           - Try next provider\n"
+			    "  (no args)      - Show current provider\n");
+		}
 		return 0;
 	}
 
@@ -530,7 +559,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 
 		// Check if provider already exists
 		if (find_provider(name)) {
-			callback("Provider '" + name + "' already exists. Use 'provider set' to modify.\n");
+			callback("Provider '" + name + "' already exists. Use 'shepherd provider " + name + " set' to modify.\n");
 			return 1;
 		}
 
@@ -564,7 +593,10 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "show") {
-		std::string name = (args.size() >= 2) ? args[1] : (current_provider ? *current_provider : "");
+		// Name already set from name-first parsing, or use current provider
+		if (name.empty()) {
+			name = current_provider ? *current_provider : "";
+		}
 		if (name.empty()) {
 			callback("No provider specified\n");
 			return 1;
@@ -670,17 +702,16 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("completion_cost_per_million = " + std::to_string(prov->pricing.completion_cost) + "\n");
 		}
 
-		callback("\nUse 'provider set " + prov->name + " <field> <value>' to modify\n");
+		callback("\nUse 'shepherd provider " + prov->name + " set <field> <value>' to modify\n");
 		return 0;
 	}
 
 	if (subcmd == "edit") {
-		if (args.size() < 2) {
-			callback("Usage: provider edit <name>\n");
+		if (name.empty()) {
+			callback("Usage: shepherd provider <name> edit\n");
 			return 1;
 		}
 
-		std::string name = args[1];
 		auto* prov = find_provider(name);
 		if (!prov) {
 			callback("Provider '" + name + "' not found\n");
@@ -801,8 +832,10 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "set") {
-		if (args.size() < 4) {
-			callback("Usage: provider set <name> <field> <value>\n"
+		// Name-first: provider NAME set FIELD VALUE
+		// args[0]=NAME, args[1]=set, args[2]=FIELD, args[3]=VALUE
+		if (name.empty() || args.size() < 4) {
+			callback("Usage: shepherd provider <name> set <field> <value>\n"
 			         "\nCommon fields:\n"
 			         "  type, model, priority, context_size, display_name\n"
 			         "\nAPI backends (openai, anthropic, gemini, ollama):\n"
@@ -823,7 +856,6 @@ int handle_provider_args(const std::vector<std::string>& args,
 			return 1;
 		}
 
-		std::string name = args[1];
 		std::string field = args[2];
 		std::string value = args[3];
 
@@ -945,7 +977,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			else {
 				updated = false;
 				callback("Unknown field: " + field + "\n");
-				callback("Use 'provider set' without arguments to see available fields\n");
+				callback("Use 'shepherd provider " + name + " set' to see available fields\n");
 				return 1;
 			}
 		} catch (const std::exception& e) {
@@ -961,12 +993,11 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "remove") {
-		if (args.size() < 2) {
-			callback("Usage: provider remove <name>\n");
+		if (name.empty()) {
+			callback("Usage: shepherd provider <name> remove\n");
 			return 1;
 		}
 
-		std::string name = args[1];
 		Provider::remove(name);
 
 		// Remove from in-memory list
@@ -979,12 +1010,11 @@ int handle_provider_args(const std::vector<std::string>& args,
 	}
 
 	if (subcmd == "use") {
-		if (args.size() < 2) {
-			callback("Usage: provider use <name>\n");
+		if (name.empty()) {
+			callback("Usage: shepherd provider <name> use\n");
 			return 1;
 		}
 
-		std::string name = args[1];
 		auto* prov = find_provider(name);
 		if (!prov) {
 			callback("Provider '" + name + "' not found\n");

@@ -57,6 +57,48 @@ if (tensor_parallel > 1) {
 }
 ```
 
+## Performance Features
+
+### Flash Attention
+
+Flash Attention is an optimized attention algorithm that reduces memory usage and can improve performance, especially with longer context lengths.
+
+**Enable via CLI:**
+```bash
+./shepherd -m model.gguf --flash-attn
+```
+
+**Enable via config:**
+```json
+{"flash_attn": true}
+```
+
+When enabled, sets `ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED`. When disabled (default), uses `LLAMA_FLASH_ATTN_TYPE_AUTO` which lets llama.cpp decide.
+
+### Speculative Decoding
+
+Speculative decoding uses a smaller "draft" model to predict tokens, then verifies them with the main model. This can significantly speed up generation when the draft model's predictions are accepted.
+
+**Enable via CLI:**
+```bash
+./shepherd -m large-model.gguf --model-draft small-model.gguf --draft-max 16
+```
+
+**Enable via config:**
+```json
+{
+    "model_draft": "/path/to/draft-model.gguf",
+    "draft_max": 16
+}
+```
+
+**Requirements:**
+- Draft model must have compatible vocabulary with target model
+- Draft model should be same architecture family (e.g., Llama-3.1-8B for Llama-3.1-70B)
+- Additional GPU memory needed for draft model
+
+**Note:** The speculative decoding infrastructure is implemented (model loading, initialization, cleanup), but generation loop integration is a work in progress.
+
 ## Stateful KV Cache
 
 ### Design Philosophy
@@ -377,6 +419,10 @@ From provider config JSON:
 | `tensor_parallel` / `tp` | int | 1 | Tensor parallelism (GPUs) |
 | `n_batch` | int | 512 | Logical batch size for prompt processing |
 | `ubatch` / `n_ubatch` | int | 512 | Physical micro-batch size (must be ≤ n_batch) |
+| `cache_type` | string | "f16" | KV cache type (f16, f32, q8_0, q4_0) |
+| `flash_attn` | bool | false | Enable Flash Attention |
+| `model_draft` | string | "" | Path to draft model for speculative decoding |
+| `draft_max` | int | 16 | Max tokens to draft per iteration |
 
 ## Harmony Parser Integration (GPT-OSS Models)
 

@@ -19,6 +19,7 @@
 #include "llama.cpp/src/llama-batch.h"
 #include "llama.cpp/common/chat.h"
 #include "llama.cpp/common/sampling.h"
+#include "llama.cpp/common/speculative.h"
 #endif
 
 // Helper to build consistent ContextFullException message
@@ -319,6 +320,12 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         dout(1) << "KV cache type: f16 (default)" << std::endl;
     }
 
+    // Flash Attention
+    ctx_params.flash_attn_type = flash_attn ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_AUTO;
+    if (flash_attn) {
+        dout(1) << "Flash Attention: enabled" << std::endl;
+    }
+
     // Set KV cache space callback for interrupt-driven eviction
     ctx_params.kv_need_space_callback = [](uint32_t tokens_needed, void* user_data) -> uint32_t {
         auto* backend = static_cast<LlamaCppBackend*>(user_data);
@@ -365,6 +372,60 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         dout(1) << "Context validation passed (decode test successful)" << std::endl;
     }
 #endif
+
+    // Load draft model for speculative decoding if configured
+    if (!model_draft.empty()) {
+        std::string full_draft_path = model_draft;
+        // Expand ~ to home directory
+        if (full_draft_path[0] == '~') {
+            full_draft_path = Config::get_home_directory() + full_draft_path.substr(1);
+        } else if (full_draft_path[0] != '/') {
+            // Relative path - use same directory as main model
+            std::filesystem::path main_model_dir = std::filesystem::path(full_model_path).parent_path();
+            full_draft_path = (main_model_dir / full_draft_path).string();
+        }
+
+        dout(1) << "Loading draft model for speculative decoding: " + full_draft_path << std::endl;
+
+        // Load draft model with same GPU settings
+        llama_model_params draft_model_params = model_params;
+        draft_model = llama_model_load_from_file(full_draft_path.c_str(), draft_model_params);
+        if (!draft_model) {
+            dout(1) << "WARNING: Failed to load draft model - speculative decoding disabled" << std::endl;
+            model_draft.clear();
+        } else {
+            // Create draft context with smaller context window
+            llama_context_params draft_ctx_params = ctx_params;
+            draft_ctx_params.n_ctx = std::min(static_cast<uint32_t>(2048), ctx_params.n_ctx);
+            draft_ctx_params.kv_need_space_callback = nullptr;  // No eviction for draft
+
+            draft_model_ctx = llama_init_from_model(static_cast<llama_model*>(draft_model), draft_ctx_params);
+            if (!draft_model_ctx) {
+                llama_model_free(static_cast<llama_model*>(draft_model));
+                draft_model = nullptr;
+                model_draft.clear();
+                dout(1) << "WARNING: Failed to create draft model context - speculative decoding disabled" << std::endl;
+            } else {
+                // Initialize speculative state
+                spec_state = common_speculative_init(
+                    static_cast<llama_context*>(model_ctx),
+                    static_cast<llama_context*>(draft_model_ctx)
+                );
+
+                bool compatible = common_speculative_are_compatible(
+                    static_cast<llama_context*>(model_ctx),
+                    static_cast<llama_context*>(draft_model_ctx)
+                );
+
+                if (!compatible) {
+                    dout(1) << "WARNING: Draft and target models may have incompatible vocabularies" << std::endl;
+                }
+
+                dout(1) << "Speculative decoding enabled: draft_max=" + std::to_string(draft_max) +
+                          ", p_min=" + std::to_string(draft_p_min) << std::endl;
+            }
+        }
+    }
 
     // Initialize chat templates
     auto templates = common_chat_templates_init(
@@ -598,6 +659,13 @@ void LlamaCppBackend::parse_backend_config() {
 
         // KV cache type
         if (config->json.contains("cache_type")) cache_type = config->json["cache_type"].get<std::string>();
+
+        // Flash Attention
+        if (config->json.contains("flash_attn")) flash_attn = config->json["flash_attn"].get<bool>();
+
+        // Speculative Decoding
+        if (config->json.contains("model_draft")) model_draft = config->json["model_draft"].get<std::string>();
+        if (config->json.contains("draft_max")) draft_max = config->json["draft_max"].get<int>();
 
         dout(1) << "Loaded llamacpp backend config: temperature=" + std::to_string(temperature) +
                   ", gpu_layers=" + std::to_string(gpu_layers) +
@@ -947,6 +1015,20 @@ void LlamaCppBackend::shutdown() {
     }
 
 #ifdef ENABLE_LLAMACPP
+    // Cleanup speculative decoding resources
+    if (spec_state) {
+        common_speculative_free(static_cast<common_speculative*>(spec_state));
+        spec_state = nullptr;
+    }
+    if (draft_model_ctx) {
+        llama_free(static_cast<llama_context*>(draft_model_ctx));
+        draft_model_ctx = nullptr;
+    }
+    if (draft_model) {
+        llama_model_free(static_cast<llama_model*>(draft_model));
+        draft_model = nullptr;
+    }
+
     // Cleanup llama.cpp resources properly
     if (model_ctx) {
         llama_free(static_cast<llama_context*>(model_ctx));

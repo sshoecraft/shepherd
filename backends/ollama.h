@@ -29,11 +29,6 @@ public:
     std::map<std::string, std::string> get_api_headers() override;
     std::string get_api_endpoint() override;
 
-    // Override add_message to provide true streaming
-    void add_message(Session& session, Message::Role role, const std::string& content,
-                    const std::string& tool_name = "", const std::string& tool_id = "",
-                    int max_tokens = 0) override;
-
     /// @brief Query model info from Ollama's /api/show endpoint
     /// @param model_name Model to query
     /// @return Context size in tokens, or 0 if query failed

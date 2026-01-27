@@ -34,11 +34,6 @@ public:
     std::string get_api_endpoint() override;
     std::string get_streaming_endpoint();
 
-    // Override add_message to provide true streaming
-    void add_message(Session& session, Message::Role role, const std::string& content,
-                    const std::string& tool_name = "", const std::string& tool_id = "",
-                    int max_tokens = 0) override;
-
     // Override generate_from_session for API server mode
     void generate_from_session(Session& session, int max_tokens = 0) override;
 

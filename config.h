@@ -71,6 +71,8 @@ public:
     bool tui;             // Enable TUI mode (boxed input, status line)
     bool raw_output;      // Disable channel parsing, return raw model output (like vLLM)
     int tui_history;      // TUI scrollback buffer size (lines)
+    std::string auth_mode;  // Server authentication mode: "none" or "json"
+    bool server_tools;    // Enable server-side tool execution for authenticated users
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
     // Unified config: providers loaded from config (Key Vault or file)

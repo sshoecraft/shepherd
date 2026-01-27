@@ -127,20 +127,9 @@ public:
     // Main message interface - handles eviction and delegates to backend
     /// @brief Add a message to the session with automatic eviction if needed
 
-    /// @brief Add a message and generate response
-    /// @param role Message role (USER, ASSISTANT, TOOL_RESPONSE)
-    /// @param content Message content
-    /// @param tool_name Tool name (for TOOL_RESPONSE messages)
-    /// @param tool_id Tool call ID (for TOOL_RESPONSE messages)
-    /// @param max_tokens Max tokens for assistant response (0 = auto-calculate)
-    /// All output flows through backend callback (CONTENT, TOOL_CALL, ERROR, STOP)
-    void add_message(Message::Role role,
-                    const std::string& content,
-                    const std::string& tool_name = "",
-                    const std::string& tool_id = "",
-                    int max_tokens = 0);
+    // NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
 
-    // Eviction methods - used by both API and GPU backends
+    // Eviction methods - used by frontend for session management
     // Two-pass strategy: Pass 1 evicts complete turns, Pass 2 evicts mini-turns
 
     /// @brief Calculate which messages to evict using two-pass strategy

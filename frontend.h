@@ -90,18 +90,25 @@ public:
     /// @param cmdline_provider Optional provider from command-line override
     /// @param no_mcp If true, skip MCP initialization
     /// @param no_tools If true, skip all tool initialization
-    /// @param auth_mode Authentication mode for servers: "none", "json" (json requires valid API key)
     static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
                                             Provider* cmdline_provider = nullptr,
-                                            bool no_mcp = false, bool no_tools = false,
-                                            const std::string& auth_mode = "none");
+                                            bool no_mcp = false, bool no_tools = false);
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
     virtual void init(bool no_mcp = false, bool no_tools = false) {}
 
 protected:
     /// @brief Common tool initialization - initializes RAG and registers all tools
-    void init_tools(bool no_mcp, bool no_tools);
+    /// @param no_mcp If true, skip MCP initialization
+    /// @param no_tools If true, skip all tool initialization
+    /// @param force_local If true, force local tool init even if server_tools is set (for fallback)
+    void init_tools(bool no_mcp, bool no_tools, bool force_local = false);
+
+    /// @brief Initialize tools from remote server (when --server-tools and API provider)
+    /// Called after provider connection when config->server_tools is true
+    /// @param server_url Base URL with /v1 (e.g., "http://localhost:8000/v1")
+    /// @param api_key API key for Bearer token authentication
+    void init_remote_tools(const std::string& server_url, const std::string& api_key);
 
 public:
 
@@ -151,6 +158,26 @@ public:
     /// @param text Raw text from model (may contain LaTeX/markdown)
     /// @return Formatted text suitable for terminal display
     static std::string format_output(const std::string& text);
+
+    /// @brief Add a message directly to session without triggering generation
+    /// Frontend owns the session - messages are added directly here.
+    /// Use generate_response() afterwards to generate assistant response.
+    /// @param role Message role (USER, ASSISTANT, TOOL_RESPONSE)
+    /// @param content Message content
+    /// @param tool_name Tool name (for TOOL_RESPONSE messages)
+    /// @param tool_id Tool call ID (for TOOL_RESPONSE messages)
+    void add_message_to_session(Message::Role role,
+                                const std::string& content,
+                                const std::string& tool_name = "",
+                                const std::string& tool_id = "");
+
+    /// @brief Generate response from current session state
+    /// This is the unified generation path used by all frontends.
+    /// Handles proactive eviction (if auto_evict enabled) and reactive eviction
+    /// (on ContextFullException) for stateful frontends.
+    /// @param max_tokens Max tokens for response (0 = auto-calculate)
+    /// @return true if generation completed, false if error or eviction failed
+    bool generate_response(int max_tokens = 0);
 
     // Session owned by frontend (source of truth for conversation state)
     Session session;

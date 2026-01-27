@@ -608,16 +608,18 @@ std::string GeminiBackend::get_streaming_endpoint() {
     return api_endpoint + model_name + ":streamGenerateContent?alt=sse";
 }
 
-void GeminiBackend::add_message(Session& session,
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
+#if 0
+void GeminiBackend::add_message_REMOVED(Session& session,
                                     Message::Role role,
                                     const std::string& content,
                                     const std::string& tool_name,
                                     const std::string& tool_id,
-                                    
+
                                     int max_tokens) {
     // If streaming disabled, use base class non-streaming implementation
     if (!config->streaming) {
-        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+        /* removed */ return;
     }
 
     reset_output_state();
@@ -871,6 +873,7 @@ void GeminiBackend::add_message(Session& session,
     callback(CallbackEvent::ERROR, "Max retries reached", "error", "");
     callback(CallbackEvent::STOP, "error", "", "");
 }
+#endif
 
 void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
     // Always use streaming for generate_from_session - the callback mechanism

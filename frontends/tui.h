@@ -86,7 +86,8 @@ public:
 
     // Public state for run() access
     bool piped_eof = false;
-    bool no_tools = false;  // --notools flag
+    bool no_tools = false;   // --notools flag
+    bool no_mcp = false;     // --nomcp flag (for fallback to local tools)
 
     // Input queue for async input
     struct QueuedInput {

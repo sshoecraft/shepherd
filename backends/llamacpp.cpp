@@ -297,6 +297,7 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
     // n_ubatch must be <= n_batch
     ctx_params.n_ubatch = static_cast<uint32_t>(std::min(n_ubatch, n_batch));
     ctx_params.offload_kqv = has_gpu;
+    ctx_params.n_seq_max = 1;
     dout(1) << "Using n_ubatch = " + std::to_string(ctx_params.n_ubatch) << std::endl;
 
     // Set KV cache type (both K and V use same type)
@@ -326,16 +327,9 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         dout(1) << "Flash Attention: enabled" << std::endl;
     }
 
-    // Set KV cache space callback for interrupt-driven eviction
-    ctx_params.kv_need_space_callback = [](uint32_t tokens_needed, void* user_data) -> uint32_t {
-        auto* backend = static_cast<LlamaCppBackend*>(user_data);
-        uint32_t new_head = backend->evict_to_free_space(tokens_needed);
-        if (new_head == UINT32_MAX) {
-            dout(1) << "Eviction succeeded, retrying operation with freed space" << std::endl;
-        }
-        return new_head;
-    };
-    ctx_params.kv_need_space_callback_data = this;
+    // NOTE: KV cache callback-based eviction removed.
+    // Eviction is now handled at the frontend level.
+    // Backend throws ContextFullException when context is full.
 
     model_ctx = llama_init_from_model(static_cast<llama_model*>(model), ctx_params);
     if (!model_ctx) {
@@ -597,19 +591,13 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
     dout(1) << "LlamaCppBackend initialized with model: " + model_path << std::endl;
     initialized = true;
 
-    // Add system message in cli mode
-    if (!g_server_mode) {
-        // Format system message with tools using chat template
+    // Calculate system message token count (for eviction decisions)
+    // System message is NOT added to session.messages - it stays raw in session.system_message
+    // and is only formatted during format_conversation() in prefill_session()
+    if (!session.system_message.empty()) {
         std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
-
-        // Use add_message to properly decode and add system message
-        // This ensures it's in KV cache before being added to session.messages
-        add_message(session, Message::SYSTEM, formatted_system, "", "", 0);
-
-        // Update session tracking (add_message already added to session.messages)
         session.system_message_tokens = count_tokens_in_text(formatted_system);
-
-        dout(1) << "Added system message to session" << std::endl;
+        dout(1) << "System message tokens: " + std::to_string(session.system_message_tokens) << std::endl;
     }
 #else
     throw BackendError("LlamaCpp backend not compiled in");
@@ -648,6 +636,9 @@ void LlamaCppBackend::parse_backend_config() {
 
         if (config->json.contains("pipeline_parallel")) pipeline_parallel = config->json["pipeline_parallel"].get<int>();
         else if (config->json.contains("pp")) pipeline_parallel = config->json["pp"].get<int>();
+
+        // Parallel sequences (placeholder - not implemented yet)
+        if (config->json.contains("n_parallel")) n_parallel = config->json["n_parallel"].get<int>();
 
         // Batch sizes: n_batch = logical, ubatch/n_ubatch = physical micro-batch
         // Values <= 0 mean "use auto" (reset to 512 sentinel)
@@ -1048,6 +1039,10 @@ void LlamaCppBackend::shutdown() {
 
     initialized = false;
     dout(1) << "LlamaCppBackend shutdown complete" << std::endl;
+}
+
+std::shared_ptr<std::unique_lock<std::mutex>> LlamaCppBackend::acquire_lock() {
+    return std::make_shared<std::unique_lock<std::mutex>>(generation_mutex);
 }
 
 int LlamaCppBackend::get_context_token_count() const {
@@ -1607,8 +1602,11 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
         }
 #endif
         char token_str[256];
-        // Render special tokens as text so harmony parser can see markers like <|end|>
-        int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, true);
+        // For harmony models: render special tokens as text so parser can see markers like <|end|>
+        // For non-harmony models: don't render special tokens (prevents <|im_start|> bleeding through)
+        // This matches llama.cpp server behavior (special=false unless token is in preserved_tokens)
+        bool render_special = harmony_enabled;
+        int token_len = llama_token_to_piece(vocab, next_token, token_str, sizeof(token_str), 0, render_special);
 
         // Check if this is a harmony stop token before processing
         bool is_harmony_stop = false;
@@ -2011,6 +2009,8 @@ bool LlamaCppBackend::format_and_decode_message(
 
 void LlamaCppBackend::generate_from_session(Session& session, int max_tokens) {
 #ifdef ENABLE_LLAMACPP
+    // Note: Caller must hold lock from acquire_lock() for thread safety
+
     // Two-phase generation: prefill then generate
     // This allows API server to catch ContextFullException before starting streaming
     try {
@@ -2056,10 +2056,10 @@ void LlamaCppBackend::prefill_session(Session& session) {
     // Step 1: Build message list for rendering
     std::vector<Message> all_messages;
 
-    // Add system message if present
+    // Add system message as first message (raw - template will format it)
+    // System message is stored raw in session.system_message, not in session.messages
     if (!session.system_message.empty()) {
-        std::string formatted_system = chat_template->format_system_message(session.system_message, session.tools);
-        all_messages.push_back(Message(Message::SYSTEM, formatted_system, 0));
+        all_messages.push_back(Message(Message::SYSTEM, session.system_message, 0));
     }
 
     // Add all conversation messages
@@ -2336,156 +2336,5 @@ void LlamaCppBackend::generate_from_prefilled(Session& session, int max_tokens) 
 }
 
 
-void LlamaCppBackend::add_message(Session& session, Message::Role role, const std::string& content,
-                                      const std::string& tool_name, const std::string& tool_id,
-                                      int max_tokens) {
-#ifdef ENABLE_LLAMACPP
-    if (!is_ready()) {
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "LlamaCpp backend not initialized";
-        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
-    }
-
-    dout(1) << "LlamaCpp add_message called: role=" + std::to_string(static_cast<int>(role)) +
-              ", content_len=" + std::to_string(content.length()) << std::endl;
-
-    // Count tokens for this message
-    int message_tokens = 0;
-    {
-        if (role == Message::SYSTEM && !session.tools.empty()) {
-            // Format system message with tools using chat template
-            std::string formatted_content = chat_template->format_system_message(content, session.tools);
-            message_tokens = count_message_tokens(role, formatted_content, tool_name, tool_id);
-        } else {
-            message_tokens = count_message_tokens(role, content, tool_name, tool_id);
-        }
-    }
-
-    dout(1) << "Message token count: " + std::to_string(message_tokens) << std::endl;
-
-    // Create the message object (NOT in session yet)
-    Message msg(role, content, message_tokens);
-    msg.tool_name = tool_name;
-    msg.tool_call_id = tool_id;
-
-    // TRY to decode to KV cache FIRST - always use full-conversation rendering
-    // Build messages array with context: session messages + new message
-    std::vector<Message> all_messages(session.messages.begin(), session.messages.end());
-    all_messages.push_back(msg);
-    size_t target_index = all_messages.size() - 1;
-    bool decode_success = format_and_decode_message(all_messages, target_index, session.tools, false);
-    // Update msg.tokens from the formatted message
-    if (decode_success) {
-        msg.tokens = all_messages[target_index].tokens;
-    }
-
-    if (!decode_success) {
-        // Session is unchanged - no rollback needed
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "Failed to decode message to KV cache";
-        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
-    }
-
-    // SUCCESS - now add message to session
-    session.messages.push_back(msg);
-    int new_message_index = static_cast<int>(session.messages.size()) - 1;
-
-    // Update session total tokens (msg.tokens was set by format_and_decode_message)
-    session.total_tokens += msg.tokens;
-
-    // Track for context preservation
-    if (role == Message::USER) {
-        session.last_user_message_index = new_message_index;
-        session.last_user_message_tokens = msg.tokens;
-    }
-
-    // Fire USER event callback when prompt is accepted
-    // This displays the user prompt before generation starts
-    if (callback && role == Message::USER && !content.empty()) {
-        callback(CallbackEvent::USER_PROMPT, content, "", "");
-    }
-
-    // Generate response (unless this is a system message)
-    Response resp;
-    resp.success = true;
-    resp.code = Response::SUCCESS;
-
-    if (role != Message::SYSTEM) {
-        // Update member variables used by generate() for token calculations
-        // System message tokens (first message if it's a SYSTEM type)
-        if (!session.messages.empty() && session.messages[0].role == Message::SYSTEM) {
-            system_formatted_tokens = session.messages[0].tokens;
-        } else {
-            system_formatted_tokens = 0;
-        }
-
-        // Last user message tokens
-        if (role == Message::USER) {
-            // Current message being added
-            current_user_formatted_tokens = message_tokens;
-        } else if (session.last_user_message_index >= 0) {
-            // Previous user message
-            current_user_formatted_tokens = session.last_user_message_tokens;
-        } else {
-            current_user_formatted_tokens = 0;
-        }
-
-        // User prompt echo moved to frontend - backend never outputs directly
-
-        // Generate with callback if provided (streaming), otherwise accumulate
-        std::string response_text = generate(session, max_tokens, callback);
-
-        // Add assistant message to session (generation was successful)
-        Message assistant_msg(Message::ASSISTANT, response_text, last_assistant_kv_tokens);
-
-        // Populate tool_calls_json from tool calls detected during streaming
-        if (!accumulated_tool_calls.empty()) {
-            assistant_msg.tool_calls_json = accumulated_tool_calls.dump();
-            dout(1) << "Populated tool_calls_json: " << assistant_msg.tool_calls_json << std::endl;
-        }
-
-        session.messages.push_back(assistant_msg);
-
-        // Update session total tokens with assistant response
-        session.total_tokens += last_assistant_kv_tokens;
-
-        // Update tracking
-        session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
-        session.last_assistant_message_tokens = last_assistant_kv_tokens;
-
-        // Determine finish reason
-        std::string finish_reason = "stop";
-        if (g_generation_cancelled) {
-            finish_reason = "cancelled";
-        } else if (last_generation_hit_length_limit) {
-            finish_reason = "length";
-        }
-
-        // Signal completion
-        callback(CallbackEvent::STOP, finish_reason, "", "");
-
-        // Emit TOOL_CALL events after STOP - frontend handles immediately
-        for (const auto& tc : accumulated_tool_calls) {
-            std::string name = tc["function"]["name"];
-            std::string args = tc["function"]["arguments"];
-            std::string id = tc["id"];
-            callback(CallbackEvent::TOOL_CALL, args, name, id);
-        }
-    } else {
-        // System message - no generation, just success
-        callback(CallbackEvent::STOP, "system", "", "");
-    }
-
-    dout(1) << "add_message complete" << std::endl;
-#else
-    callback(CallbackEvent::ERROR, "LlamaCpp backend not compiled in", "error", "");
-    callback(CallbackEvent::STOP, "error", "", "");
-#endif
-}
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
 

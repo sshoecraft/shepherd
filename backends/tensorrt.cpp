@@ -254,7 +254,7 @@ void TensorRTBackend::parse_backend_config() {
                   ", top_p=" + std::to_string(top_p) +
                   ", top_k=" + std::to_string(top_k) +
                   ", repetition_penalty=" + std::to_string(repetition_penalty) +
-                  ", frequency_penalty=" + std::to_string(frequency_penalty));
+                  ", frequency_penalty=" + std::to_string(frequency_penalty) << std::endl;
 
     } catch (const std::exception& e) {
         std::cerr << "Failed to parse TensorRT backend config: " + std::string(e.what()) << std::endl;
@@ -452,7 +452,7 @@ void TensorRTBackend::initialize(Session& session) {
                 std::string cmd;
                 for (const auto& arg : args) cmd += arg + " ";
                 return cmd;
-            }());
+            }() << std::endl;
 
             execvp("mpirun", c_args.data());
 
@@ -462,7 +462,7 @@ void TensorRTBackend::initialize(Session& session) {
         // Verify we have the correct world size if running under MPI
         if (required_world_size > 1 && current_world_size != required_world_size) {
             throw BackendError("MPI world size (" + std::to_string(current_world_size) +
-                             ") doesn't match model requirement (" + std::to_string(required_world_size) + "" << std::endl;
+                             ") doesn't match model requirement (" + std::to_string(required_world_size) + ")");
 
         }
 
@@ -782,144 +782,9 @@ const ChatTemplates::ChatTemplateCaps* TensorRTBackend::get_chat_template_caps()
     return nullptr;
 }
 
-void TensorRTBackend::add_message(Session& session, Message::Role role,
-                                     const std::string& content,
-                                     const std::string& tool_name,
-                                     const std::string& tool_id,
-                                     
-                                     int max_tokens) {
-    if (!is_ready()) {
-        Response err_resp;
-        err_resp.success = false;
-        err_resp.code = Response::ERROR;
-        err_resp.finish_reason = "error";
-        err_resp.error = "TensorRT backend not initialized";
-        callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
-    }
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
 
-    // Set current session for eviction callbacks
-    current_session = &session;
-
-    dout(1) << "TensorRT add_message called: type=" + std::to_string(type) +
-              ", content_len=" + std::to_string(content.length()));
-
-    // Count tokens if needed
-    int message_tokens = prompt_tokens;
-    if (message_tokens == 0) {
-        if (role == Message::SYSTEM && !session.tools.empty()) {
-            std::string formatted = chat_template_->format_system_message(content, session.tools);
-            message_tokens = count_message_tokens(role, formatted, tool_name, tool_id);
-        } else {
-            message_tokens = count_message_tokens(role, content, tool_name, tool_id);
-        }
-    }
-
-    dout(1) << "Message token count: " + std::to_string(message_tokens) << std::endl;
-
-    // Create message (transactional - not in session yet!)
-    Message msg(role, content, message_tokens);
-    msg.tool_name = tool_name;
-    msg.tool_call_id = tool_id;
-
-    // TRY to accumulate tokens FIRST
-    // For non-SYSTEM messages, add generation prompt so template adds <|im_start|>assistant\n
-    bool will_generate = (type != Message::SYSTEM);
-    if (!tokenize_and_accumulate_message(msg, will_generate)) {
-        Response err;
-        err.success = false;
-        err.code = Response::ERROR;
-        err.error = "Failed to tokenize message";
-        return err;
-    }
-
-    // SUCCESS - add to session
-    session.messages.push_back(msg);
-    session.total_tokens += message_tokens;
-
-    if (role == Message::USER) {
-        session.last_user_message_index = session.messages.size() - 1;
-        session.last_user_message_tokens = message_tokens;
-    }
-
-    // Fire USER event callback when prompt is accepted
-    // This displays the user prompt before generation starts
-    if (callback && role == Message::USER && !content.empty()) {
-        callback(CallbackEvent::USER_PROMPT, content, "", "");
-    }
-
-    Response resp;
-    resp.success = true;
-    resp.code = Response::SUCCESS;
-
-    if (type != Message::SYSTEM) {
-        // Generate response (pass callback for streaming)
-        std::string response_text = generate(session, max_tokens, callback);
-
-        // Tool call detection now handled by unified output() filter during streaming
-        // Keeping this code disabled for reference
-#if 0
-        // Parse tool calls
-        std::vector<ToolParser::ToolCall> tool_calls;
-        if (!response_text.empty()) {
-            // Check for tool call markers
-            bool has_marker = false;
-            std::vector<std::string> tool_call_markers = {"<tool_call>", "```json", "{\"name\":"};
-            for (const auto& marker : tool_call_markers) {
-                if (response_text.find(marker) != std::string::npos) {
-                    has_marker = true;
-                    break;
-                }
-            }
-
-            // Parse tool calls if markers present
-            if (has_marker || (response_text[0] == '{' && response_text.find("\"name\"") != std::string::npos)) {
-                auto tool_call = ToolParser::parse_tool_call(response_text, tool_call_markers);
-                if (tool_call.has_value()) {
-                    tool_calls.push_back(tool_call.value());
-                }
-            }
-        }
-#endif
-
-        // Add assistant message
-        int asst_tokens = tokenizer_->count_tokens(response_text);
-        Message asst_msg(Message::ASSISTANT, response_text, asst_tokens);
-
-        // Tokenize and accumulate assistant message
-        if (!tokenize_and_accumulate_message(asst_msg)) {
-            dout(1) << std::string("WARNING: ") +"Failed to accumulate assistant message tokens" << std::endl;
-        }
-
-        session.messages.push_back(asst_msg);
-        session.total_tokens += asst_tokens;
-
-        session.last_assistant_message_index = session.messages.size() - 1;
-        session.last_assistant_message_tokens = asst_tokens;
-
-        resp.content = response_text;
-        resp.prompt_tokens = message_tokens;
-        resp.completion_tokens = asst_tokens;
-        resp.was_streamed = !g_server_mode;  // We wrote to tio during generate()
-        // Determine finish reason (tool calls now detected by output() filter)
-        if (last_generation_hit_length_limit) {
-            resp.finish_reason = "length";
-        } else {
-            resp.finish_reason = "stop";
-        }
-    } else {
-        resp.finish_reason = "system";
-        resp.prompt_tokens = message_tokens;
-    }
-
-    dout(1) << "add_message complete: prompt_tokens=" + std::to_string(resp.prompt_tokens) +
-              ", completion_tokens=" + std::to_string(resp.completion_tokens) +
-              ", finish_reason=" + resp.finish_reason);
-
-    return resp;
-}
-
-
-void TensorRTBackend::generate_from_session(Session& session, int max_tokens, EventCallback callback) {
+void TensorRTBackend::generate_from_session(Session& session, int max_tokens) {
     dout(1) << "generate_from_session CALLED - accumulated_tokens.size=" + std::to_string(accumulated_tokens.size()) << std::endl;
 
     if (!is_ready()) {
@@ -1944,14 +1809,6 @@ void TensorRTBackend::handle_kv_cache_removed(const std::vector<uint64_t>& block
 }
 #else
 // Stub implementations when TensorRT is not enabled
-void TensorRTBackend::add_message(Session&, Message::Role, const std::string&,
-                                     const std::string&, const std::string&, int, int) {
-    Response err_resp;
-    err_resp.success = false;
-    err_resp.code = Response::ERROR;
-    err_resp.error = "TensorRT backend not compiled in";
-    callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
-}
 
 void TensorRTBackend::generate_from_session(Session&, int) {
     Response err_resp;

@@ -4,6 +4,10 @@
 #include <sstream>
 #include <cstring>
 #include <fstream>
+#include <atomic>
+
+// External cancellation flag - set by CLI/TUI when user presses escape
+extern std::atomic<bool> g_generation_cancelled;
 
 HttpClient::HttpClient() {
     curl_ = curl_easy_init();
@@ -495,8 +499,12 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
             break;
         }
 
-        // TODO: escape key cancellation removed with TerminalIO
-        // Would need a different mechanism to cancel requests
+        // Check for cancellation (escape key sets g_generation_cancelled)
+        if (g_generation_cancelled) {
+            cancelled = true;
+            dout(1) << "HTTP streaming cancelled by user" << std::endl;
+            break;
+        }
 
         // Wait for activity with short timeout (100ms for responsive cancellation)
         if (still_running) {

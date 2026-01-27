@@ -68,6 +68,7 @@ set(SHEPHERD_SOURCES
     tools/tool_parser.cpp
     tools/utf8_sanitizer.cpp
     tools/web_search.cpp
+    tools/remote_tools.cpp
 
     # MCP sources
     mcp/mcp_client.cpp
@@ -138,10 +139,9 @@ if(ENABLE_TENSORRT)
     find_package(Python3 COMPONENTS Development REQUIRED)
 endif()
 
-# TensorRT-LLM headers (bundled with Shepherd + from package)
+# TensorRT-LLM headers (auto-downloaded from GitHub if missing)
 if(ENABLE_TENSORRT)
-    # Detect installed TensorRT-LLM version
-    # Read version.py directly to avoid import side effects
+    # Detect installed TensorRT-LLM version (read version.py directly to avoid import side effects)
     execute_process(
         COMMAND ${Python3_EXECUTABLE} -c "import site; exec(open(site.getsitepackages()[0]+'/tensorrt_llm/version.py').read()); print(__version__)"
         OUTPUT_VARIABLE TRT_LLM_VERSION
@@ -153,27 +153,37 @@ if(ENABLE_TENSORRT)
     endif()
     message(STATUS "Detected TensorRT-LLM version: ${TRT_LLM_VERSION}")
 
-    # Check if we have headers for this version
-    set(TRT_LLM_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/tensorrt-llm/${TRT_LLM_VERSION}")
-    if(NOT EXISTS "${TRT_LLM_INCLUDE_DIR}")
-        message(FATAL_ERROR "No headers found for TensorRT-LLM ${TRT_LLM_VERSION}. Expected: ${TRT_LLM_INCLUDE_DIR}")
-    endif()
-    message(STATUS "Using TensorRT-LLM headers from: ${TRT_LLM_INCLUDE_DIR}")
+    # Check if we have the C++ API headers for this version
+    set(TRT_LLM_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/tensorrt-llm/${TRT_LLM_VERSION}")
+    set(TRT_LLM_EXECUTOR_HEADER "${TRT_LLM_HEADERS_DIR}/tensorrt_llm/executor/executor.h")
 
-    target_include_directories(shepherd PRIVATE
-        ${TRT_LLM_INCLUDE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tokenizers/include
-    )
-    # Add CUDA headers from tensorrt_llm package
+    if(NOT EXISTS "${TRT_LLM_EXECUTOR_HEADER}")
+        message(STATUS "TensorRT-LLM C++ headers not found, fetching from GitHub...")
+        execute_process(
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/fetch-tensorrt-headers.sh ${TRT_LLM_VERSION}
+            RESULT_VARIABLE FETCH_RESULT
+        )
+        if(NOT FETCH_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to fetch TensorRT-LLM headers. Run: ./scripts/fetch-tensorrt-headers.sh ${TRT_LLM_VERSION}")
+        endif()
+    endif()
+
+    # Get venv include directory for CUDA types (cuda_fp16.h, etc.)
     execute_process(
         COMMAND ${Python3_EXECUTABLE} -c "import site, os; print(os.path.join(site.getsitepackages()[0], 'tensorrt_llm', 'include'))"
-        OUTPUT_VARIABLE TENSORRT_LLM_INCLUDE_DIR
+        OUTPUT_VARIABLE TENSORRT_LLM_VENV_INCLUDE
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
     )
-    if(TENSORRT_LLM_INCLUDE_DIR AND EXISTS "${TENSORRT_LLM_INCLUDE_DIR}")
-        target_include_directories(shepherd PRIVATE ${TENSORRT_LLM_INCLUDE_DIR})
-        message(STATUS "TensorRT-LLM include directory: ${TENSORRT_LLM_INCLUDE_DIR}")
+
+    target_include_directories(shepherd PRIVATE
+        ${TRT_LLM_HEADERS_DIR}
+        ${TENSORRT_LLM_VENV_INCLUDE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tokenizers/include
+    )
+    message(STATUS "TensorRT-LLM C++ headers: ${TRT_LLM_HEADERS_DIR}")
+    if(TENSORRT_LLM_VENV_INCLUDE AND EXISTS "${TENSORRT_LLM_VENV_INCLUDE}")
+        message(STATUS "TensorRT-LLM CUDA types: ${TENSORRT_LLM_VENV_INCLUDE}")
     endif()
 
     # Add CUDA runtime headers
@@ -196,6 +206,15 @@ if(ENABLE_TENSORRT)
     if(TRITON_CUDA_INCLUDE_DIR)
         target_include_directories(shepherd PRIVATE ${TRITON_CUDA_INCLUDE_DIR})
         message(STATUS "Triton CUDA include directory: ${TRITON_CUDA_INCLUDE_DIR}")
+    endif()
+
+    # Add CUDA toolkit headers (for nv/target and libcudacxx)
+    if(EXISTS "/usr/local/cuda/targets/x86_64-linux/include")
+        target_include_directories(shepherd PRIVATE "/usr/local/cuda/targets/x86_64-linux/include")
+        message(STATUS "CUDA toolkit include directory: /usr/local/cuda/targets/x86_64-linux/include")
+    elseif(DEFINED ENV{CUDA_HOME})
+        target_include_directories(shepherd PRIVATE "$ENV{CUDA_HOME}/targets/x86_64-linux/include")
+        message(STATUS "CUDA toolkit include directory: $ENV{CUDA_HOME}/targets/x86_64-linux/include")
     endif()
 endif()
 
@@ -305,7 +324,7 @@ if(ENABLE_TENSORRT)
         -ltorch_cuda
         -lc10
         -lc10_cuda
-        ${CMAKE_SOURCE_DIR}/tokenizers/rust/target/release/libtokenizers_c.a
+        ${CMAKE_SOURCE_DIR}/vendor/tokenizers/rust/target/release/libtokenizers_c.a
         dl
         pthread
     )

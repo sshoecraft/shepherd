@@ -1,10 +1,13 @@
 
 # Uncomment and set this to your python virtual env if you have one setup and you installed tensorrt-llm in it
-#VENV:=/path/to/venv
 
 LLAMACPP?=OFF
 TENSORRT?=OFF
 TESTS?=OFF
+RELEASE?=NO
+ifeq ($(RELEASE),yes)
+ BUILD_TYPE=Release
+endif
 BUILD_TYPE?=Debug
 
 ifneq ("$(wildcard ~/.shepherd_opts)","")

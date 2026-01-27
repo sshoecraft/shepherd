@@ -2,8 +2,8 @@
 	path = llama.cpp
 	url = https://github.com/ggerganov/llama.cpp.git
 	ignore = dirty
-[submodule "tokenizers"]
-	path = tokenizers
+[submodule "vendor/tokenizers"]
+	path = vendor/tokenizers
 	url = https://github.com/mlc-ai/tokenizers-cpp.git
 	ignore = dirty
 [submodule "vendor/replxx"]

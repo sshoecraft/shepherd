@@ -48,7 +48,8 @@ public:
     bool interactive_mode = false;
     bool colors_enabled = false;
     bool at_line_start = true;  // For indentation tracking
-    bool no_tools = false;  // --notools flag
+    bool no_tools = false;   // --notools flag
+    bool no_mcp = false;     // --nomcp flag (for fallback to local tools)
 
     // Piped input support
     std::deque<std::string> piped_input_queue;

@@ -9,6 +9,7 @@
 #include <functional>
 #include <set>
 #include <memory>
+#include <mutex>
 
 // Forward declaration for chat template capabilities
 namespace ChatTemplates {
@@ -80,18 +81,7 @@ public:
     Backend(size_t context_size, Session& session, EventCallback callback);
     virtual ~Backend() = default;
 
-    // Main transactional message interface
-    // Adds message and generates response, handling eviction if needed
-    // All output flows through callback (CONTENT, TOOL_CALL, ERROR, STOP)
-    // Session is updated with messages and token counts
-    virtual void add_message(Session& session,
-                            Message::Role role,
-                            const std::string& content,
-                            const std::string& tool_name = "",
-                            const std::string& tool_id = "",
-                            int max_tokens = 0) = 0;
-
-    // Generation from Session (for server with prefix caching)
+    // Generation from Session (unified path)
     // All output flows through callback, session token counts are updated
     virtual void generate_from_session(Session& session, int max_tokens = 0) = 0;
 
@@ -140,6 +130,15 @@ public:
 
     // Shutdown and cleanup resources (called before switching providers)
     virtual void shutdown() {}
+
+    /// @brief Acquire a lock for serialized backend access (GPU backends only)
+    /// Returns nullptr for API backends (no locking needed)
+    /// Returns a unique_lock for GPU backends (llama_decode not thread-safe)
+    /// Caller holds the lock until the returned shared_ptr is destroyed
+    /// Uses shared_ptr so lock can be captured in copyable lambdas (httplib requirement)
+    virtual std::shared_ptr<std::unique_lock<std::mutex>> acquire_lock() {
+        return nullptr;  // API backends: no lock needed
+    }
 
     /// @brief Set the model and update model-specific configuration
     /// Override in API backends to update model_config, max_output_tokens, etc.

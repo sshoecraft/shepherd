@@ -5,6 +5,7 @@
 #include "cli_server.h"
 #include "tui.h"
 #include "tools/tools.h"
+#include "tools/remote_tools.h"
 #include "tools/utf8_sanitizer.h"
 #include "rag.h"
 #include "mcp/mcp.h"
@@ -40,7 +41,7 @@ Frontend::Frontend() {
 Frontend::~Frontend() {
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& auth_mode) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools) {
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -50,10 +51,10 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
         frontend = std::make_unique<TUI>();
     }
     else if (mode == "api-server") {
-        frontend = std::make_unique<APIServer>(host, port, auth_mode, no_mcp, no_tools);
+        frontend = std::make_unique<APIServer>(host, port, no_mcp, no_tools);
     }
     else if (mode == "cli-server") {
-        frontend = std::make_unique<CLIServer>(host, port, auth_mode);
+        frontend = std::make_unique<CLIServer>(host, port);
     }
     else {
         throw std::runtime_error("Invalid frontend mode: " + mode);
@@ -155,7 +156,7 @@ bool Frontend::connect_provider(const std::string& name) {
     }
 }
 
-void Frontend::init_tools(bool no_mcp, bool no_tools) {
+void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
     // Initialize RAG system using global config
     std::string db_path = config->memory_database;
     if (db_path.empty()) {
@@ -180,7 +181,14 @@ void Frontend::init_tools(bool no_mcp, bool no_tools) {
         return;
     }
 
-    dout(1) << "Initializing tools system..." << std::endl;
+    // If server_tools mode, defer tool init until after provider connection
+    // (unless force_local is set, which is used for fallback when provider has no base_url)
+    if (config->server_tools && !force_local) {
+        dout(1) << "Server tools mode: deferring tool init until provider connected" << std::endl;
+        return;
+    }
+
+    dout(1) << "Initializing local tools system..." << std::endl;
 
     // Register all native tools
     register_filesystem_tools(tools);
@@ -208,6 +216,22 @@ void Frontend::init_tools(bool no_mcp, bool no_tools) {
     // Populate session.tools from Tools instance
     tools.populate_session_tools(session);
     dout(1) << "Session initialized with " + std::to_string(session.tools.size()) + " tools" << std::endl;
+}
+
+void Frontend::init_remote_tools(const std::string& server_url, const std::string& api_key) {
+    dout(1) << "Fetching remote tools from " + server_url << std::endl;
+
+    int count = register_remote_tools(tools, server_url, api_key);
+    if (count < 0) {
+        std::cerr << "Warning: Failed to fetch remote tools from " + server_url << std::endl;
+    } else {
+        dout(1) << "Registered " + std::to_string(count) + " remote tools" << std::endl;
+    }
+
+    tools.build_all_tools();
+    tools.populate_session_tools(session);
+
+    dout(1) << "Remote tools initialized: " + std::to_string(tools.all_tools.size()) + " total" << std::endl;
 }
 
 ToolResult Frontend::execute_tool(Tools& tools,
@@ -271,6 +295,227 @@ ToolResult Frontend::execute_tool(Tools& tools,
     tool_result.content = result_content;
 
     return tool_result;
+}
+
+void Frontend::add_message_to_session(Message::Role role,
+                                       const std::string& content,
+                                       const std::string& tool_name,
+                                       const std::string& tool_id) {
+    // Count tokens for eviction decisions
+    int message_tokens = 0;
+    if (backend) {
+        message_tokens = backend->count_message_tokens(role, content, tool_name, tool_id);
+    }
+
+    // Create message and add directly to session
+    Message msg(role, content, message_tokens);
+    msg.tool_name = tool_name;
+    msg.tool_call_id = tool_id;
+    session.messages.push_back(msg);
+    session.total_tokens += message_tokens;
+
+    // Update tracking indices
+    int new_index = static_cast<int>(session.messages.size()) - 1;
+    if (role == Message::USER) {
+        session.last_user_message_index = new_index;
+        session.last_user_message_tokens = message_tokens;
+    } else if (role == Message::ASSISTANT) {
+        session.last_assistant_message_index = new_index;
+        session.last_assistant_message_tokens = message_tokens;
+    }
+
+    dout(1) << "Frontend::add_message_to_session: role=" + std::to_string(static_cast<int>(role)) +
+             ", tokens=" + std::to_string(message_tokens) +
+             ", total_tokens=" + std::to_string(session.total_tokens) << std::endl;
+}
+
+bool Frontend::generate_response(int max_tokens) {
+    if (!backend) {
+        callback(CallbackEvent::ERROR, "No backend connected", "backend_error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return false;
+    }
+
+    // Calculate max_tokens if not provided
+    if (max_tokens == 0 && backend->context_size > 0) {
+        // Reserve space for critical context
+        int reserved = session.system_message_tokens;
+        if (session.last_user_message_index >= 0) {
+            reserved += session.last_user_message_tokens;
+        }
+        if (session.last_assistant_message_index >= 0) {
+            reserved += session.last_assistant_message_tokens;
+        }
+
+        // Calculate available space
+        int available = backend->context_size - reserved - session.total_tokens;
+        max_tokens = (available > 0) ? available : 0;
+
+        // Cap at desired completion size
+        if (max_tokens > session.desired_completion_tokens) {
+            max_tokens = session.desired_completion_tokens;
+        }
+
+        dout(1) << "Frontend::generate_response: calculated max_tokens=" + std::to_string(max_tokens) +
+                 " (context=" + std::to_string(backend->context_size) +
+                 ", reserved=" + std::to_string(reserved) +
+                 ", total=" + std::to_string(session.total_tokens) +
+                 ", desired_completion=" + std::to_string(session.desired_completion_tokens) + ")" << std::endl;
+    }
+
+    // Proactive eviction: if auto_evict is enabled and we would exceed context
+    if (session.auto_evict && backend->context_size > 0) {
+        size_t required = static_cast<size_t>(session.total_tokens + session.desired_completion_tokens);
+        if (required > backend->context_size) {
+            int tokens_over = static_cast<int>(required - backend->context_size);
+            dout(1) << "Frontend::generate_response: proactive eviction needed, " +
+                     std::to_string(tokens_over) + " tokens over limit" << std::endl;
+
+            auto ranges = session.calculate_messages_to_evict(tokens_over);
+            if (ranges.empty()) {
+                callback(CallbackEvent::ERROR,
+                         "Cannot generate: context full and no messages available for eviction",
+                         "context_full", "");
+                callback(CallbackEvent::STOP, "error", "", "");
+                return false;
+            }
+
+            if (!session.evict_messages(ranges)) {
+                callback(CallbackEvent::ERROR, "Eviction failed unexpectedly", "eviction_error", "");
+                callback(CallbackEvent::STOP, "error", "", "");
+                return false;
+            }
+
+            // Recalculate max_tokens after eviction
+            int reserved = session.system_message_tokens;
+            if (session.last_user_message_index >= 0) {
+                reserved += session.last_user_message_tokens;
+            }
+            if (session.last_assistant_message_index >= 0) {
+                reserved += session.last_assistant_message_tokens;
+            }
+            int available = backend->context_size - reserved - session.total_tokens;
+            max_tokens = (available > 0) ? available : 0;
+            if (max_tokens > session.desired_completion_tokens) {
+                max_tokens = session.desired_completion_tokens;
+            }
+        }
+    }
+
+    // Set up content accumulation wrapper around the frontend's callback
+    // On STOP event, we capture the assistant message BEFORE TOOL_CALL callbacks fire,
+    // because TOOL_CALL handlers may recursively call generate_response() which clears state.
+    std::string accumulated_content;
+    bool assistant_message_added = false;
+    auto original_callback = backend->callback;
+    backend->callback = [this, &accumulated_content, &assistant_message_added, &original_callback](
+        CallbackEvent event, const std::string& content,
+        const std::string& name, const std::string& id) -> bool {
+        // Accumulate content for assistant message
+        if (event == CallbackEvent::CONTENT ||
+            event == CallbackEvent::THINKING ||
+            event == CallbackEvent::CODEBLOCK) {
+            accumulated_content += content;
+        }
+
+        // On STOP, add assistant message BEFORE passing to frontend callback
+        // This must happen before TOOL_CALL callbacks, which may trigger recursive generate_response()
+        if (event == CallbackEvent::STOP && !assistant_message_added) {
+            // Backend has recorded tool calls by now (record_tool_call happens before STOP)
+            if (!accumulated_content.empty() || !backend->accumulated_tool_calls.empty()) {
+                Message assistant_msg(Message::ASSISTANT, accumulated_content,
+                                      session.last_assistant_message_tokens);
+                if (!backend->accumulated_tool_calls.empty()) {
+                    assistant_msg.tool_calls_json = backend->accumulated_tool_calls.dump();
+                }
+                session.messages.push_back(assistant_msg);
+                session.last_assistant_message_index = static_cast<int>(session.messages.size()) - 1;
+                dout(1) << "Frontend::generate_response: added assistant message on STOP, content_len=" +
+                         std::to_string(accumulated_content.length()) +
+                         ", tool_calls=" + std::to_string(backend->accumulated_tool_calls.size()) << std::endl;
+            }
+            assistant_message_added = true;
+        }
+
+        // Call the frontend's callback for display/handling
+        return original_callback(event, content, name, id);
+    };
+
+    // Call backend to generate
+    try {
+        backend->generate_from_session(session, max_tokens);
+
+        // Restore original callback
+        backend->callback = original_callback;
+
+        return true;
+    } catch (const ContextFullException& e) {
+        // Reactive eviction: backend threw because context is full
+        dout(1) << "Frontend::generate_response: ContextFullException caught, attempting reactive eviction" << std::endl;
+
+        // Calculate how many tokens to free
+        int tokens_over = session.total_tokens + session.desired_completion_tokens - backend->context_size;
+        if (tokens_over <= 0) tokens_over = session.desired_completion_tokens; // Free at least completion space
+
+        auto ranges = session.calculate_messages_to_evict(tokens_over);
+        if (ranges.empty()) {
+            backend->callback = original_callback;
+            callback(CallbackEvent::ERROR, e.what(), "context_full", "");
+            callback(CallbackEvent::STOP, "error", "", "");
+            return false;
+        }
+
+        if (!session.evict_messages(ranges)) {
+            backend->callback = original_callback;
+            callback(CallbackEvent::ERROR, "Eviction failed after context overflow", "eviction_error", "");
+            callback(CallbackEvent::STOP, "error", "", "");
+            return false;
+        }
+
+        // Retry generation after eviction
+        try {
+            // Recalculate max_tokens
+            int reserved = session.system_message_tokens;
+            if (session.last_user_message_index >= 0) {
+                reserved += session.last_user_message_tokens;
+            }
+            if (session.last_assistant_message_index >= 0) {
+                reserved += session.last_assistant_message_tokens;
+            }
+            int available = backend->context_size - reserved - session.total_tokens;
+            max_tokens = (available > 0) ? available : 0;
+            if (max_tokens > session.desired_completion_tokens) {
+                max_tokens = session.desired_completion_tokens;
+            }
+
+            // Clear accumulated state for retry
+            accumulated_content.clear();
+            assistant_message_added = false;
+
+            backend->generate_from_session(session, max_tokens);
+
+            // Restore original callback
+            backend->callback = original_callback;
+
+            // Assistant message is added by the callback wrapper on STOP
+            return true;
+        } catch (const ContextFullException& e2) {
+            backend->callback = original_callback;
+            callback(CallbackEvent::ERROR, e2.what(), "context_full", "");
+            callback(CallbackEvent::STOP, "error", "", "");
+            return false;
+        } catch (const std::exception& e2) {
+            backend->callback = original_callback;
+            callback(CallbackEvent::ERROR, e2.what(), "generation_error", "");
+            callback(CallbackEvent::STOP, "error", "", "");
+            return false;
+        }
+    } catch (const std::exception& e) {
+        backend->callback = original_callback;
+        callback(CallbackEvent::ERROR, e.what(), "generation_error", "");
+        callback(CallbackEvent::STOP, "error", "", "");
+        return false;
+    }
 }
 
 bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {

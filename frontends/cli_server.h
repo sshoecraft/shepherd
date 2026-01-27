@@ -61,7 +61,7 @@ struct CliServerState {
 /// @brief CLI Server - HTTP server that executes tools locally
 class CLIServer : public Server {
 public:
-    CLIServer(const std::string& host, int port, const std::string& auth_mode = "none");
+    CLIServer(const std::string& host, int port);
     ~CLIServer();
 
     /// @brief Initialize tools and RAG
@@ -89,4 +89,8 @@ private:
 
     // Processor thread for async requests
     std::thread processor_thread;
+
+    // Flags for fallback to local tools
+    bool no_tools = false;
+    bool no_mcp = false;
 };

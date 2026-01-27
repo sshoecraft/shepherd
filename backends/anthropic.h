@@ -16,14 +16,6 @@ public:
     AnthropicBackend(size_t context_size, Session& session, EventCallback callback);
     ~AnthropicBackend() override;
 
-    // Override add_message to provide true streaming
-    void add_message(Session& session,
-                    Message::Role role,
-                    const std::string& content,
-                    const std::string& tool_name = "",
-                    const std::string& tool_id = "",
-                    int max_tokens = 0) override;
-
     // Override generate_from_session to provide true streaming for API server mode
     void generate_from_session(Session& session, int max_tokens = 0) override;
 

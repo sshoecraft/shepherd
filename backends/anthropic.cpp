@@ -682,16 +682,18 @@ void AnthropicBackend::set_model(const std::string& model) {
                ", max_output_tokens=" + std::to_string(max_output_tokens) << std::endl;
 }
 
-void AnthropicBackend::add_message(Session& session,
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
+#if 0
+void AnthropicBackend::add_message_REMOVED(Session& session,
                                        Message::Role role,
                                        const std::string& content,
                                        const std::string& tool_name,
                                        const std::string& tool_id,
-                                       
+
                                        int max_tokens) {
     // If streaming disabled, use base class non-streaming implementation
     if (!config->streaming) {
-        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+        /* removed */ return;
     }
 
     reset_output_state();
@@ -1059,6 +1061,7 @@ void AnthropicBackend::add_message(Session& session,
     err_resp.error = "Max retries exceeded trying to fit context";
     callback(CallbackEvent::ERROR, err_resp.error, "error", ""); callback(CallbackEvent::STOP, "error", "", ""); return;
 }
+#endif
 
 size_t AnthropicBackend::query_model_context_size(const std::string& model_name) {
     // Anthropic doesn't have a /v1/models endpoint to query

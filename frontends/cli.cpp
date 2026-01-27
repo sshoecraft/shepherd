@@ -68,8 +68,9 @@ CLI::~CLI() {
     }
 }
 
-void CLI::init(bool no_mcp, bool no_tools_flag) {
-    // Store tools flag
+void CLI::init(bool no_mcp_flag, bool no_tools_flag) {
+    // Store flags for later use (e.g., fallback to local tools)
+    no_mcp = no_mcp_flag;
     no_tools = no_tools_flag;
 
     // Detect interactive mode
@@ -150,8 +151,12 @@ void CLI::init(bool no_mcp, bool no_tools_flag) {
                     (result.success ? result.content.substr(0, 100) : result.error) : result.summary;
                 show_tool_result(summary, result.success);
 
-                // Add tool result to session - triggers next generation cycle
-                session.add_message(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
+                // Add tool result to session and generate next response
+                {
+                    auto lock = backend->acquire_lock();
+                    add_message_to_session(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
+                    generate_response();
+                }
                 break;
             }
             case CallbackEvent::TOOL_RESULT:
@@ -218,6 +223,18 @@ int CLI::run(Provider* cmdline_provider) {
         callback(CallbackEvent::SYSTEM, "Failed to connect to provider '" + provider_to_use->name + "'\n", "", "");
         return 1;
     }
+
+    // If server_tools mode, fetch tools from server or fall back to local
+    if (config->server_tools && !no_tools) {
+        Provider* p = get_provider(current_provider);
+        if (p && !p->base_url.empty()) {
+            init_remote_tools(p->base_url, p->api_key);
+        } else {
+            callback(CallbackEvent::SYSTEM, "Warning: --server-tools requires an API provider with base_url, falling back to local tools\n", "", "");
+            init_tools(no_mcp, no_tools, true);  // force_local = true
+        }
+    }
+
     // Register other providers as tools (unless tools disabled)
     if (!no_tools) {
         register_provider_tools(tools, current_provider);
@@ -247,7 +264,9 @@ int CLI::run(Provider* cmdline_provider) {
     // Handle warmup if configured
     if (config->warmup && !config->warmup_message.empty()) {
         cli_debug(1, "Running warmup message...");
-        session.add_message(Message::USER, config->warmup_message);
+        auto lock = backend->acquire_lock();
+        add_message_to_session(Message::USER, config->warmup_message);
+        generate_response();
     }
 
     // Main synchronous loop
@@ -321,7 +340,11 @@ int CLI::run(Provider* cmdline_provider) {
         generation_cancelled = false;
         g_generation_cancelled = false;
         enter_generation_mode();
-        session.add_message(Message::USER, user_input);
+        {
+            auto lock = backend->acquire_lock();
+            add_message_to_session(Message::USER, user_input);
+            generate_response();
+        }
         exit_generation_mode();
 
         cli_debug(1, "tokens: " + std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));

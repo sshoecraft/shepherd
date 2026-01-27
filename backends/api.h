@@ -41,16 +41,7 @@ public:
     // Parse backend configuration (sampling parameters)
     void parse_backend_config() override;
 
-    // Main transactional message interface with eviction
-    // All output flows through callback (CONTENT, TOOL_CALL, ERROR, STOP)
-    void add_message(Session& session,
-                    Message::Role role,
-                    const std::string& content,
-                    const std::string& tool_name = "",
-                    const std::string& tool_id = "",
-                    int max_tokens = 0) override;
-
-    // Generation from Session (for server with prefix caching)
+    // Generation from Session
     // All output flows through callback, session token counts are updated
     void generate_from_session(Session& session, int max_tokens = 0) override;
 

@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
 
 // Note: harmony.h no longer needed - parser is now in GpuBackend (parser.h)
 
@@ -25,9 +26,6 @@ public:
     LlamaCppBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     ~LlamaCppBackend() override;
 
-    void add_message(Session& session, Message::Role role, const std::string& content,
-                    const std::string& tool_name = "", const std::string& tool_id = "",
-                    int max_tokens = 0) override;
     void generate_from_session(Session& session, int max_tokens = 0) override;
     void prefill_session(Session& session) override;
     void generate_from_prefilled(Session& session, int max_tokens = 0) override;
@@ -41,6 +39,7 @@ public:
     // Helper methods
     bool is_ready() const;
     void shutdown() override;
+    std::shared_ptr<std::unique_lock<std::mutex>> acquire_lock() override;
     int get_context_token_count() const;
     uint32_t evict_to_free_space(uint32_t tokens_needed);
     ModelConfig get_model_config() const;
@@ -66,6 +65,9 @@ public:
     int gpu_layers = -1;
     int tensor_parallel = 0;
     int pipeline_parallel = 0;
+
+    // Parallel sequences (slots) - placeholder, not implemented yet
+    int n_parallel = 1;
 
     // KV cache type (f16, f32, q8_0, q4_0)
     std::string cache_type = "f16";
@@ -213,6 +215,9 @@ private:
 
     // Track if last generation hit length limit (for auto-continuation)
     bool last_generation_hit_length_limit = false;
+
+    // Serializes generation (llama_decode not thread-safe)
+    std::mutex generation_mutex;
 
 #endif
 };

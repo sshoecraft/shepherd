@@ -50,9 +50,6 @@ public:
 
     void parse_backend_config() override;
 
-    void add_message(Session& session, Message::Role role, const std::string& content,
-                    const std::string& tool_name = "", const std::string& tool_id = "",
-                    int max_tokens = 0) override;
     void generate_from_session(Session& session, int max_tokens = 0) override;
     void prefill_session(Session& session) override;
     void generate_from_prefilled(Session& session, int max_tokens = 0) override;
@@ -64,6 +61,9 @@ public:
     // Backend state
     bool is_ready() const;
     void shutdown();
+
+    /// @brief Initialize the TensorRT executor with model from config
+    void initialize(Session& session);
 
 private:
 #ifdef ENABLE_TENSORRT

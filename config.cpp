@@ -73,6 +73,10 @@ void Config::set_defaults() {
 	// TUI mode disabled by default (classic scrolling terminal)
 	tui = false;
 	tui_history = 10000;  // TUI scrollback buffer size
+
+	// Server settings
+	auth_mode = "none";
+	server_tools = false;
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -308,6 +312,14 @@ void Config::load_from_json(const nlohmann::json& j) {
     // Load TUI mode setting
     if (j.contains("tui")) {
         tui = j["tui"].get<bool>();
+    }
+
+    // Load server settings
+    if (j.contains("auth_mode")) {
+        auth_mode = j["auth_mode"].get<std::string>();
+    }
+    if (j.contains("server_tools")) {
+        server_tools = j["server_tools"].get<bool>();
     }
 
     // Load RAG memory database path (optional)

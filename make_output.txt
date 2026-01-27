@@ -1,0 +1,708 @@
+(cd build && make -j56)
+make[1]: Entering directory '/home/steve/src/shepherd/build'
+make[2]: Entering directory '/home/steve/src/shepherd/build'
+make[3]: Entering directory '/home/steve/src/shepherd/build'
+make[3]: Leaving directory '/home/steve/src/shepherd/build'
+[ 17%] Built target replxx
+make[3]: Entering directory '/home/steve/src/shepherd/build'
+make[3]: Leaving directory '/home/steve/src/shepherd/build'
+make[3]: Entering directory '/home/steve/src/shepherd/build'
+[ 18%] Building CXX object CMakeFiles/shepherd.dir/rag.cpp.o
+/home/steve/src/shepherd/rag.cpp: In member function ‘bool RAGDatabase::initialize()’:
+/home/steve/src/shepherd/rag.cpp:59:5: error: ‘sqlite3’ was not declared in this scope
+   59 |     sqlite3* db = nullptr;
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:59:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+   59 |     sqlite3* db = nullptr;
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:60:14: error: ‘sqlite3_open’ was not declared in this scope
+   60 |     int rc = sqlite3_open(db_path_.c_str(), &db);
+      |              ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:61:15: error: ‘SQLITE_OK’ was not declared in this scope
+   61 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:62:64: error: ‘sqlite3_errmsg’ was not declared in this scope
+   62 |         std::cerr << "Failed to open database: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:63:9: error: ‘sqlite3_close’ was not declared in this scope
+   63 |         sqlite3_close(db);
+      |         ^~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:72:10: error: ‘sqlite3_exec’ was not declared in this scope
+   72 |     rc = sqlite3_exec(db, mmap_pragma.c_str(), nullptr, nullptr, nullptr);
+      |          ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:73:15: error: ‘SQLITE_OK’ was not declared in this scope
+   73 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:74:96: error: ‘sqlite3_errmsg’ was not declared in this scope
+   74 |         dout(1) << std::string("WARNING: ") +"Failed to enable memory mapping: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                                                ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘bool RAGDatabase::create_tables()’:
+/home/steve/src/shepherd/rag.cpp:92:5: error: ‘sqlite3’ was not declared in this scope
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:92:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:92:31: error: ‘sqlite3’ does not name a type
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:92:38: error: expected ‘>’ before ‘*’ token
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:92:38: error: expected ‘(’ before ‘*’ token
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:92:39: error: expected primary-expression before ‘>’ token
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:92:45: error: expected ‘)’ before ‘;’ token
+   92 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:106:14: error: ‘sqlite3_exec’ was not declared in this scope
+  106 |     int rc = sqlite3_exec(db, create_table_sql, nullptr, nullptr, &err_msg);
+      |              ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:107:15: error: ‘SQLITE_OK’ was not declared in this scope
+  107 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:109:9: error: ‘sqlite3_free’ was not declared in this scope
+  109 |         sqlite3_free(err_msg);
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:124:15: error: ‘SQLITE_OK’ was not declared in this scope
+  124 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:126:9: error: ‘sqlite3_free’ was not declared in this scope
+  126 |         sqlite3_free(err_msg);
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:151:15: error: ‘SQLITE_OK’ was not declared in this scope
+  151 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:153:9: error: ‘sqlite3_free’ was not declared in this scope
+  153 |         sqlite3_free(err_msg);
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:168:15: error: ‘SQLITE_OK’ was not declared in this scope
+  168 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:170:9: error: ‘sqlite3_free’ was not declared in this scope
+  170 |         sqlite3_free(err_msg);
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘void RAGDatabase::archive_turn(const ConversationTurn&)’:
+/home/steve/src/shepherd/rag.cpp:183:30: error: ‘SHA256_DIGEST_LENGTH’ was not declared in this scope
+  183 |     unsigned char hash_bytes[SHA256_DIGEST_LENGTH];
+      |                              ^~~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:184:89: error: ‘hash_bytes’ was not declared in this scope
+  184 |     SHA256(reinterpret_cast<const unsigned char*>(combined.c_str()), combined.length(), hash_bytes);
+      |                                                                                         ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:184:5: error: ‘SHA256’ was not declared in this scope
+  184 |     SHA256(reinterpret_cast<const unsigned char*>(combined.c_str()), combined.length(), hash_bytes);
+      |     ^~~~~~
+/home/steve/src/shepherd/rag.cpp:195:5: error: ‘sqlite3’ was not declared in this scope
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:195:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:195:31: error: ‘sqlite3’ does not name a type
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:195:38: error: expected ‘>’ before ‘*’ token
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:195:38: error: expected ‘(’ before ‘*’ token
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:195:39: error: expected primary-expression before ‘>’ token
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:195:45: error: expected ‘)’ before ‘;’ token
+  195 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:199:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  199 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:199:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  199 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:200:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  200 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:202:15: error: ‘SQLITE_OK’ was not declared in this scope
+  202 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:203:76: error: ‘sqlite3_errmsg’ was not declared in this scope
+  203 |         std::cerr << "Failed to prepare archive statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                            ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:207:63: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  207 |     sqlite3_bind_text(stmt, 1, turn.user_message.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                               ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:207:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  207 |     sqlite3_bind_text(stmt, 1, turn.user_message.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:209:5: error: ‘sqlite3_bind_int64’ was not declared in this scope
+  209 |     sqlite3_bind_int64(stmt, 3, turn.timestamp);
+      |     ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:212:10: error: ‘sqlite3_step’ was not declared in this scope
+  212 |     rc = sqlite3_step(stmt);
+      |          ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:213:15: error: ‘SQLITE_DONE’ was not declared in this scope
+  213 |     if (rc != SQLITE_DONE) {
+      |               ^~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:214:63: error: ‘sqlite3_errmsg’ was not declared in this scope
+  214 |         std::cerr << "Failed to archive turn: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                               ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:216:26: error: ‘sqlite3_last_insert_rowid’ was not declared in this scope
+  216 |         int64_t row_id = sqlite3_last_insert_rowid(db);
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:224:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  224 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘std::vector<SearchResult> RAGDatabase::search(const std::string&, int)’:
+/home/steve/src/shepherd/rag.cpp:233:5: error: ‘sqlite3’ was not declared in this scope
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:233:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:233:31: error: ‘sqlite3’ does not name a type
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:233:38: error: expected ‘>’ before ‘*’ token
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:233:38: error: expected ‘(’ before ‘*’ token
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:233:39: error: expected primary-expression before ‘>’ token
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:233:45: error: expected ‘)’ before ‘;’ token
+  233 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:292:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  292 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:292:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  292 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:293:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  293 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:295:15: error: ‘SQLITE_OK’ was not declared in this scope
+  295 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:296:75: error: ‘sqlite3_errmsg’ was not declared in this scope
+  296 |         std::cerr << "Failed to prepare search statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                           ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:300:55: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  300 |     sqlite3_bind_text(stmt, 1, fts_query.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                       ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:300:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  300 |     sqlite3_bind_text(stmt, 1, fts_query.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:301:5: error: ‘sqlite3_bind_int’ was not declared in this scope
+  301 |     sqlite3_bind_int(stmt, 2, max_results);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:303:18: error: ‘sqlite3_step’ was not declared in this scope
+  303 |     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      |                  ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:303:41: error: ‘SQLITE_ROW’ was not declared in this scope
+  303 |     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+      |                                         ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:304:62: error: ‘sqlite3_column_text’ was not declared in this scope
+  304 |         std::string user_msg = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+      |                                                              ^~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:306:29: error: ‘sqlite3_column_int64’ was not declared in this scope
+  306 |         int64_t timestamp = sqlite3_column_int64(stmt, 2);
+      |                             ^~~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:307:24: error: ‘sqlite3_column_double’ was not declared in this scope
+  307 |         double score = sqlite3_column_double(stmt, 3);
+      |                        ^~~~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:319:15: error: ‘SQLITE_DONE’ was not declared in this scope
+  319 |     if (rc != SQLITE_DONE) {
+      |               ^~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:320:60: error: ‘sqlite3_errmsg’ was not declared in this scope
+  320 |         std::cerr << "Search query failed: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                            ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:323:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  323 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘size_t RAGDatabase::get_archived_turn_count() const’:
+/home/steve/src/shepherd/rag.cpp:334:5: error: ‘sqlite3’ was not declared in this scope
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:334:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:334:31: error: ‘sqlite3’ does not name a type
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:334:38: error: expected ‘>’ before ‘*’ token
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:334:38: error: expected ‘(’ before ‘*’ token
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:334:39: error: expected primary-expression before ‘>’ token
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:334:45: error: expected ‘)’ before ‘;’ token
+  334 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:337:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  337 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:337:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  337 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:338:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  338 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:340:15: error: ‘SQLITE_OK’ was not declared in this scope
+  340 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:341:74: error: ‘sqlite3_errmsg’ was not declared in this scope
+  341 |         std::cerr << "Failed to prepare count statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                          ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:346:9: error: ‘sqlite3_step’ was not declared in this scope
+  346 |     if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:346:31: error: ‘SQLITE_ROW’ was not declared in this scope
+  346 |     if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |                               ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:347:17: error: ‘sqlite3_column_int64’ was not declared in this scope
+  347 |         count = sqlite3_column_int64(stmt, 0);
+      |                 ^~~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:350:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  350 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘bool RAGDatabase::clear_memory(const std::string&)’:
+/home/steve/src/shepherd/rag.cpp:373:5: error: ‘sqlite3’ was not declared in this scope
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:373:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:373:31: error: ‘sqlite3’ does not name a type
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:373:38: error: expected ‘>’ before ‘*’ token
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:373:38: error: expected ‘(’ before ‘*’ token
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:373:39: error: expected primary-expression before ‘>’ token
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:373:45: error: expected ‘)’ before ‘;’ token
+  373 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:378:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  378 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:378:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  378 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:379:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  379 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:381:15: error: ‘SQLITE_OK’ was not declared in this scope
+  381 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:382:81: error: ‘sqlite3_errmsg’ was not declared in this scope
+  382 |         std::cerr << "Failed to prepare clear_memory statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                                 ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:386:54: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  386 |     sqlite3_bind_text(stmt, 1, question.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                      ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:386:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  386 |     sqlite3_bind_text(stmt, 1, question.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:388:10: error: ‘sqlite3_step’ was not declared in this scope
+  388 |     rc = sqlite3_step(stmt);
+      |          ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:389:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  389 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:391:15: error: ‘SQLITE_DONE’ was not declared in this scope
+  391 |     if (rc != SQLITE_DONE) {
+      |               ^~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:392:63: error: ‘sqlite3_errmsg’ was not declared in this scope
+  392 |         std::cerr << "Failed to clear memory: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                               ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:396:19: error: ‘sqlite3_changes’ was not declared in this scope
+  396 |     int changes = sqlite3_changes(db);
+      |                   ^~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘void RAGDatabase::check_and_prune_if_needed()’:
+/home/steve/src/shepherd/rag.cpp:427:9: error: ‘sqlite3’ was not declared in this scope
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |         ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:427:18: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                  ^~
+      |                  db_
+/home/steve/src/shepherd/rag.cpp:427:35: error: ‘sqlite3’ does not name a type
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                   ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:427:42: error: expected ‘>’ before ‘*’ token
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                          ^
+/home/steve/src/shepherd/rag.cpp:427:42: error: expected ‘(’ before ‘*’ token
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                          ^
+      |                                          (
+/home/steve/src/shepherd/rag.cpp:427:43: error: expected primary-expression before ‘>’ token
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                           ^
+/home/steve/src/shepherd/rag.cpp:427:49: error: expected ‘)’ before ‘;’ token
+  427 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                                 ^
+      |                                                 )
+/home/steve/src/shepherd/rag.cpp:431:9: error: ‘sqlite3_stmt’ was not declared in this scope
+  431 |         sqlite3_stmt* stmt = nullptr;
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:431:23: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  431 |         sqlite3_stmt* stmt = nullptr;
+      |                       ^~~~
+      |                       tm
+/home/steve/src/shepherd/rag.cpp:432:9: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  432 |         sqlite3_prepare_v2(db, count_sql, -1, &stmt, nullptr);
+      |         ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:434:13: error: ‘sqlite3_step’ was not declared in this scope
+  434 |         if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |             ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:434:35: error: ‘SQLITE_ROW’ was not declared in this scope
+  434 |         if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |                                   ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:435:29: error: ‘sqlite3_column_int’ was not declared in this scope
+  435 |             total_entries = sqlite3_column_int(stmt, 0);
+      |                             ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:437:9: error: ‘sqlite3_finalize’ was not declared in this scope
+  437 |         sqlite3_finalize(stmt);
+      |         ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:450:22: error: ‘sqlite3_exec’ was not declared in this scope
+  450 |             int rc = sqlite3_exec(db, delete_sql.c_str(), nullptr, nullptr, &err_msg);
+      |                      ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:451:23: error: ‘SQLITE_OK’ was not declared in this scope
+  451 |             if (rc != SQLITE_OK) {
+      |                       ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:453:17: error: ‘sqlite3_free’ was not declared in this scope
+  453 |                 sqlite3_free(err_msg);
+      |                 ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:457:27: error: ‘sqlite3_changes’ was not declared in this scope
+  457 |             int deleted = sqlite3_changes(db);
+      |                           ^~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:464:23: error: ‘SQLITE_OK’ was not declared in this scope
+  464 |             if (rc != SQLITE_OK) {
+      |                       ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:466:17: error: ‘sqlite3_free’ was not declared in this scope
+  466 |                 sqlite3_free(err_msg);
+      |                 ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘void RAGDatabase::shutdown()’:
+/home/steve/src/shepherd/rag.cpp:493:9: error: ‘sqlite3’ was not declared in this scope
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |         ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:493:18: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                  ^~
+      |                  db_
+/home/steve/src/shepherd/rag.cpp:493:35: error: ‘sqlite3’ does not name a type
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                   ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:493:42: error: expected ‘>’ before ‘*’ token
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                          ^
+/home/steve/src/shepherd/rag.cpp:493:42: error: expected ‘(’ before ‘*’ token
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                          ^
+      |                                          (
+/home/steve/src/shepherd/rag.cpp:493:43: error: expected primary-expression before ‘>’ token
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                           ^
+/home/steve/src/shepherd/rag.cpp:493:49: error: expected ‘)’ before ‘;’ token
+  493 |         sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                                 ^
+      |                                                 )
+/home/steve/src/shepherd/rag.cpp:494:9: error: ‘sqlite3_close’ was not declared in this scope
+  494 |         sqlite3_close(db);
+      |         ^~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘void RAGDatabase::set_fact(const std::string&, const std::string&)’:
+/home/steve/src/shepherd/rag.cpp:504:5: error: ‘sqlite3’ was not declared in this scope
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:504:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:504:31: error: ‘sqlite3’ does not name a type
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:504:38: error: expected ‘>’ before ‘*’ token
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:504:38: error: expected ‘(’ before ‘*’ token
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:504:39: error: expected primary-expression before ‘>’ token
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:504:45: error: expected ‘)’ before ‘;’ token
+  504 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:516:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  516 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:516:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  516 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:517:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  517 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:519:15: error: ‘SQLITE_OK’ was not declared in this scope
+  519 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:520:77: error: ‘sqlite3_errmsg’ was not declared in this scope
+  520 |         std::cerr << "Failed to prepare set_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                             ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:524:49: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  524 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                 ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:524:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  524 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:527:5: error: ‘sqlite3_bind_int64’ was not declared in this scope
+  527 |     sqlite3_bind_int64(stmt, 4, now);
+      |     ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:530:10: error: ‘sqlite3_step’ was not declared in this scope
+  530 |     rc = sqlite3_step(stmt);
+      |          ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:531:15: error: ‘SQLITE_DONE’ was not declared in this scope
+  531 |     if (rc != SQLITE_DONE) {
+      |               ^~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:532:59: error: ‘sqlite3_errmsg’ was not declared in this scope
+  532 |         std::cerr << "Failed to set fact: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                           ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:537:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  537 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘std::string RAGDatabase::get_fact(const std::string&) const’:
+/home/steve/src/shepherd/rag.cpp:547:5: error: ‘sqlite3’ was not declared in this scope
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:547:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:547:31: error: ‘sqlite3’ does not name a type
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:547:38: error: expected ‘>’ before ‘*’ token
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:547:38: error: expected ‘(’ before ‘*’ token
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:547:39: error: expected primary-expression before ‘>’ token
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:547:45: error: expected ‘)’ before ‘;’ token
+  547 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:551:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  551 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:551:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  551 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:552:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  552 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:554:15: error: ‘SQLITE_OK’ was not declared in this scope
+  554 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:555:77: error: ‘sqlite3_errmsg’ was not declared in this scope
+  555 |         std::cerr << "Failed to prepare get_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                             ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:559:49: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  559 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                 ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:559:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  559 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:562:9: error: ‘sqlite3_step’ was not declared in this scope
+  562 |     if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |         ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:562:31: error: ‘SQLITE_ROW’ was not declared in this scope
+  562 |     if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |                               ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:563:47: error: ‘sqlite3_column_text’ was not declared in this scope
+  563 |         value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+      |                                               ^~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:565:9: error: ‘sqlite3_finalize’ was not declared in this scope
+  565 |         sqlite3_finalize(stmt);
+      |         ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:568:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  568 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:595:19: error: ‘SQLITE_OK’ was not declared in this scope
+  595 |         if (rc != SQLITE_OK) continue;
+      |                   ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:599:13: error: ‘sqlite3_step’ was not declared in this scope
+  599 |         if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |             ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:599:35: error: ‘SQLITE_ROW’ was not declared in this scope
+  599 |         if (sqlite3_step(stmt) == SQLITE_ROW) {
+      |                                   ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:600:51: error: ‘sqlite3_column_text’ was not declared in this scope
+  600 |             value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+      |                                                   ^~~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘bool RAGDatabase::has_fact(const std::string&) const’:
+/home/steve/src/shepherd/rag.cpp:617:5: error: ‘sqlite3’ was not declared in this scope
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:617:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:617:31: error: ‘sqlite3’ does not name a type
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:617:38: error: expected ‘>’ before ‘*’ token
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:617:38: error: expected ‘(’ before ‘*’ token
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:617:39: error: expected primary-expression before ‘>’ token
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:617:45: error: expected ‘)’ before ‘;’ token
+  617 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:620:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  620 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:620:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  620 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:621:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  621 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:623:15: error: ‘SQLITE_OK’ was not declared in this scope
+  623 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:624:77: error: ‘sqlite3_errmsg’ was not declared in this scope
+  624 |         std::cerr << "Failed to prepare has_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                             ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:628:49: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  628 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                 ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:628:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  628 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:630:20: error: ‘sqlite3_step’ was not declared in this scope
+  630 |     bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
+      |                    ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:630:42: error: ‘SQLITE_ROW’ was not declared in this scope
+  630 |     bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
+      |                                          ^~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:631:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  631 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp: In member function ‘bool RAGDatabase::clear_fact(const std::string&)’:
+/home/steve/src/shepherd/rag.cpp:642:5: error: ‘sqlite3’ was not declared in this scope
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |     ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:642:14: error: ‘db’ was not declared in this scope; did you mean ‘db_’?
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |              ^~
+      |              db_
+/home/steve/src/shepherd/rag.cpp:642:31: error: ‘sqlite3’ does not name a type
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                               ^~~~~~~
+/home/steve/src/shepherd/rag.cpp:642:38: error: expected ‘>’ before ‘*’ token
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+/home/steve/src/shepherd/rag.cpp:642:38: error: expected ‘(’ before ‘*’ token
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                      ^
+      |                                      (
+/home/steve/src/shepherd/rag.cpp:642:39: error: expected primary-expression before ‘>’ token
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                       ^
+/home/steve/src/shepherd/rag.cpp:642:45: error: expected ‘)’ before ‘;’ token
+  642 |     sqlite3* db = static_cast<sqlite3*>(db_);
+      |                                             ^
+      |                                             )
+/home/steve/src/shepherd/rag.cpp:645:5: error: ‘sqlite3_stmt’ was not declared in this scope
+  645 |     sqlite3_stmt* stmt = nullptr;
+      |     ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:645:19: error: ‘stmt’ was not declared in this scope; did you mean ‘tm’?
+  645 |     sqlite3_stmt* stmt = nullptr;
+      |                   ^~~~
+      |                   tm
+/home/steve/src/shepherd/rag.cpp:646:14: error: ‘sqlite3_prepare_v2’ was not declared in this scope
+  646 |     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+      |              ^~~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:648:15: error: ‘SQLITE_OK’ was not declared in this scope
+  648 |     if (rc != SQLITE_OK) {
+      |               ^~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:649:79: error: ‘sqlite3_errmsg’ was not declared in this scope
+  649 |         std::cerr << "Failed to prepare clear_fact statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                                               ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:653:49: error: ‘SQLITE_TRANSIENT’ was not declared in this scope
+  653 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |                                                 ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:653:5: error: ‘sqlite3_bind_text’ was not declared in this scope
+  653 |     sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+      |     ^~~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:655:10: error: ‘sqlite3_step’ was not declared in this scope
+  655 |     rc = sqlite3_step(stmt);
+      |          ^~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:656:5: error: ‘sqlite3_finalize’ was not declared in this scope
+  656 |     sqlite3_finalize(stmt);
+      |     ^~~~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:658:15: error: ‘SQLITE_DONE’ was not declared in this scope
+  658 |     if (rc != SQLITE_DONE) {
+      |               ^~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:659:61: error: ‘sqlite3_errmsg’ was not declared in this scope
+  659 |         std::cerr << "Failed to clear fact: " + std::string(sqlite3_errmsg(db)) << std::endl;
+      |                                                             ^~~~~~~~~~~~~~
+/home/steve/src/shepherd/rag.cpp:663:19: error: ‘sqlite3_changes’ was not declared in this scope
+  663 |     int changes = sqlite3_changes(db);
+      |                   ^~~~~~~~~~~~~~~
+make[3]: *** [CMakeFiles/shepherd.dir/build.make:160: CMakeFiles/shepherd.dir/rag.cpp.o] Error 1
+make[3]: Leaving directory '/home/steve/src/shepherd/build'
+make[2]: *** [CMakeFiles/Makefile2:119: CMakeFiles/shepherd.dir/all] Error 2
+make[2]: Leaving directory '/home/steve/src/shepherd/build'
+make[1]: *** [Makefile:156: all] Error 2
+make[1]: Leaving directory '/home/steve/src/shepherd/build'
+make: *** [Makefile:17: all] Error 2

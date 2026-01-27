@@ -20,9 +20,8 @@ using json = nlohmann::json;
 extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
-APIServer::APIServer(const std::string& host, int port, const std::string& auth_mode,
-                     bool, bool)
-    : Server(host, port, "api", auth_mode) {
+APIServer::APIServer(const std::string& host, int port, bool, bool)
+    : Server(host, port, "api") {
     // Set up the event callback - routes to request_handler when set
     callback = [this](CallbackEvent event, const std::string& content,
                       const std::string& name, const std::string& id) -> bool {
@@ -241,8 +240,8 @@ void APIServer::register_endpoints() {
     // Check if current provider is an API type (supports per-request backends)
     Provider* provider = get_provider(current_provider);
     if (provider && provider->is_api()) {
-        is_api_provider_ = true;
-        shared_oauth_cache_ = std::make_shared<SharedOAuthCache>();
+        is_api_provider = true;
+        shared_oauth_cache = std::make_shared<SharedOAuthCache>();
         dout(1) << "API provider detected - using per-request backends with shared OAuth cache" << std::endl;
     }
 
@@ -254,11 +253,8 @@ void APIServer::register_endpoints() {
         std::unique_ptr<Backend> request_backend;
         Backend* active_backend = nullptr;
 
-        // Optional lock - only needed for GPU backends (shared backend)
-        std::unique_ptr<std::lock_guard<std::mutex>> lock_guard;
-
-        if (is_api_provider_) {
-            // API provider - create per-request backend (no mutex needed)
+        if (is_api_provider) {
+            // API provider - create per-request backend
             dout(1) << "POST /v1/chat/completions - creating per-request backend" << std::endl;
             Provider* provider = get_provider(current_provider);
             if (provider) {
@@ -268,8 +264,8 @@ void APIServer::register_endpoints() {
                 if (request_backend) {
                     // Set shared OAuth cache on API backends
                     auto* api_backend = dynamic_cast<ApiBackend*>(request_backend.get());
-                    if (api_backend && shared_oauth_cache_) {
-                        api_backend->set_shared_oauth_cache(shared_oauth_cache_);
+                    if (api_backend && shared_oauth_cache) {
+                        api_backend->set_shared_oauth_cache(shared_oauth_cache);
                     }
                     active_backend = request_backend.get();
                 }
@@ -280,10 +276,8 @@ void APIServer::register_endpoints() {
                 return;
             }
         } else {
-            // GPU provider - use shared backend with mutex
-            dout(1) << "POST /v1/chat/completions - acquiring lock for GPU backend" << std::endl;
-            lock_guard = std::make_unique<std::lock_guard<std::mutex>>(backend_mutex);
-            dout(1) << "POST /v1/chat/completions - lock acquired" << std::endl;
+            // GPU provider - backend handles its own thread safety
+            dout(1) << "POST /v1/chat/completions - using GPU backend" << std::endl;
             active_backend = backend.get();
         }
 
@@ -496,17 +490,18 @@ void APIServer::register_endpoints() {
                 // Convert unique_ptr to shared_ptr for API providers (so lambda can own it)
                 // For GPU providers, use a non-owning shared_ptr to the shared backend
                 std::shared_ptr<Backend> stream_backend;
-                std::mutex* mutex_ptr = nullptr;
 
-                if (is_api_provider_ && request_backend) {
+                if (is_api_provider && request_backend) {
                     // API provider - transfer ownership to shared_ptr for lambda capture
                     stream_backend = std::move(request_backend);
-                    // No mutex needed - each request has its own backend
                 } else {
-                    // GPU provider - use shared backend with mutex
+                    // GPU provider - backend handles its own thread safety
                     stream_backend = std::shared_ptr<Backend>(backend.get(), [](Backend*){});  // Non-owning
-                    mutex_ptr = &backend_mutex;
                 }
+
+                // Acquire backend lock for GPU backends (serializes access to llama_decode)
+                // For API backends, returns nullptr (no lock needed)
+                auto backend_lock = active_backend->acquire_lock();
 
                 // Phase 1: Prefill BEFORE committing to streaming
                 // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
@@ -559,14 +554,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, mutex_ptr, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time](size_t offset, httplib::DataSink& sink) mutable {
-                        // Acquire lock for backend access only for GPU backends (shared backend)
-                        // API backends have their own per-request backend, no mutex needed
-                        std::unique_ptr<std::lock_guard<std::mutex>> stream_lock;
-                        if (mutex_ptr) {
-                            stream_lock = std::make_unique<std::lock_guard<std::mutex>>(*mutex_ptr);
-                        }
-
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -642,6 +630,21 @@ void APIServer::register_endpoints() {
 
                             dout(3) << "API callback received: type=" << static_cast<int>(type) << " content=[" << content.substr(0, 50) << "] len=" << content.length() << std::endl;
 
+                            // CODEBLOCK handling applies to ALL models (moved out of has_channels block)
+                            // The backend emits CODEBLOCK events when content is inside ```, but strips the ```
+                            // We need to add them back for SSE clients
+                            if (type == CallbackEvent::CODEBLOCK) {
+                                if (!in_code_block_for_sse) {
+                                    in_code_block_for_sse = true;
+                                    if (!send_content_chunk("```\n")) return false;
+                                }
+                                return send_content_chunk(content);
+                            } else if (in_code_block_for_sse) {
+                                // Close code block when switching to non-CODEBLOCK event
+                                in_code_block_for_sse = false;
+                                if (!send_content_chunk("```\n")) return false;
+                            }
+
                             // For channel-based models: backend's HarmonyParser separates
                             // reasoning (THINKING) from content (CONTENT). Backend only sends
                             // THINKING events when show_thinking is enabled.
@@ -662,22 +665,7 @@ void APIServer::register_endpoints() {
                                     if (!send_content_chunk("</think>\n")) return false;
                                 }
 
-                                // CODEBLOCK events need to be wrapped in ``` for SSE clients
-                                if (type == CallbackEvent::CODEBLOCK) {
-                                    // Track code block state to emit opening/closing ```
-                                    if (!in_code_block_for_sse) {
-                                        in_code_block_for_sse = true;
-                                        if (!send_content_chunk("```\n")) return false;
-                                    }
-                                    return send_content_chunk(content);
-                                } else {
-                                    // Close code block if we were in one
-                                    if (in_code_block_for_sse) {
-                                        in_code_block_for_sse = false;
-                                        if (!send_content_chunk("```\n")) return false;
-                                    }
-                                    return send_content_chunk(content);
-                                }
+                                return send_content_chunk(content);
                             }
 
                             // For non-channel models: use existing thinking block filter
@@ -879,6 +867,9 @@ void APIServer::register_endpoints() {
                 }
                 return true;
             };
+
+            // Acquire backend lock for GPU backends (serializes access to llama_decode)
+            auto backend_lock = active_backend->acquire_lock();
 
             try {
                 active_backend->generate_from_session(request_session, max_tokens);
@@ -1113,6 +1104,9 @@ void APIServer::register_endpoints() {
         }
     });
 
+    // Only register /v1/tools endpoints if server_tools is enabled
+    if (config->server_tools) {
+
     // GET /v1/tools - List available tools for MCP proxy
     tcp_server.Get("/v1/tools", [this](const httplib::Request& req, httplib::Response& res) {
         try {
@@ -1304,4 +1298,7 @@ void APIServer::register_endpoints() {
             res.set_content(create_error_response(500, e.what()).dump(), "application/json");
         }
     });
+
+    dout(1) << "Tools API endpoints enabled (/v1/tools, /v1/tools/execute)" << std::endl;
+    } // end if (config->server_tools)
 }

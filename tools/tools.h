@@ -83,3 +83,4 @@ public:
 #include "http_tools.h"
 #include "mcp_resource_tools.h"
 #include "core_tools.h"
+#include "remote_tools.h"

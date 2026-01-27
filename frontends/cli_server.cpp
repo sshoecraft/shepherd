@@ -73,14 +73,18 @@ void CliServerState::unregister_observer(ClientOutputs::StreamingOutput* observe
 }
 
 // CLIServer class implementation
-CLIServer::CLIServer(const std::string& host, int port, const std::string& auth_mode)
-    : Server(host, port, "cli", auth_mode) {
+CLIServer::CLIServer(const std::string& host, int port)
+    : Server(host, port, "cli") {
 }
 
 CLIServer::~CLIServer() {
 }
 
-void CLIServer::init(bool no_mcp, bool no_tools) {
+void CLIServer::init(bool no_mcp_flag, bool no_tools_flag) {
+    // Store flags for later use (e.g., fallback to local tools in register_endpoints)
+    no_mcp = no_mcp_flag;
+    no_tools = no_tools_flag;
+
     // Use common tool initialization from Frontend base class
     init_tools(no_mcp, no_tools);
 }
@@ -210,9 +214,13 @@ static void do_generation(CliServerState& state,
                 obs.on_tool_result(tool_name_arg, tool_result.success, tool_result.error);
             });
 
-            // Add tool result to session - triggers next generation cycle
-            state.session->add_message(
-                Message::TOOL_RESPONSE, tool_result.content, tool_name_arg, tool_call_id);
+            // Add tool result to session and generate next response
+            {
+                auto lock = state.backend->acquire_lock();
+                state.server->add_message_to_session(
+                    Message::TOOL_RESPONSE, tool_result.content, tool_name_arg, tool_call_id);
+                state.server->generate_response();
+            }
 
             return true;
         }
@@ -268,9 +276,13 @@ static void do_generation(CliServerState& state,
         return true;
     };
 
-    // Set callback and add user message (triggers generation)
+    // Set callback, add user message and generate
     state.backend->callback = callback;
-    state.session->add_message(Message::USER, prompt);
+    {
+        auto lock = state.backend->acquire_lock();
+        state.server->add_message_to_session(Message::USER, prompt);
+        state.server->generate_response();
+    }
 
     // Build Response from session's last message
     Response resp;
@@ -408,6 +420,17 @@ void CLIServer::on_server_stop() {
 }
 
 void CLIServer::register_endpoints() {
+    // If server_tools mode, fetch tools from server or fall back to local
+    if (config->server_tools && !no_tools) {
+        Provider* p = get_provider(current_provider);
+        if (p && !p->base_url.empty()) {
+            init_remote_tools(p->base_url, p->api_key);
+        } else {
+            std::cerr << "Warning: --server-tools requires an API provider with base_url, falling back to local tools" << std::endl;
+            init_tools(no_mcp, no_tools, true);  // force_local = true
+        }
+    }
+
     // Initialize state with backend, session, tools, and server pointer
     state.server = this;
     state.backend = backend.get();

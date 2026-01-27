@@ -340,21 +340,7 @@ Response CLIClientBackend::send_request(const std::string& prompt, EventCallback
     return resp;
 }
 
-void CLIClientBackend::add_message(Session& session,
-                                       Message::Role role,
-                                       const std::string& content,
-                                       const std::string& tool_name,
-                                       const std::string& tool_id,
-                                       int max_tokens) {
-    // Only handle USER messages - CLI server manages its own conversation
-    if (role != Message::USER) {
-        callback(CallbackEvent::STOP, "stop", "", "");
-        return;
-    }
-
-    // Send request - uses constructor callback for streaming
-    send_request(content, callback);
-}
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
 
 void CLIClientBackend::generate_from_session(Session& session, int max_tokens) {
     // Find the last user message

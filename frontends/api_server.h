@@ -18,11 +18,9 @@ public:
     /// @brief Construct API server
     /// @param host Host to bind to
     /// @param port Port to listen on
-    /// @param auth_mode Authentication mode: "none" or "json" (json requires valid API key)
     /// @param no_mcp If true, skip MCP tool initialization
     /// @param no_tools If true, skip all tool initialization
     APIServer(const std::string& host, int port,
-              const std::string& auth_mode = "none",
               bool no_mcp = false,
               bool no_tools = false);
     ~APIServer();
@@ -35,14 +33,11 @@ protected:
     void register_endpoints() override;
 
 private:
-    // Mutex to serialize backend requests (single-threaded processing for GPU backends)
-    std::mutex backend_mutex;
-
     // Shared OAuth cache for per-request API backends
-    std::shared_ptr<SharedOAuthCache> shared_oauth_cache_;
+    std::shared_ptr<SharedOAuthCache> shared_oauth_cache;
 
     // Flag indicating if current provider is an API backend (supports per-request backends)
-    bool is_api_provider_ = false;
+    bool is_api_provider = false;
 
     // Per-request output routing - set before generate, cleared after
     // The callback routes events through this function when set

@@ -193,7 +193,8 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
     }
 
     // Qwen 2.x/3.x: Has <|im_start|> and <|im_end|>
-    if (template_text.find("<|im_start|>") != std::string::npos &&
+    // HACK: Disabled for testing generic fallback - remove "false &&" to re-enable
+    if (false && template_text.find("<|im_start|>") != std::string::npos &&
         template_text.find("<|im_end|>") != std::string::npos) {
 
         // Check if it's Qwen3 or a derivative like MindLink

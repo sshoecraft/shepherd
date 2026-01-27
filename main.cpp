@@ -141,6 +141,7 @@ static void print_usage(int, char** argv) {
 	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
 	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
 	printf("	--pp N			   Pipeline parallelism size (llamacpp only, default: 1)\n");
+	printf("	--parallel N       Number of parallel sequences/slots (llamacpp only, placeholder)\n");
 	printf("	--n_batch N		   Logical batch size for prompt processing (llamacpp only, default: auto)\n");
 	printf("	--ubatch N		   Physical micro-batch size (llamacpp only, default: 512)\n");
 	printf("	--cache-type TYPE  KV cache data type: f16, f32, q8_0, q4_0 (llamacpp only, default: f16)\n");
@@ -699,6 +700,7 @@ int main(int argc, char** argv) {
 		bool flash_attn = false;
 		std::string model_draft;
 		int draft_max = -1;
+		int n_parallel = -1;        // -1 = not specified
 		float temperature = -1.0f;
 		float top_p = -1.0f;
 		int top_k = -1;
@@ -748,6 +750,7 @@ int main(int argc, char** argv) {
 		{"top-p", required_argument, 0, 1052},
 		{"top-k", required_argument, 0, 1053},
 		{"freq", required_argument, 0, 1054},
+		{"parallel", required_argument, 0, 1055},
 		{"thinking", no_argument, 0, 1031},
 		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
@@ -928,6 +931,13 @@ int main(int argc, char** argv) {
 				break;
 			case 1054: // --freq
 				override.freq_penalty = std::atof(optarg);
+				break;
+			case 1055: // --parallel
+				override.n_parallel = std::atoi(optarg);
+				if (override.n_parallel < 1) {
+					printf("Error: parallel must be at least 1\n");
+					return 1;
+				}
 				break;
 			case 1031: // --thinking
 				override.thinking = true;
@@ -1131,6 +1141,17 @@ int main(int argc, char** argv) {
 	if (override.freq_penalty >= 0.0f) {
 		config->json["penalty_freq"] = override.freq_penalty;
 	}
+	if (override.n_parallel != -1) {
+		config->json["n_parallel"] = override.n_parallel;
+	}
+
+	// Apply server settings from command line (these override config file values)
+	if (auth_mode != "none") {
+		config->auth_mode = auth_mode;
+	}
+	if (server_tools) {
+		config->server_tools = true;
+	}
 
 	// Validate configuration (skip model path check if overridden)
 	if (override.model.empty() && override.model_path.empty()) {
@@ -1229,7 +1250,7 @@ int main(int argc, char** argv) {
 		// Create and initialize frontend (loads providers, registers tools)
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
-		                                 cmdline_provider_ptr, no_mcp, no_tools, auth_mode, server_tools);
+		                                 cmdline_provider_ptr, no_mcp, no_tools);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

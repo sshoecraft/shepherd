@@ -365,22 +365,24 @@ ToolResult Tools::execute(const std::string& tool_name, const std::string& param
             summary = extract_string(result["summary"]);
         }
 
-        // Check for error
-        if (result.find("error") != result.end()) {
-            std::string error = extract_string(result["error"]);
-            if (!error.empty()) {
-                ToolResult r(false, "", error);
-                r.summary = summary.empty() ? error : summary;
-                return r;
-            }
-        }
-
-        // Extract content
+        // Extract content first (needed for both success and error cases)
         std::string content;
         if (result.find("content") != result.end()) {
             content = extract_string(result["content"]);
         } else if (result.find("output") != result.end()) {
             content = extract_string(result["output"]);
+        }
+
+        // Check for error - but still include full content so model can see details
+        if (result.find("error") != result.end()) {
+            std::string error = extract_string(result["error"]);
+            if (!error.empty()) {
+                // Use full content if available, otherwise fall back to error message
+                std::string full_content = content.empty() ? error : content;
+                ToolResult r(false, full_content, error);
+                r.summary = summary.empty() ? error : summary;
+                return r;
+            }
         }
 
         ToolResult r(true, content);

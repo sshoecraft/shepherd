@@ -44,8 +44,7 @@ int handle_ctl_args(const std::vector<std::string>& args);
 /// Manages HTTP server lifecycle, control socket, and common endpoints
 class Server : public Frontend {
 public:
-    Server(const std::string& host, int port, const std::string& server_type,
-           const std::string& auth_mode = "none");
+    Server(const std::string& host, int port, const std::string& server_type);
     virtual ~Server();
 
     /// @brief Run the server - starts TCP and control socket listeners

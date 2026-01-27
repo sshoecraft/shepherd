@@ -31,6 +31,8 @@ void GenericParser::reset() {
     state = State::NORMAL;
     in_tool_call = false;
     in_thinking = false;
+    in_code_block = false;
+    backtick_count = 0;
     json_brace_depth = 0;
 
     tag_buffer.clear();
@@ -52,29 +54,31 @@ bool GenericParser::process(const std::string& token) {
 }
 
 void GenericParser::process_char(char c) {
+    // Track backticks for code block detection (matches GpuBackend behavior)
+    if (c == '`') {
+        backtick_count++;
+        if (backtick_count >= 3) {
+            in_code_block = !in_code_block;
+            backtick_count = 0;
+        }
+        pending_content += c;
+        return;  // Don't process backticks further
+    }
+    backtick_count = 0;  // Reset on non-backtick
+
     switch (state) {
         case State::NORMAL:
-            if (c == '<') {
+            if (c == '<' && !in_code_block) {
                 tag_buffer = "<";
                 state = State::DETECTING_TAG;
-            } else if (c == '{') {
-                // Check if { is a tool call start marker
-                bool is_tool_marker = false;
-                for (const auto& marker : tool_start_markers) {
-                    if (marker == "{") {
-                        is_tool_marker = true;
-                        break;
-                    }
-                }
-                if (is_tool_marker) {
-                    in_tool_call = true;
-                    current_tag = "{";
-                    state = State::IN_TOOL_CALL;
-                    buffered_tool_call = "{";
-                    json_brace_depth = 1;
-                } else {
-                    pending_content += c;
-                }
+            } else if (c == '{' && !in_code_block) {
+                // Always detect { as potential JSON tool call (matches ToolParser::extract_json behavior)
+                // The emit_tool_call() will validate if it's actually a tool call
+                in_tool_call = true;
+                current_tag = "{";
+                state = State::IN_TOOL_CALL;
+                buffered_tool_call = "{";
+                json_brace_depth = 1;
             } else {
                 pending_content += c;
             }
@@ -272,10 +276,10 @@ void GenericParser::emit_tool_call() {
     }
 
     // Convert parameters to JSON string
+    // Prefer parsed parameters over raw_json because raw_json may contain the entire
+    // tool call structure ({"name": "...", "arguments": {...}}) not just the arguments
     std::string params_json;
-    if (!parsed->raw_json.empty()) {
-        params_json = parsed->raw_json;
-    } else if (!parsed->parameters.empty()) {
+    if (!parsed->parameters.empty()) {
         nlohmann::json j;
         for (const auto& [key, value] : parsed->parameters) {
             if (value.type() == typeid(std::string)) {
@@ -289,6 +293,8 @@ void GenericParser::emit_tool_call() {
             }
         }
         params_json = j.dump();
+    } else if (!parsed->raw_json.empty()) {
+        params_json = parsed->raw_json;
     } else {
         params_json = "{}";
     }

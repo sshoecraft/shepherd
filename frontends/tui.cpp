@@ -145,8 +145,9 @@ TUI::~TUI() {
 }
 
 // Frontend interface - initialize tools and ncurses
-void TUI::init(bool no_mcp, bool no_tools_flag) {
-    // Store tools flag
+void TUI::init(bool no_mcp_flag, bool no_tools_flag) {
+    // Store flags for later use (e.g., fallback to local tools)
+    no_mcp = no_mcp_flag;
     no_tools = no_tools_flag;
 
     // Set up the event callback for streaming output
@@ -1155,8 +1156,12 @@ bool TUI::output_callback(CallbackEvent type, const std::string& content,
             (result.success ? result.content.substr(0, 100) : result.error) : result.summary;
         show_tool_result(summary, result.success);
 
-        // Add tool result to session - triggers next generation cycle
-        session.add_message(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
+        // Add tool result to session and generate next response
+        {
+            auto lock = backend->acquire_lock();
+            add_message_to_session(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
+            generate_response();
+        }
         return true;
     }
 
@@ -1262,6 +1267,18 @@ int TUI::run(Provider* cmdline_provider) {
         callback(CallbackEvent::SYSTEM, "Failed to connect to provider '" + provider_to_use->name + "'\n", "", "");
         return 1;
     }
+
+    // If server_tools mode, fetch tools from server or fall back to local
+    if (config->server_tools && !no_tools) {
+        Provider* p = get_provider(current_provider);
+        if (p && !p->base_url.empty()) {
+            init_remote_tools(p->base_url, p->api_key);
+        } else {
+            callback(CallbackEvent::SYSTEM, "Warning: --server-tools requires an API provider with base_url, falling back to local tools\n", "", "");
+            init_tools(no_mcp, no_tools, true);  // force_local = true
+        }
+    }
+
     // Register other providers as tools (unless tools disabled)
     if (!no_tools) {
         register_provider_tools(tools, current_provider);
@@ -1292,7 +1309,7 @@ int TUI::run(Provider* cmdline_provider) {
 
     // Start generation thread AFTER backend is connected
     GenerationThread gen_thread;
-    gen_thread.init(&session);
+    gen_thread.init(this);  // Pass Frontend pointer for unified generation path
     gen_thread.start();
     g_generation_thread = &gen_thread;
 

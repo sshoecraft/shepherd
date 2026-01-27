@@ -183,8 +183,7 @@ int handle_ctl_args(const std::vector<std::string>& args) {
 }
 
 // Server base class implementation
-Server::Server(const std::string& host, int port, const std::string& server_type,
-               const std::string& auth_mode)
+Server::Server(const std::string& host, int port, const std::string& server_type)
     : Frontend(), host(host), port(port), server_type(server_type) {
     // Set control socket path based on port (allows multiple servers)
     // Prefer /var/tmp (persistent, user-writable) over /tmp
@@ -195,8 +194,8 @@ Server::Server(const std::string& host, int port, const std::string& server_type
         control_socket_path = "/tmp/" + socket_name;
     }
 
-    // Initialize API key authentication
-    key_store = KeyStore::create(auth_mode);
+    // Initialize API key authentication from config
+    key_store = KeyStore::create(config->auth_mode);
 
     // Default no-op callback - subclasses should set their own callback
     // in their constructor to properly handle events

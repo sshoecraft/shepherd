@@ -591,16 +591,18 @@ std::string OllamaBackend::get_api_endpoint() {
     return api_endpoint;
 }
 
-void OllamaBackend::add_message(Session& session,
+// NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
+#if 0
+void OllamaBackend::add_message_REMOVED(Session& session,
                                     Message::Role role,
                                     const std::string& content,
                                     const std::string& tool_name,
                                     const std::string& tool_id,
-                                    
+
                                     int max_tokens) {
     // If streaming disabled, use base class non-streaming implementation
     if (!config->streaming) {
-        ApiBackend::add_message(session, role, content, tool_name, tool_id, max_tokens); return;
+        /* removed */ return;
     }
 
     reset_output_state();
@@ -840,6 +842,7 @@ void OllamaBackend::add_message(Session& session,
     callback(CallbackEvent::ERROR, "Max retries reached", "error", "");
     callback(CallbackEvent::STOP, "error", "", "");
 }
+#endif
 
 size_t OllamaBackend::query_model_context_size(const std::string& model_name) {
     const size_t DEFAULT_CONTEXT_SIZE = 8192;  // Conservative default for Ollama models

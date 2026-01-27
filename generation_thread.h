@@ -12,6 +12,7 @@
 
 // Forward declarations
 class Session;
+class Frontend;
 
 // Event callback type for generation (same signature as Backend::EventCallback)
 using EventCallback = std::function<bool(CallbackEvent event,
@@ -36,8 +37,8 @@ public:
     GenerationThread();
     ~GenerationThread();
 
-    // Initialize with session pointer (backend accessed via session)
-    void init(Session* session);
+    // Initialize with frontend pointer (session/backend accessed via frontend)
+    void init(Frontend* frontend);
 
     // Start/stop the worker thread
     void start();
@@ -63,7 +64,7 @@ public:
 private:
     void worker_loop();
 
-    Session* session;
+    Frontend* frontend;
 
     std::thread worker;
     std::atomic<bool> running{false};

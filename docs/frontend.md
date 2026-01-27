@@ -55,6 +55,12 @@ public:
     bool connect_next_provider();
     bool connect_provider(const std::string& name);
 
+    // Unified message and generation handling (for CLI, TUI, CLIServer - NOT APIServer)
+    void add_message_to_session(Message::Role role, const std::string& content,
+                                const std::string& tool_name = "",
+                                const std::string& tool_call_id = "");
+    bool generate_response();
+
     // Tool execution (for CLI, TUI, CLIServer - NOT APIServer)
     ToolResult execute_tool(Tools& tools,
                            const std::string& tool_name,
@@ -260,29 +266,51 @@ int CLI::run(Provider* cmdline_provider) {
 }
 ```
 
-### CLI Run Loop
+## Unified Generation Flow
+
+All stateful frontends (CLI, TUI, CLIServer) use the same generation path:
 
 ```cpp
-int CLI::run(Provider* cmdline_provider) {
-    while (true) {
-        // 1. Get user input
-        std::string input = tio.read(">");
+// 1. Frontend adds user message to session
+add_message_to_session(Message::USER, input);
 
-        // 2. Handle slash commands
-        if (handle_slash_commands(input)) continue;
+// 2. Frontend calls generate_response()
+generate_response();
+```
 
-        // 3. Add message (triggers generation via backend)
-        session.add_message(Message::USER, input);
+### generate_response() internals
 
-        // 4. Handle tool calls if any
-        while (!backend->pending_tool_calls.empty()) {
-            auto& tc = backend->pending_tool_calls.front();
-            ToolResult result = execute_tool(tools, tc.name, tc.parameters, tc.tool_call_id);
-            session.add_message(Message::TOOL_RESPONSE, result.output, tc.name, tc.tool_call_id);
-            backend->pending_tool_calls.erase(backend->pending_tool_calls.begin());
-        }
-    }
-}
+The `Frontend::generate_response()` method handles:
+
+1. **Proactive eviction** - Checks if context is nearly full before generating
+2. **Callback wrapping** - Wraps the frontend's callback to:
+   - Accumulate content from CONTENT/THINKING/CODEBLOCK events
+   - Add assistant message to session on STOP (before TOOL_CALL callbacks fire)
+3. **Backend call** - Calls `backend->generate_from_session(session, max_tokens)`
+4. **Reactive eviction** - Handles ContextFullException by evicting and retrying
+
+The assistant message is added in the STOP callback (not after generate_from_session returns) because:
+- TOOL_CALL callbacks fire after STOP but before generate_from_session returns
+- TOOL_CALL handlers may call generate_response() recursively
+- This recursive call would clear backend state before the original call can use it
+
+### Tool Call Flow
+
+When the model requests a tool call:
+
+```
+generate_response() called
+    backend->generate_from_session()
+        ... generates response with tool call ...
+        record_tool_call()                    # Backend records tool call
+        callback(STOP)                        # Wrapper adds assistant message HERE
+        callback(TOOL_CALL)                   # Frontend handles tool execution
+            execute_tool()
+            add_message_to_session(TOOL_RESPONSE)
+            generate_response()               # Recursive call for follow-up
+                ... new generation ...
+    generate_from_session() returns
+generate_response() returns
 ```
 
 ## Files
@@ -295,6 +323,7 @@ int CLI::run(Provider* cmdline_provider) {
 
 ## Version History
 
+- **2.14.0** - Added unified `add_message_to_session()` and `generate_response()` methods; assistant messages now added in STOP callback to handle recursive tool call scenarios
 - **2.13.0** - Added init_tools() to eliminate CLI/CLIServer duplication
 - **2.6.0** - Added Frontend abstraction and factory pattern
 - **2.5.0** - Original CLI-only implementation

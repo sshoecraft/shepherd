@@ -31,7 +31,11 @@ Factory function `create_parser()` creates the appropriate parser based on model
 For non-harmony models (most LLMs). Handles:
 - Tool call detection (`<tool_call>`, JSON `{...}`, etc.)
 - Thinking tag extraction (`<think>`, `</think>`, etc.)
-- Code block awareness (don't parse tags inside ```)
+- Code block awareness (tracks ``` to avoid parsing inside code blocks)
+
+**JSON Tool Call Detection**: Always detects `{` as a potential tool call start (matching `ToolParser::extract_json()` behavior), regardless of whether `{` is in the configured markers. This ensures raw JSON tool calls like `{"name": "...", "arguments": {...}}` are detected even when models don't wrap them in XML.
+
+**Code Block Safety**: Tracks triple backticks to toggle `in_code_block` state. When inside a code block, both `<` and `{` are treated as literal content, preventing false tool call detection when models output example JSON or code.
 
 State machine ported from `GpuBackend::output()`.
 
@@ -72,6 +76,10 @@ auto tool_calls = parser->get_tool_calls();
 
 ## History
 
+- 2026-01-27: Fixed JSON tool call detection in GenericParser
+  - Always detect `{` as tool call start (matches ToolParser::extract_json behavior)
+  - Added code block tracking (backtick counting) to avoid false positives
+  - Models like Qwen that output raw JSON without XML wrappers now work correctly
 - 2026-01-10: Created parser abstraction to replace scattered harmony conditionals
   - Added abstract Parser base class
   - Ported GpuBackend::output() state machine to GenericParser

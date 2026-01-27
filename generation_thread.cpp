@@ -1,5 +1,6 @@
 #include "generation_thread.h"
 #include "session.h"
+#include "frontend.h"
 #include "shepherd.h"
 
 
@@ -7,15 +8,15 @@
 GenerationThread* g_generation_thread = nullptr;
 
 GenerationThread::GenerationThread()
-    : session(nullptr) {
+    : frontend(nullptr) {
 }
 
 GenerationThread::~GenerationThread() {
     stop();
 }
 
-void GenerationThread::init(Session* s) {
-    session = s;
+void GenerationThread::init(Frontend* f) {
+    frontend = f;
 }
 
 void GenerationThread::start() {
@@ -76,15 +77,14 @@ void GenerationThread::worker_loop() {
         dout(1) << "GenerationThread: starting generation, role=" + std::to_string(static_cast<int>(current_request.role)) << std::endl;
 
         try {
-            // Call session->add_message - all output flows through backend callback
-            // (CONTENT, TOOL_CALL, ERROR, STOP events)
-            session->add_message(
+            // Add message to session and generate response using unified Frontend path
+            frontend->add_message_to_session(
                 current_request.role,
                 current_request.content,
                 current_request.tool_name,
-                current_request.tool_id,
-                current_request.max_tokens
+                current_request.tool_id
             );
+            frontend->generate_response(current_request.max_tokens);
 
             dout(1) << "GenerationThread: generation complete" << std::endl;
 

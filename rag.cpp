@@ -4,6 +4,7 @@
 #include <thread>
 #include <mutex>
 
+#if 1
 #include <chrono>
 #include <filesystem>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <cctype>
 #include <cmath>
 #include <openssl/sha.h>
+#endif
 
 // ConversationTurn implementation
 ConversationTurn::ConversationTurn(const std::string& user, const std::string& assistant, int64_t ts)

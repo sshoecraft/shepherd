@@ -53,6 +53,8 @@ private:
     State state = State::NORMAL;
     bool in_tool_call = false;
     bool in_thinking = false;
+    bool in_code_block = false;      // Inside ``` code block
+    int backtick_count = 0;          // Consecutive backticks seen
     int json_brace_depth = 0;
 
     // Buffers

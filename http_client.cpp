@@ -542,6 +542,9 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
         response.error_message = "Request cancelled by user";
         response.status_code = 0;
         dout(1) << "HTTP POST (streaming cancellable) cancelled" << std::endl;
+    } else if (curl_result == CURLE_WRITE_ERROR && !callback_data.continue_streaming) {
+        // Callback requested abort - this is normal completion, not an error
+        dout(1) << "HTTP POST (streaming cancellable) completed (callback stopped)" << std::endl;
     } else if (curl_result != CURLE_OK) {
         response.error_message = curl_easy_strerror(curl_result);
         std::cerr << "HTTP POST (streaming cancellable) failed: " + response.error_message << std::endl;

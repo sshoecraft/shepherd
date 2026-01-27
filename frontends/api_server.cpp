@@ -36,7 +36,9 @@ APIServer::~APIServer() {
 }
 
 void APIServer::init(bool no_mcp, bool no_tools) {
-    init_tools(no_mcp, no_tools);
+    // API server always initializes local tools (force_local=true)
+    // even when server_tools is set, because it SERVES tools, not fetches them
+    init_tools(no_mcp, no_tools, true);
 }
 
 std::string APIServer::extract_bearer_token(const httplib::Request& req) const {

@@ -628,6 +628,7 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     request["messages"] = messages;
 
     // Add tools if present
+    dout(1) << "Session has " + std::to_string(session.tools.size()) + " tools" << std::endl;
     if (!session.tools.empty()) {
         nlohmann::json tools = nlohmann::json::array();
         for (const auto& tool : session.tools) {
@@ -768,7 +769,7 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
 
     dout(1) << "Built request with " + std::to_string(messages.size()) + " messages (session has " +
              std::to_string(session.messages.size()) + " messages" << std::endl;
-
+    dout(1) << "Session has " + std::to_string(session.tools.size()) + " tools" << std::endl;
 
     // Add tools if present
     if (!session.tools.empty()) {

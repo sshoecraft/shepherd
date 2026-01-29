@@ -1014,6 +1014,11 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Configuration error: %s\n", e.what());
 			return 1;
 		}
+
+		// Store vault name if provided (for --auth-mode msi without --config msi)
+		if (!keyvault_name.empty()) {
+			config->keyvault_name = keyvault_name;
+		}
 	}
 
 	// Determine if we need TUI mode

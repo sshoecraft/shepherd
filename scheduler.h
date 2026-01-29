@@ -54,6 +54,10 @@ public:
     void stop();
     bool is_running() const { return running; }
 
+    // Callback for when a schedule fires
+    using FireCallback = std::function<void(const std::string& prompt)>;
+    void set_fire_callback(FireCallback cb);
+
     // Cron utilities
     static bool parse_cron(const std::string& cron, CronExpr& expr);
     static bool matches_time(const CronExpr& expr, const std::tm& tm);
@@ -71,6 +75,7 @@ private:
     std::atomic<bool> running;
     mutable std::mutex mutex;
     std::string config_path;
+    FireCallback fire_callback;
 
     // SIGALRM handler (static for signal compatibility)
     static void alarm_handler(int sig);

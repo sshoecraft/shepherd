@@ -293,10 +293,12 @@ void Scheduler::start() {
     running = true;
 
     // Set up signal handler for SIGALRM
+    // Note: Don't use SA_RESTART - we want SIGALRM to interrupt blocking reads
+    // so the main loop can check for scheduled prompts
     struct sigaction sa;
     sa.sa_handler = alarm_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;  // Restart interrupted system calls
+    sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, nullptr);
 
     // Calculate seconds until next minute boundary + 1 second
@@ -332,6 +334,11 @@ void Scheduler::stop() {
     dout(1) << "Scheduler stopped" << std::endl;
 }
 
+void Scheduler::set_fire_callback(FireCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex);
+    fire_callback = std::move(cb);
+}
+
 void Scheduler::check_and_fire() {
     std::lock_guard<std::mutex> lock(mutex);
 
@@ -358,9 +365,11 @@ void Scheduler::check_and_fire() {
         if (matches_time(expr, tm_now)) {
             dout(1) << "Firing schedule: " + entry.name + " with prompt: " + entry.prompt.substr(0, 50) << std::endl;
 
-            // TODO: Need a way to inject scheduled prompts without TerminalIO
-            // tio.add_input(entry.prompt);
-            std::cerr << "[Scheduler] Would inject: " << entry.prompt.substr(0, 50) << "..." << std::endl;
+            if (fire_callback) {
+                fire_callback(entry.prompt);
+            } else {
+                dout(1) << "No fire callback set, prompt not injected" << std::endl;
+            }
 
             // Update last_run
             entry.last_run = current_iso_time();

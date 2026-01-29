@@ -76,6 +76,28 @@ private:
     std::map<std::string, ApiKeyEntry> keys;
 };
 
+/// @brief Azure Key Vault key store (--auth-mode msi)
+/// Retrieves API keys from Key Vault secret 'shepherd-keys' using Managed Identity
+class MsiKeyStore : public KeyStore {
+public:
+    /// @brief Create MsiKeyStore using vault name from config
+    MsiKeyStore();
+
+    bool validate_key(const std::string& key) override;
+    bool is_enabled() override;
+
+    /// @brief Get entry for a validated key
+    const ApiKeyEntry* get_entry(const std::string& key) const;
+
+private:
+    std::map<std::string, ApiKeyEntry> keys;
+    bool loaded = false;
+    std::string error_message;
+
+    /// @brief Load keys from Key Vault (lazy, on first use)
+    void ensure_loaded();
+};
+
 /// @brief Handle 'shepherd apikey' CLI subcommand
 /// @param args Arguments after "apikey"
 /// @param callback Output callback function

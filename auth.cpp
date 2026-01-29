@@ -1,7 +1,9 @@
 #include "auth.h"
 #include "config.h"
+#include "azure_msi.h"
 #include "nlohmann/json.hpp"
 
+#include <iostream>
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
@@ -23,8 +25,11 @@ std::unique_ptr<KeyStore> KeyStore::create(const std::string& mode) {
     if (mode == "json") {
         return std::make_unique<JsonKeyStore>();
     }
-    // Future: sqlite, vault, managed
-    throw std::runtime_error("Unknown auth mode: " + mode + " (valid: none, json)");
+    if (mode == "msi") {
+        return std::make_unique<MsiKeyStore>();
+    }
+    // Future: sqlite, vault
+    throw std::runtime_error("Unknown auth mode: " + mode + " (valid: none, json, msi)");
 }
 
 // =============================================================================
@@ -167,6 +172,92 @@ bool JsonKeyStore::is_enabled() {
 }
 
 const ApiKeyEntry* JsonKeyStore::get_entry(const std::string& key) const {
+    auto it = keys.find(key);
+    return (it != keys.end()) ? &it->second : nullptr;
+}
+
+// =============================================================================
+// MsiKeyStore implementation
+// =============================================================================
+
+extern std::unique_ptr<Config> config;  // Global config
+
+MsiKeyStore::MsiKeyStore() {
+    // Keys loaded lazily on first use
+}
+
+void MsiKeyStore::ensure_loaded() {
+    if (loaded) return;
+    loaded = true;
+
+    // Get vault name from config
+    if (!config || config->keyvault_name.empty()) {
+        error_message = "MsiKeyStore requires --config msi --kv <vault>";
+        std::cerr << "Auth error: " << error_message << std::endl;
+        return;
+    }
+
+    // Fetch keys from Key Vault
+    auto secret = azure::get_keyvault_secret(config->keyvault_name, "shepherd-keys");
+    if (!secret) {
+        error_message = "Failed to fetch 'shepherd-keys' from Key Vault";
+        std::cerr << "Auth error: " << error_message << std::endl;
+        return;
+    }
+
+    // Parse JSON (same format as local api_keys.json)
+    try {
+        json j = json::parse(*secret);
+
+        for (auto& [key, value] : j.items()) {
+            ApiKeyEntry entry;
+            entry.name = value.value("name", "");
+            entry.notes = value.value("notes", "");
+            entry.created = value.value("created", "");
+            entry.permissions = value.value("permissions", json::object());
+            keys[key] = entry;
+        }
+
+        std::cout << "Loaded " << keys.size() << " API keys from Key Vault" << std::endl;
+    } catch (const json::exception& e) {
+        error_message = "Failed to parse shepherd-keys JSON: " + std::string(e.what());
+        std::cerr << "Auth error: " << error_message << std::endl;
+    }
+}
+
+bool MsiKeyStore::validate_key(const std::string& key) {
+    ensure_loaded();
+
+    if (key.empty() || keys.empty()) {
+        return false;
+    }
+
+    // Constant-time comparison to prevent timing attacks
+    bool found = false;
+    for (const auto& [stored_key, entry] : keys) {
+        if (stored_key.length() != key.length()) {
+            continue;
+        }
+
+        int result = 0;
+        for (size_t i = 0; i < stored_key.length(); i++) {
+            result |= stored_key[i] ^ key[i];
+        }
+
+        if (result == 0) {
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+bool MsiKeyStore::is_enabled() {
+    ensure_loaded();
+    return !keys.empty();
+}
+
+const ApiKeyEntry* MsiKeyStore::get_entry(const std::string& key) const {
     auto it = keys.find(key);
     return (it != keys.end()) ? &it->second : nullptr;
 }

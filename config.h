@@ -84,6 +84,7 @@ public:
     // Config source mode
     enum class SourceMode { LOCAL_FILE, KEY_VAULT };
     SourceMode source_mode = SourceMode::LOCAL_FILE;
+    std::string keyvault_name;  // Azure Key Vault name (when source_mode == KEY_VAULT)
 
     // Check if config is read-only (Key Vault mode)
     bool is_read_only() const { return source_mode != SourceMode::LOCAL_FILE; }

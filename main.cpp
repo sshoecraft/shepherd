@@ -996,6 +996,7 @@ int main(int argc, char** argv) {
 		try {
 			config->load_from_json_string(*secret);
 			config->source_mode = Config::SourceMode::KEY_VAULT;
+			config->keyvault_name = keyvault_name;
 			dout(1) << "Loaded config from Key Vault (read-only mode)" << std::endl;
 		} catch (const ConfigError& e) {
 			fprintf(stderr, "Error parsing Key Vault config: %s\n", e.what());

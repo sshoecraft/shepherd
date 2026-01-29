@@ -448,6 +448,11 @@ This allows templates that use different access patterns:
 
 ## Version History
 
+- **2.22.1** - Fix undefined tools in format_system_message
+  - Fixed bug where `tools` variable was not set in Jinja context when empty
+  - Templates using `{%- if tools %}` without checking `tools is defined` would fail
+  - Now consistent with `format_conversation()` - always sets `tools` (except Llama 3.x)
+
 - **2.5.2** - Tool call value compatibility
   - Added `tool_call.name` at top level for templates that use it directly
   - Added `tool_call.arguments` as parsed minja object for templates that iterate over it

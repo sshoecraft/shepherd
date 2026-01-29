@@ -7,6 +7,7 @@
 #include "tools/tools.h"
 #include "tools/remote_tools.h"
 #include "tools/utf8_sanitizer.h"
+#include "tools/scheduler_tools.h"
 #include "rag.h"
 #include "mcp/mcp.h"
 #include "mcp/mcp_config.h"
@@ -181,6 +182,12 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
         return;
     }
 
+    // If CLI backend, skip local tool init - CLI backend gets tools from remote server
+    if (config->backend == "cli") {
+        dout(1) << "CLI backend: skipping local tool init (tools provided by server)" << std::endl;
+        return;
+    }
+
     // If server_tools mode, defer tool init until after provider connection
     // (unless force_local is set, which is used for fallback when provider has no base_url)
     if (config->server_tools && !force_local) {
@@ -198,6 +205,7 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
     register_memory_tools(tools);
     register_mcp_resource_tools(tools);
     register_core_tools(tools);
+    register_scheduler_tools(tools);
 
     // Initialize MCP servers (registers additional tools)
     if (!no_mcp) {
@@ -561,6 +569,10 @@ bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {
 
     // /clear - clear the session context
     if (cmd == "/clear") {
+        // Clear remote server session (if using CLI backend)
+        if (backend) {
+            backend->clear_session();
+        }
         session.clear();
         callback(CallbackEvent::SYSTEM, "Session cleared.\n", "", "");
         return true;

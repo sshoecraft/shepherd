@@ -338,6 +338,7 @@ Both clients are interacting with the same session. Client B sees everything Cli
 
 ## Version History
 
+- **2.22.3** - `/clear` in CLI client now clears server session via POST /clear
 - **2.13.0** - Unified EventCallback (no add_message_stream)
 - **2.7.0** - Added async request queuing
 - **2.6.1** - Added streaming support with SSE

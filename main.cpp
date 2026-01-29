@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "tools/tools.h"
 #include "tools/api_tools.h"
+#include "tools/scheduler_tools.h"
 #ifdef ENABLE_LLAMACPP
 #include "backends/llamacpp.h"  // Include before mcp.h to define json as ordered_json
 #endif
@@ -161,6 +162,7 @@ static void print_usage(int, char** argv) {
 	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
+	printf("	-e, --prompt TEXT  Initial user prompt (non-interactive single query)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
 	printf("	--apiserver		   Start HTTP API server mode (OpenAI-compatible)\n");
 	printf("	--server		   Alias for --apiserver\n");
@@ -599,6 +601,7 @@ int main(int argc, char** argv) {
 		register_memory_tools(tools);
 		register_mcp_resource_tools(tools);
 		register_core_tools(tools);
+		register_scheduler_tools(tools);
 
 		tools.build_all_tools();
 
@@ -696,6 +699,7 @@ int main(int argc, char** argv) {
 		std::string memory_db;
 		std::string models_file;
 		std::string system_prompt;
+		std::string initial_prompt;
 		std::string cache_type;
 		bool flash_attn = false;
 		std::string model_draft;
@@ -728,6 +732,7 @@ int main(int argc, char** argv) {
 		{"raw", no_argument, 0, 1043},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
+		{"prompt", required_argument, 0, 'e'},
 		{"template", required_argument, 0, 1006},
 		{"apiserver", no_argument, 0, 1015},
 		{"server", no_argument, 0, 1015},  // Alias for --apiserver
@@ -767,9 +772,9 @@ int main(int argc, char** argv) {
 	int opt;
 	int option_index = 0;
 #ifdef _DEBUG
-	while ((opt = getopt_long(argc, argv, "c:d::m:p:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:d::e:m:p:vh", long_options, &option_index)) != -1) {
 #else
-	while ((opt = getopt_long(argc, argv, "c:m:p:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:e:m:p:vh", long_options, &option_index)) != -1) {
 #endif
 		switch (opt) {
 			case 'c':
@@ -791,6 +796,9 @@ int main(int argc, char** argv) {
 				break;
 			case 'p':
 				override.provider = optarg;
+				break;
+			case 'e': // --prompt
+				override.initial_prompt = optarg;
 				break;
 			case 1018: // --model_path
 				override.model_path = optarg;
@@ -1081,6 +1089,9 @@ int main(int argc, char** argv) {
 	}
 	if (!override.system_prompt.empty()) {
 		config->system_message = override.system_prompt;
+	}
+	if (!override.initial_prompt.empty()) {
+		config->initial_prompt = override.initial_prompt;
 	}
 	if (override.context_size >= 0) {
 		config->context_size = override.context_size;

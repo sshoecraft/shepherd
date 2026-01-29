@@ -10,6 +10,11 @@
 #include <deque>
 #include <termios.h>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <atomic>
+#include <pthread.h>
 
 // Forward declaration
 typedef struct Replxx Replxx;
@@ -37,7 +42,6 @@ public:
     // Public state
     bool eof_received = false;
     bool generation_cancelled = false;
-    std::string last_submitted_input;  // For detecting other clients' messages
 
     // Escape key handling for cancellation
     bool check_escape_key();
@@ -51,10 +55,35 @@ public:
     bool no_tools = false;   // --notools flag
     bool no_mcp = false;     // --nomcp flag (for fallback to local tools)
 
-    // Piped input support
-    std::deque<std::string> piped_input_queue;
-    bool piped_eof = false;
+    // Unified input queue (receives from: input thread, scheduler, remote clients)
+    struct QueuedInput {
+        std::string text;
+        bool needs_echo;
+    };
+    std::deque<QueuedInput> input_queue;
+    std::mutex input_mutex;
+    std::condition_variable input_cv;
     void add_input(const std::string& input, bool needs_echo = false);
+    QueuedInput wait_for_input(int timeout_ms = -1);
+
+    // Input reader thread
+    std::thread input_thread;
+    pthread_t input_thread_id = 0;
+    std::atomic<bool> input_running{true};
+    std::atomic<bool> ready_for_input{true};  // False during generation
+    std::condition_variable ready_cv;
+    std::mutex ready_mutex;
+    void start_input_thread();
+    void stop_input_thread();
+    void input_reader_loop();
+    void pause_input();   // Call before generation
+    void resume_input();  // Call after generation
+    static void input_signal_handler(int sig);
+
+    // Pending scheduled prompts (injected via replxx at start of input cycle)
+    std::deque<std::string> scheduled_queue;
+    std::mutex scheduled_mutex;
+    void add_scheduled_prompt(const std::string& prompt);
 
     // Output helpers
     void write_colored(const std::string& text, CallbackEvent type);

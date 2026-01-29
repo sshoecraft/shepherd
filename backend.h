@@ -131,6 +131,11 @@ public:
     // Shutdown and cleanup resources (called before switching providers)
     virtual void shutdown() {}
 
+    /// @brief Clear session on remote server (CLI backend only)
+    /// Called when user issues /clear to reset remote conversation
+    /// Default no-op for local backends (session.clear() handles local state)
+    virtual void clear_session() {}
+
     /// @brief Acquire a lock for serialized backend access (GPU backends only)
     /// Returns nullptr for API backends (no locking needed)
     /// Returns a unique_lock for GPU backends (llama_decode not thread-safe)

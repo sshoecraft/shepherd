@@ -192,6 +192,23 @@ void CLIClientBackend::parse_backend_config() {
     }
 }
 
+void CLIClientBackend::clear_session() {
+    std::string endpoint = base_url + "/clear";
+    std::map<std::string, std::string> headers;
+    headers["Content-Type"] = "application/json";
+    if (!api_key.empty()) {
+        headers["Authorization"] = "Bearer " + api_key;
+    }
+
+    HttpResponse http_resp = http_client->post(endpoint, "{}", headers);
+
+    if (!http_resp.is_success()) {
+        dout(1) << "Failed to clear server session: " + http_resp.error_message << std::endl;
+    } else {
+        dout(1) << "Server session cleared" << std::endl;
+    }
+}
+
 void CLIClientBackend::sse_listener_thread() {
     dout(1) << "SSE listener thread started" << std::endl;
 

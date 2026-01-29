@@ -323,6 +323,7 @@ generate_response() returns
 
 ## Version History
 
+- **2.22.2** - Skip local tool init for CLI backend (tools provided by remote server)
 - **2.14.0** - Added unified `add_message_to_session()` and `generate_response()` methods; assistant messages now added in STOP callback to handle recursive tool call scenarios
 - **2.13.0** - Added init_tools() to eliminate CLI/CLIServer duplication
 - **2.6.0** - Added Frontend abstraction and factory pattern

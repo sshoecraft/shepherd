@@ -18,6 +18,8 @@ public:
 
     void generate_from_session(Session& session, int max_tokens = 0) override;
 
+    void clear_session() override;
+
     int count_message_tokens(Message::Role role,
                             const std::string& content,
                             const std::string& tool_name = "",

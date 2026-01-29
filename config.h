@@ -52,6 +52,7 @@ public:
 
     // Public configuration variables
     std::string system_message;
+    std::string initial_prompt;  // Initial user prompt from --prompt / -e
     std::string warmup_message;
     bool warmup;
     bool calibration;

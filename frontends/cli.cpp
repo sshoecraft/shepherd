@@ -1,6 +1,7 @@
 
 #include "cli.h"
 #include "shepherd.h"
+#include <cerrno>
 #include "tools/tool.h"
 #include "tools/utf8_sanitizer.h"
 #include "tools/filesystem_tools.h"
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/select.h>
+#include <csignal>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -176,12 +178,21 @@ void CLI::init(bool no_mcp_flag, bool no_tools_flag) {
             case CallbackEvent::SYSTEM:
                 write_colored(content, type);
                 break;
-            case CallbackEvent::USER_PROMPT:
-                // Display if it's from another client (not our own input)
-                if (content != last_submitted_input && content != "> " + last_submitted_input + "\n") {
-                    write_colored(content, type);
+            case CallbackEvent::USER_PROMPT: {
+                // Format with "> " prefix and newline (like TUI does)
+                std::string formatted;
+                std::istringstream stream(content);
+                std::string line;
+                while (std::getline(stream, line)) {
+                    if (!formatted.empty()) {
+                        formatted += "\n";
+                    }
+                    formatted += "> " + line;
                 }
+                formatted += "\n";
+                write_colored(formatted, type);
                 break;
+            }
             case CallbackEvent::STATS:
                 // Only show stats if enabled via --stats flag
                 if (config->stats) {
@@ -257,9 +268,16 @@ int CLI::run(Provider* cmdline_provider) {
     Scheduler scheduler;
     if (!g_disable_scheduler) {
         scheduler.load();
+        scheduler.set_fire_callback([this](const std::string& prompt) {
+            add_scheduled_prompt(prompt);
+        });
         scheduler.start();
         cli_debug(1, "Scheduler initialized with " + std::to_string(scheduler.list().size()) + " schedules");
     }
+
+    // Start input reader thread (handles replxx/stdin in background)
+    start_input_thread();
+    cli_debug(1, "Input thread started");
 
     // Handle warmup if configured
     if (config->warmup && !config->warmup_message.empty()) {
@@ -269,15 +287,27 @@ int CLI::run(Provider* cmdline_provider) {
         generate_response();
     }
 
-    // Main synchronous loop
+    // Handle initial prompt from --prompt / -e (single query mode)
+    if (!config->initial_prompt.empty()) {
+        cli_debug(1, "Processing initial prompt from --prompt");
+        callback(CallbackEvent::USER_PROMPT, config->initial_prompt, "", "");
+        auto lock = backend->acquire_lock();
+        add_message_to_session(Message::USER, config->initial_prompt);
+        generate_response();
+        // Exit after single query when using --prompt
+        stop_input_thread();
+        return 0;
+    }
+
+    // Main loop - wait for input from queue with timeout for scheduler polling
     while (true) {
-        // Poll scheduler
+        // Poll scheduler (prompts go to queue via add_input callback)
         if (!g_disable_scheduler) {
             scheduler.poll();
         }
 
-        // Read input (blocking)
-        std::string user_input = read_input("> ");
+        // Wait for input with 100ms timeout (allows scheduler polling)
+        auto queued = wait_for_input(100);
 
         // Check for EOF
         if (eof_received) {
@@ -285,10 +315,17 @@ int CLI::run(Provider* cmdline_provider) {
             break;
         }
 
-        // Skip empty input
-        if (user_input.empty()) {
+        // Skip empty input but resume input thread
+        if (queued.text.empty()) {
+            resume_input();
             continue;
         }
+
+        std::string user_input = queued.text;
+
+        // Display user prompt via callback (unified with TUI and CLI Server)
+        // All input sources now go through this path - replxx display is cleared first
+        callback(CallbackEvent::USER_PROMPT, user_input, "", "");
 
         // Handle exit commands
         if (user_input == "exit" || user_input == "quit") {
@@ -299,6 +336,7 @@ int CLI::run(Provider* cmdline_provider) {
         // Handle slash commands
         if (!user_input.empty() && user_input[0] == '/') {
             if (Frontend::handle_slash_commands(user_input, tools)) {
+                resume_input();
                 continue;
             }
         }
@@ -333,8 +371,8 @@ int CLI::run(Provider* cmdline_provider) {
         // immediately, and trigger recursive generation via session.add_message(TOOL_RESULT)
         cli_debug(1, "Submitting user message");
 
-        // Store our input so we can detect other clients' messages
-        last_submitted_input = user_input;
+        // Pause input thread during generation
+        pause_input();
 
         // Enter raw mode for escape key detection during generation
         generation_cancelled = false;
@@ -347,6 +385,9 @@ int CLI::run(Provider* cmdline_provider) {
         }
         exit_generation_mode();
 
+        // Resume input thread
+        resume_input();
+
         cli_debug(1, "tokens: " + std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
 
         // Show token count to stderr (only for GPU backends - API backends have their own display)
@@ -356,6 +397,9 @@ int CLI::run(Provider* cmdline_provider) {
     }
 
     // Cleanup
+    cli_debug(1, "Stopping input thread...");
+    stop_input_thread();
+
     if (!g_disable_scheduler) {
         scheduler.stop();
     }
@@ -498,50 +542,156 @@ void CLI::send_message(const std::string& message) {
 }
 
 void CLI::add_input(const std::string& input, bool needs_echo) {
-    piped_input_queue.push_back(input);
-    (void)needs_echo;  // Not used in synchronous mode
+    {
+        std::lock_guard<std::mutex> lock(input_mutex);
+        input_queue.push_back({input, needs_echo});
+    }
+    input_cv.notify_one();
+}
+
+void CLI::add_scheduled_prompt(const std::string& prompt) {
+    std::lock_guard<std::mutex> lock(scheduled_mutex);
+    scheduled_queue.push_back(prompt);
+    cli_debug(1, "Scheduled prompt queued: " + prompt.substr(0, 50));
+}
+
+CLI::QueuedInput CLI::wait_for_input(int timeout_ms) {
+    std::unique_lock<std::mutex> lock(input_mutex);
+    if (timeout_ms < 0) {
+        input_cv.wait(lock, [this] { return !input_queue.empty() || eof_received; });
+    } else {
+        input_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                         [this] { return !input_queue.empty() || eof_received; });
+    }
+    if (input_queue.empty()) return {"", false};
+    QueuedInput item = input_queue.front();
+    input_queue.pop_front();
+    return item;
+}
+
+// Signal handler for interrupting the input thread
+void CLI::input_signal_handler(int sig) {
+    (void)sig;  // Just interrupt the blocking read, nothing else needed
+}
+
+void CLI::start_input_thread() {
+    // Set up signal handler for thread interruption (no restart so reads get interrupted)
+    struct sigaction sa;
+    sa.sa_handler = input_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // Don't restart syscalls
+    sigaction(SIGUSR1, &sa, nullptr);
+
+    input_running = true;
+    input_thread = std::thread(&CLI::input_reader_loop, this);
+    input_thread_id = input_thread.native_handle();
+}
+
+void CLI::stop_input_thread() {
+    input_running = false;
+    ready_for_input = true;  // Unblock if waiting
+    ready_cv.notify_all();
+    if (input_thread_id != 0) {
+        pthread_kill(input_thread_id, SIGUSR1);  // Interrupt blocking read
+    }
+    if (input_thread.joinable()) {
+        input_thread.join();
+    }
+}
+
+void CLI::pause_input() {
+    ready_for_input = false;
+}
+
+void CLI::resume_input() {
+    ready_for_input = true;
+    ready_cv.notify_one();
+}
+
+void CLI::input_reader_loop() {
+    while (input_running) {
+        // Wait until ready for input (not during generation)
+        {
+            std::unique_lock<std::mutex> lock(ready_mutex);
+            ready_cv.wait(lock, [this] { return ready_for_input.load() || !input_running; });
+        }
+        if (!input_running) break;
+
+        std::string line;
+
+        if (interactive_mode && replxx) {
+            // Check for pending scheduled prompts before waiting for user input
+            std::string scheduled_prompt;
+            {
+                std::lock_guard<std::mutex> lock(scheduled_mutex);
+                if (!scheduled_queue.empty()) {
+                    scheduled_prompt = scheduled_queue.front();
+                    scheduled_queue.pop_front();
+                }
+            }
+
+            if (!scheduled_prompt.empty()) {
+                // Inject scheduled prompt via replxx emulated key presses
+                cli_debug(1, "Injecting scheduled prompt: " + scheduled_prompt.substr(0, 50));
+                for (char c : scheduled_prompt) {
+                    replxx_emulate_key_press(replxx, static_cast<unsigned int>(c));
+                }
+                replxx_emulate_key_press(replxx, REPLXX_KEY_ENTER);
+            }
+
+            const char* result = replxx_input(replxx, "> ");
+            if (result == nullptr) {
+                if (!input_running) break;  // Signaled to stop
+                if (errno == EINTR) continue;  // Signal interrupted, try again
+                // Real EOF
+                eof_received = true;
+                input_cv.notify_one();
+                break;
+            }
+            line = result;
+            // Clear the line replxx displayed so callback can redisplay uniformly
+            // \033[A = move up one line, \033[2K = clear line, \r = carriage return
+            std::cout << "\033[A\033[2K\r" << std::flush;
+            // Add to history in the input thread
+            replxx_history_add(replxx, result);
+            {
+                std::lock_guard<std::mutex> lock(input_mutex);
+                history.push_back(line);
+            }
+        } else {
+            // Non-interactive: check for scheduled prompts first
+            {
+                std::lock_guard<std::mutex> lock(scheduled_mutex);
+                if (!scheduled_queue.empty()) {
+                    line = scheduled_queue.front();
+                    scheduled_queue.pop_front();
+                    add_input(line, true);
+                    ready_for_input = false;
+                    continue;
+                }
+            }
+            // Read from stdin
+            if (!std::getline(std::cin, line)) {
+                if (!input_running) break;
+                if (errno == EINTR) continue;  // Signal interrupted, try again
+                eof_received = true;
+                input_cv.notify_one();
+                break;
+            }
+        }
+
+        add_input(line, true);  // Echo needed - we cleared replxx's display for uniform callback handling
+
+        // Pause ourselves - main loop will resume when ready for more input
+        ready_for_input = false;
+    }
 }
 
 std::string CLI::read_input(const std::string& prompt) {
-    // Check piped input queue first
-    if (!piped_input_queue.empty()) {
-        std::string input = piped_input_queue.front();
-        piped_input_queue.pop_front();
-        // Echo piped input
-        write_colored(prompt + input + "\n", CallbackEvent::USER_PROMPT);
-        return input;
-    }
-
-    // Check for piped EOF
-    if (piped_eof && piped_input_queue.empty()) {
-        eof_received = true;
-        return "";
-    }
-
-    if (interactive_mode && replxx) {
-        const char* line = replxx_input(replxx, prompt.c_str());
-        if (line == nullptr) {
-            eof_received = true;
-            return "";
-        }
-        std::string input = line;
-
-        // Add to history if non-empty
-        if (!input.empty()) {
-            replxx_history_add(replxx, input.c_str());
-            history.push_back(input);
-        }
-
-        return input;
-    } else {
-        // Non-interactive mode
-        std::string input;
-        if (!std::getline(std::cin, input)) {
-            eof_received = true;
-            return "";
-        }
-        return input;
-    }
+    // Legacy function - now just wraps wait_for_input for backwards compatibility
+    (void)prompt;  // Prompt is now shown by the input reader thread
+    auto queued = wait_for_input(-1);  // Block indefinitely
+    return queued.text;
 }
 
 void CLI::load_history() {

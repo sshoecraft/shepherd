@@ -328,27 +328,29 @@ std::string MinjaTemplate::format_system_message(const std::string& content, con
     context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(false));
 
-    // Add tools if present - use OpenAI format with type/function wrapper
-    // Most model templates expect this format (e.g., Mistral, GPT-OSS)
-    if (!tools.empty()) {
-        auto tools_array = minja::Value::array();
-        for (const auto& tool : tools) {
-            // Create the inner function object
-            auto func_obj = minja::Value::object();
-            func_obj.set("name", minja::Value(tool.name));
-            func_obj.set("description", minja::Value(tool.description));
+    // Add tools to context (always set, even if empty - some templates require it)
+    // Exception: Llama 3.x template checks "tools is not none", empty array triggers tool mode
+    auto tools_array = minja::Value::array();
+    for (const auto& tool : tools) {
+        // Create the inner function object
+        auto func_obj = minja::Value::object();
+        func_obj.set("name", minja::Value(tool.name));
+        func_obj.set("description", minja::Value(tool.description));
 
-            // Convert nlohmann::json to minja::Value by round-tripping through string
-            // This avoids the ambiguous json type conflict
-            func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
+        // Convert nlohmann::json to minja::Value by round-tripping through string
+        // This avoids the ambiguous json type conflict
+        func_obj.set("parameters", minja::Value(nlohmann::ordered_json::parse(tool.parameters.dump())));
 
-            // Wrap in OpenAI format: {"type": "function", "function": {...}}
-            auto tool_obj = minja::Value::object();
-            tool_obj.set("type", minja::Value("function"));
-            tool_obj.set("function", func_obj);
+        // Wrap in OpenAI format: {"type": "function", "function": {...}}
+        auto tool_obj = minja::Value::object();
+        tool_obj.set("type", minja::Value("function"));
+        tool_obj.set("function", func_obj);
 
-            tools_array.push_back(tool_obj);
-        }
+        tools_array.push_back(tool_obj);
+    }
+    // Skip setting empty tools for Llama 3.x (their template treats [] as "enable tool mode")
+    bool skip_empty_tools = (get_family() == ModelFamily::LLAMA_3_X && tools.empty());
+    if (!skip_empty_tools) {
         context->set("tools", tools_array);
         context->set("tools_in_user_message", minja::Value(false));
     }

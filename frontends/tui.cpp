@@ -614,7 +614,7 @@ bool TUI::run_once() {
                 input_cursor_pos = 0;
                 history_index = -1;
                 saved_input.clear();
-                user_input_queue.clear();
+                input_queue.clear();
                 refresh_needed = true;
             } else {
                 // Single ESC - cancel generation
@@ -847,7 +847,7 @@ void TUI::submit_input() {
     draw_status();
 
     // Queue input for processing by run() loop
-    user_input_queue.push_back({submitted, false});
+    input_queue.push_back({submitted, false});
     input_cv.notify_one();
 }
 
@@ -1082,21 +1082,21 @@ void TUI::disable_bracketed_paste() {
 void TUI::add_input(const std::string& input, bool needs_echo) {
     {
         std::lock_guard<std::mutex> lock(input_mutex);
-        user_input_queue.push_back({input, needs_echo});
+        input_queue.push_back({input, needs_echo});
     }
     input_cv.notify_one();
 }
 
 bool TUI::has_pending_input() {
     std::lock_guard<std::mutex> lock(input_mutex);
-    return !user_input_queue.empty();
+    return !input_queue.empty();
 }
 
 bool TUI::wait_for_input(int timeout_ms) {
     std::unique_lock<std::mutex> lock(input_mutex);
-    if (!user_input_queue.empty()) return true;
+    if (!input_queue.empty()) return true;
     return input_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                             [this]{ return !user_input_queue.empty() || piped_eof; });
+                             [this]{ return !input_queue.empty() || piped_eof; });
 }
 
 // ============================================================================
@@ -1303,6 +1303,9 @@ int TUI::run(Provider* cmdline_provider) {
     Scheduler scheduler;
     if (!g_disable_scheduler) {
         scheduler.load();
+        scheduler.set_fire_callback([this](const std::string& prompt) {
+            add_input(prompt, true);
+        });
         scheduler.start();
         tui_debug(1, "Scheduler initialized");
     }
@@ -1369,10 +1372,10 @@ int TUI::run(Provider* cmdline_provider) {
 
         if (!awaiting_generation && has_pending_input()) {
             std::lock_guard<std::mutex> lock(input_mutex);
-            if (user_input_queue.empty()) continue;
+            if (input_queue.empty()) continue;
 
-            auto item = user_input_queue.front();
-            user_input_queue.pop_front();
+            auto item = input_queue.front();
+            input_queue.pop_front();
             user_input = item.text;
 
             if (user_input == "exit" || user_input == "quit") {
@@ -1390,6 +1393,9 @@ int TUI::run(Provider* cmdline_provider) {
             mark_input_processing();
 
             tui_debug(1, "User input: " + user_input);
+
+            // Display user prompt via callback (unified with CLI and CLI Server)
+            callback(CallbackEvent::USER_PROMPT, user_input, "", "");
 
             GenerationRequest req;
             req.role = Message::USER;

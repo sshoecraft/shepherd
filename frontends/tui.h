@@ -94,7 +94,7 @@ public:
         std::string text;
         bool needs_echo;
     };
-    std::deque<QueuedInput> user_input_queue;
+    std::deque<QueuedInput> input_queue;
     std::condition_variable input_cv;
 
     // Input management

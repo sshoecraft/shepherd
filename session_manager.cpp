@@ -9,6 +9,7 @@
 #include "tools/memory_tools.h"
 #include "tools/mcp_resource_tools.h"
 #include "tools/core_tools.h"
+#include "tools/scheduler_tools.h"
 
 extern std::unique_ptr<Config> config;
 
@@ -106,6 +107,7 @@ std::unique_ptr<ManagedSession> SessionManager::create_session(
         register_memory_tools(*managed->tools);
         register_mcp_resource_tools(*managed->tools);
         register_core_tools(*managed->tools);
+        register_scheduler_tools(*managed->tools);
 
         // Note: MCP tools are initialized globally via MCP::instance()
         // For multi-tenant sessions, MCP tools would need special handling

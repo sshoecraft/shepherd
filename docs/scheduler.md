@@ -31,7 +31,7 @@ The scheduler module provides cron-like scheduling for LLM prompts. Scheduled pr
 - Uses SIGALRM signal instead of background thread
 - `alarm()` set to fire at each minute boundary + 1 second
 - Signal handler checks all enabled schedules against current time
-- Injects matching prompts into `tio.add_input()`
+- Injects matching prompts via callback to frontend's `add_input()`
 - Thread-safe access via mutex
 - No polling or sleep loops - efficient timer-based wakeup
 
@@ -110,14 +110,28 @@ Same commands available as slash commands within the CLI:
 
 ## Behavior
 
-- Scheduler only runs when CLI is active (not in server mode)
+- Scheduler runs in CLI, TUI, and CLI Server modes
 - Missed schedules (shepherd wasn't running) are skipped silently
 - `last_run` prevents double-firing within the same minute
 - Schedules persist across sessions
-- Scheduled prompts are injected into the input queue and processed after the next user input
+- Scheduled prompts are injected into the input queue and processed automatically
+
+## LLM Tools
+
+The model can manage schedules using these tools:
+
+| Tool | Description |
+|------|-------------|
+| `list_schedules` | List all scheduled prompts with their status |
+| `add_schedule` | Create a new scheduled prompt |
+| `remove_schedule` | Delete a schedule by name or ID |
+| `enable_schedule` | Enable a disabled schedule |
+| `disable_schedule` | Disable a schedule without removing it |
+| `get_schedule` | Get details of a specific schedule |
 
 ## Version History
 
 - **2.6.0** - Initial implementation of scheduler functionality
 - **2.6.1** - Added get_time and get_date tools
 - **2.7.0** - Replaced worker thread with SIGALRM-based timer
+- **2.22.0** - Implemented prompt injection via callback, added scheduler management tools, CLI Server support

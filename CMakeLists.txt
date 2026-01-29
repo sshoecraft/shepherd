@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.21.1
+    VERSION 2.22.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
@@ -63,6 +63,7 @@ set(SHEPHERD_SOURCES
     tools/json_tools.cpp
     tools/mcp_resource_tools.cpp
     tools/memory_tools.cpp
+    tools/scheduler_tools.cpp
     tools/tool.cpp
     tools/tools.cpp
     tools/tool_parser.cpp

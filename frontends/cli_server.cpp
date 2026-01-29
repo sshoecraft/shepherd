@@ -31,8 +31,10 @@ size_t CliServerState::queue_size() {
 
 std::string CliServerState::get_next_input() {
     std::unique_lock<std::mutex> lock(queue_mutex);
-    queue_cv.wait(lock, [this] { return !input_queue.empty() || !running; });
-    if (!running && input_queue.empty()) {
+    // Use timed wait to allow periodic scheduler polling
+    bool got_input = queue_cv.wait_for(lock, std::chrono::seconds(1),
+        [this] { return !input_queue.empty() || !running; });
+    if (!got_input || (!running && input_queue.empty())) {
         return "";
     }
     std::string prompt = input_queue.front();
@@ -370,13 +372,28 @@ void CLIServer::add_status_info(nlohmann::json& status) {
 }
 
 void CLIServer::on_server_start() {
+    // Initialize scheduler (unless disabled)
+    if (!g_disable_scheduler) {
+        scheduler.load();
+        scheduler.set_fire_callback([this](const std::string& prompt) {
+            state.add_input(prompt);
+        });
+        scheduler.start();
+        dout(1) << "CLI server scheduler initialized with " << scheduler.list().size() << " schedules" << std::endl;
+    }
+
     // Start background processing thread for async requests
     processor_thread = std::thread([this]() {
         dout(1) << "CLI server processor thread started" << std::endl;
         while (state.running) {
+            // Poll scheduler for timed prompts
+            if (!g_disable_scheduler) {
+                scheduler.poll();
+            }
+
             std::string prompt = state.get_next_input();
             if (prompt.empty()) {
-                continue;  // Shutdown or spurious wakeup
+                continue;  // Timeout, shutdown, or spurious wakeup
             }
 
             state.processing = true;
@@ -409,6 +426,10 @@ void CLIServer::on_shutdown() {
 }
 
 void CLIServer::on_server_stop() {
+    // Stop scheduler
+    if (!g_disable_scheduler) {
+        scheduler.stop();
+    }
 
     // Signal any in-flight generation to cancel
     g_generation_cancelled = true;

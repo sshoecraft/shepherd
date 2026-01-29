@@ -5,6 +5,7 @@
 #include "client_output.h"
 #include "../session.h"
 #include "../tools/tools.h"
+#include "../scheduler.h"
 #include <string>
 #include <memory>
 #include <deque>
@@ -89,6 +90,9 @@ private:
 
     // Processor thread for async requests
     std::thread processor_thread;
+
+    // Scheduler for timed prompts
+    Scheduler scheduler;
 
     // Flags for fallback to local tools
     bool no_tools = false;

@@ -5,7 +5,6 @@
 
 #include <sys/wait.h>
 #include <sys/select.h>
-#include <sys/prctl.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <cstring>
@@ -73,9 +72,6 @@ void MCPServer::start() {
 
     if (pid_ == 0) {
         // Child process
-        // Die when parent dies (Linux-specific)
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
-
         // Redirect stdin from pipe
         dup2(stdin_pipe[0], STDIN_FILENO);
         close(stdin_pipe[0]);

@@ -270,7 +270,18 @@ ToolResult Frontend::execute_tool(Tools& tools,
     double scale = calculate_truncation_scale(backend->context_size);
     int max_tool_result_tokens = (backend->context_size - reserved) * scale;
 
-    if (config->truncate_limit > 0 && config->truncate_limit < max_tool_result_tokens) {
+    // Check if this is a read tool requesting full file (limit=-1)
+    bool bypass_truncate_limit = false;
+    if (tool_name == "read") {
+        try {
+            auto params = nlohmann::json::parse(params_json);
+            if (params.contains("limit") && params["limit"].is_number() && params["limit"].get<int>() == -1) {
+                bypass_truncate_limit = true;
+            }
+        } catch (...) {}
+    }
+
+    if (!bypass_truncate_limit && config->truncate_limit > 0 && config->truncate_limit < max_tool_result_tokens) {
         max_tool_result_tokens = config->truncate_limit;
     }
 
@@ -373,7 +384,10 @@ bool Frontend::generate_response(int max_tokens) {
 
     // Proactive eviction: if auto_evict is enabled and we would exceed context
     if (session.auto_evict && backend->context_size > 0) {
-        size_t required = static_cast<size_t>(session.total_tokens + session.desired_completion_tokens);
+        // Use calculated max_tokens for eviction check (handles INT_MAX desired_completion_tokens)
+        int completion_reserve = (max_tokens > 0) ? max_tokens :
+            std::min(session.desired_completion_tokens, static_cast<int>(backend->context_size / 2));
+        size_t required = static_cast<size_t>(session.total_tokens) + completion_reserve;
         if (required > backend->context_size) {
             int tokens_over = static_cast<int>(required - backend->context_size);
             dout(1) << "Frontend::generate_response: proactive eviction needed, " +
@@ -461,9 +475,10 @@ bool Frontend::generate_response(int max_tokens) {
         // Reactive eviction: backend threw because context is full
         dout(1) << "Frontend::generate_response: ContextFullException caught, attempting reactive eviction" << std::endl;
 
-        // Calculate how many tokens to free
-        int tokens_over = session.total_tokens + session.desired_completion_tokens - backend->context_size;
-        if (tokens_over <= 0) tokens_over = session.desired_completion_tokens; // Free at least completion space
+        // Calculate how many tokens to free (cap desired_completion_tokens to avoid overflow with INT_MAX)
+        int completion_reserve = std::min(session.desired_completion_tokens, static_cast<int>(backend->context_size / 2));
+        int tokens_over = session.total_tokens + completion_reserve - backend->context_size;
+        if (tokens_over <= 0) tokens_over = completion_reserve; // Free at least completion space
 
         auto ranges = session.calculate_messages_to_evict(tokens_over);
         if (ranges.empty()) {

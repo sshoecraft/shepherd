@@ -53,6 +53,7 @@ public:
     // Public configuration variables
     std::string system_message;
     std::string initial_prompt;  // Initial user prompt from --prompt / -e
+    bool single_query_mode;      // True when --prompt was specified (even if empty)
     std::string warmup_message;
     bool warmup;
     bool calibration;
@@ -65,6 +66,7 @@ public:
     std::string web_search_api_key;
     std::string web_search_instance_url;
     int truncate_limit;
+    int max_tokens;       // Max generation tokens: -1=max, 0=auto, >0=explicit
     bool streaming;
     bool thinking;        // Show thinking/reasoning blocks in output
     bool stats;           // Show performance stats (prefill/decode speed, KV cache)
@@ -98,6 +100,14 @@ public:
     std::string key;
     std::string api_base;
     std::string models_file;
+
+    // Sampling parameter overrides from command line (-1 = not overridden)
+    float temperature_override = -1.0f;
+    float top_p_override = -1.0f;
+    int top_k_override = -1;
+    float repeat_penalty_override = -1.0f;
+    float frequency_penalty_override = -1.0f;
+    float presence_penalty_override = -1.0f;
 
 private:
     // Internal helpers

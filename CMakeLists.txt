@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.22.4
+    VERSION 2.25.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
@@ -17,6 +17,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
 option(ENABLE_LLAMACPP "Enable llama.cpp backend" ON)
 option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
+option(ENABLE_POSTGRESQL "Enable PostgreSQL RAG backend" OFF)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
@@ -24,6 +25,11 @@ find_package(OpenSSL REQUIRED)
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(NCURSES REQUIRED ncursesw)
+
+# PostgreSQL (optional)
+if(ENABLE_POSTGRESQL)
+    pkg_check_modules(LIBPQ REQUIRED libpq)
+endif()
 
 # Core source files (from current Makefile)
 set(SHEPHERD_SOURCES
@@ -35,6 +41,8 @@ set(SHEPHERD_SOURCES
     generation_thread.cpp
     http_client.cpp
     rag.cpp
+    rag/database_factory.cpp
+    rag/sqlite_backend.cpp
     sse_parser.cpp
     scheduler.cpp
     frontend.cpp
@@ -229,6 +237,15 @@ target_link_libraries(shepherd PRIVATE
     dl
     ${NCURSES_LIBRARIES}
 )
+
+# PostgreSQL backend (optional)
+if(ENABLE_POSTGRESQL)
+    target_sources(shepherd PRIVATE rag/postgresql_backend.cpp)
+    target_include_directories(shepherd PRIVATE ${LIBPQ_INCLUDE_DIRS})
+    target_link_libraries(shepherd PRIVATE ${LIBPQ_LIBRARIES})
+    target_compile_definitions(shepherd PRIVATE ENABLE_POSTGRESQL)
+    message(STATUS "PostgreSQL RAG backend enabled")
+endif()
 
 # TensorRT-LLM library from pip installation
 if(ENABLE_TENSORRT)

@@ -700,11 +700,13 @@ int main(int argc, char** argv) {
 		std::string models_file;
 		std::string system_prompt;
 		std::string initial_prompt;
+		bool single_query_mode = false;
 		std::string cache_type;
 		bool flash_attn = false;
 		std::string model_draft;
 		int draft_max = -1;
 		int n_parallel = -1;        // -1 = not specified
+		int max_tokens = -2;        // -2 = not specified, -1 = max, 0 = auto, >0 = explicit
 		float temperature = -1.0f;
 		float top_p = -1.0f;
 		int top_k = -1;
@@ -756,6 +758,7 @@ int main(int argc, char** argv) {
 		{"top-k", required_argument, 0, 1053},
 		{"freq", required_argument, 0, 1054},
 		{"parallel", required_argument, 0, 1055},
+		{"max-tokens", required_argument, 0, 1056},
 		{"thinking", no_argument, 0, 1031},
 		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
@@ -798,7 +801,8 @@ int main(int argc, char** argv) {
 				override.provider = optarg;
 				break;
 			case 'e': // --prompt
-				override.initial_prompt = optarg;
+				override.initial_prompt = optarg ? optarg : "";
+				override.single_query_mode = true;
 				break;
 			case 1018: // --model_path
 				override.model_path = optarg;
@@ -947,6 +951,14 @@ int main(int argc, char** argv) {
 					return 1;
 				}
 				break;
+			case 1056: // --max-tokens
+				override.max_tokens = std::atoi(optarg);
+				// -1 = max possible, 0 = auto, >0 = explicit value
+				if (override.max_tokens < -1) {
+					printf("Error: max-tokens must be -1 (max), 0 (auto), or a positive number\n");
+					return 1;
+				}
+				break;
 			case 1031: // --thinking
 				override.thinking = true;
 				break;
@@ -1090,7 +1102,8 @@ int main(int argc, char** argv) {
 	if (!override.system_prompt.empty()) {
 		config->system_message = override.system_prompt;
 	}
-	if (!override.initial_prompt.empty()) {
+	if (override.single_query_mode) {
+		config->single_query_mode = true;
 		config->initial_prompt = override.initial_prompt;
 	}
 	if (override.context_size >= 0) {
@@ -1098,6 +1111,9 @@ int main(int argc, char** argv) {
 	}
 	if (override.truncate_limit > 0) {
 		config->truncate_limit = override.truncate_limit;
+	}
+	if (override.max_tokens != -2) {  // -2 in override means not set; -1=max, 0=auto, >0=explicit
+		config->max_tokens = override.max_tokens;
 	}
 	if (override.warmup) {
 		config->warmup = true;
@@ -1148,15 +1164,19 @@ int main(int argc, char** argv) {
 	}
 	if (override.temperature >= 0.0f) {
 		config->json["temperature"] = override.temperature;
+		config->temperature_override = override.temperature;
 	}
 	if (override.top_p >= 0.0f) {
 		config->json["top_p"] = override.top_p;
+		config->top_p_override = override.top_p;
 	}
 	if (override.top_k >= 0) {
 		config->json["top_k"] = override.top_k;
+		config->top_k_override = override.top_k;
 	}
 	if (override.freq_penalty >= 0.0f) {
 		config->json["penalty_freq"] = override.freq_penalty;
+		config->frequency_penalty_override = override.freq_penalty;
 	}
 	if (override.n_parallel != -1) {
 		config->json["n_parallel"] = override.n_parallel;

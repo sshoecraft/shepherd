@@ -2,6 +2,7 @@
 #include "cli.h"
 #include "shepherd.h"
 #include <cerrno>
+#include <climits>
 #include "tools/tool.h"
 #include "tools/utf8_sanitizer.h"
 #include "tools/filesystem_tools.h"
@@ -260,8 +261,17 @@ int CLI::run(Provider* cmdline_provider) {
     }
 
     // Configure session based on backend capabilities
-    session.desired_completion_tokens = calculate_desired_completion_tokens(
-        backend->context_size, backend->max_output_tokens);
+    if (config->max_tokens == -1) {
+        // -1 = max possible: no cap on completion tokens (use all available)
+        session.desired_completion_tokens = INT_MAX;
+    } else if (config->max_tokens > 0) {
+        // Explicit value
+        session.desired_completion_tokens = config->max_tokens;
+    } else {
+        // 0 = auto: calculate based on context size
+        session.desired_completion_tokens = calculate_desired_completion_tokens(
+            backend->context_size, backend->max_output_tokens);
+    }
     session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
 
     // Initialize scheduler (unless disabled)
@@ -275,10 +285,6 @@ int CLI::run(Provider* cmdline_provider) {
         cli_debug(1, "Scheduler initialized with " + std::to_string(scheduler.list().size()) + " schedules");
     }
 
-    // Start input reader thread (handles replxx/stdin in background)
-    start_input_thread();
-    cli_debug(1, "Input thread started");
-
     // Handle warmup if configured
     if (config->warmup && !config->warmup_message.empty()) {
         cli_debug(1, "Running warmup message...");
@@ -288,15 +294,18 @@ int CLI::run(Provider* cmdline_provider) {
     }
 
     // Handle initial prompt from --prompt / -e (single query mode)
-    if (!config->initial_prompt.empty()) {
-        cli_debug(1, "Processing initial prompt from --prompt");
-        callback(CallbackEvent::USER_PROMPT, config->initial_prompt, "", "");
-        auto lock = backend->acquire_lock();
-        add_message_to_session(Message::USER, config->initial_prompt);
-        generate_response();
-        // Exit after single query when using --prompt
-        stop_input_thread();
-        return 0;
+    // Don't start input thread - we inject prompt directly and exit after response
+    if (config->single_query_mode) {
+        if (config->initial_prompt.empty()) {
+            // Empty prompt - just exit silently
+            return 0;
+        }
+        cli_debug(1, "Injecting initial prompt from --prompt into input queue");
+        add_input(config->initial_prompt, false);
+    } else {
+        // Start input reader thread (handles replxx/stdin in background)
+        start_input_thread();
+        cli_debug(1, "Input thread started");
     }
 
     // Main loop - wait for input from queue with timeout for scheduler polling
@@ -324,8 +333,10 @@ int CLI::run(Provider* cmdline_provider) {
         std::string user_input = queued.text;
 
         // Display user prompt via callback (unified with TUI and CLI Server)
-        // All input sources now go through this path - replxx display is cleared first
-        callback(CallbackEvent::USER_PROMPT, user_input, "", "");
+        // Only echo in interactive mode - piped input is already visible in terminal
+        if (interactive_mode) {
+            callback(CallbackEvent::USER_PROMPT, user_input, "", "");
+        }
 
         // Handle exit commands
         if (user_input == "exit" || user_input == "quit") {
@@ -336,6 +347,11 @@ int CLI::run(Provider* cmdline_provider) {
         // Handle slash commands
         if (!user_input.empty() && user_input[0] == '/') {
             if (Frontend::handle_slash_commands(user_input, tools)) {
+                // In single query mode, exit after handling slash command
+                if (config->single_query_mode) {
+                    cli_debug(1, "Single query mode - exiting after slash command");
+                    break;
+                }
                 resume_input();
                 continue;
             }
@@ -385,7 +401,13 @@ int CLI::run(Provider* cmdline_provider) {
         }
         exit_generation_mode();
 
-        // Resume input thread
+        // Exit after response completes in single query mode (--prompt)
+        if (config->single_query_mode) {
+            cli_debug(1, "Single query mode - exiting after response");
+            break;
+        }
+
+        // Resume input thread (only if not exiting)
         resume_input();
 
         cli_debug(1, "tokens: " + std::to_string(session.total_tokens) + "/" + std::to_string(backend->context_size));
@@ -397,8 +419,10 @@ int CLI::run(Provider* cmdline_provider) {
     }
 
     // Cleanup
-    cli_debug(1, "Stopping input thread...");
-    stop_input_thread();
+    if (!config->single_query_mode) {
+        cli_debug(1, "Stopping input thread...");
+        stop_input_thread();
+    }
 
     if (!g_disable_scheduler) {
         scheduler.stop();

@@ -1,6 +1,7 @@
 #include "shepherd.h"
 #include "server.h"
 #include "nlohmann/json.hpp"
+#include <climits>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -442,8 +443,17 @@ int Server::run(Provider* cmdline_provider) {
     }
 
     // Configure session based on backend capabilities
-    session.desired_completion_tokens = calculate_desired_completion_tokens(
-        backend->context_size, backend->max_output_tokens);
+    if (config->max_tokens == -1) {
+        // -1 = max possible: no cap on completion tokens (use all available)
+        session.desired_completion_tokens = INT_MAX;
+    } else if (config->max_tokens > 0) {
+        // Explicit value
+        session.desired_completion_tokens = config->max_tokens;
+    } else {
+        // 0 = auto: calculate based on context size
+        session.desired_completion_tokens = calculate_desired_completion_tokens(
+            backend->context_size, backend->max_output_tokens);
+    }
     // Server mode: never auto-evict - return error to client instead
     session.auto_evict = false;
 

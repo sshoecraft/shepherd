@@ -362,12 +362,13 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
     if (is_api()) {
         config->key = api_key;
         config->api_base = base_url;
-        config->json["temperature"] = temperature;
-        config->json["top_p"] = top_p;
-        if (top_k > 0) config->json["top_k"] = top_k;
-        config->json["repeat_penalty"] = repeat_penalty;
-        config->json["frequency_penalty"] = frequency_penalty;
-        config->json["presence_penalty"] = presence_penalty;
+        // Only set sampling params if not overridden from command line
+        if (config->temperature_override < 0) config->json["temperature"] = temperature;
+        if (config->top_p_override < 0) config->json["top_p"] = top_p;
+        if (config->top_k_override < 0 && top_k > 0) config->json["top_k"] = top_k;
+        if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
+        if (config->frequency_penalty_override < 0) config->json["frequency_penalty"] = frequency_penalty;
+        if (config->presence_penalty_override < 0) config->json["presence_penalty"] = presence_penalty;
         if (max_tokens > 0) config->json["max_tokens"] = max_tokens;
         config->json["ssl_verify"] = ssl_verify;
         if (!ca_bundle_path.empty()) config->json["ca_bundle_path"] = ca_bundle_path;
@@ -384,10 +385,10 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         config->json["tp"] = tp;
         config->json["pp"] = pp;
         config->json["gpu_layers"] = gpu_layers;
-        config->json["temperature"] = temperature;
-        config->json["top_p"] = top_p;
-        config->json["top_k"] = top_k;
-        config->json["repeat_penalty"] = repeat_penalty;
+        if (config->temperature_override < 0) config->json["temperature"] = temperature;
+        if (config->top_p_override < 0) config->json["top_p"] = top_p;
+        if (config->top_k_override < 0) config->json["top_k"] = top_k;
+        if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
         config->json["n_batch"] = n_batch;
         config->json["ubatch"] = ubatch;
         config->json["cache_type"] = cache_type;
@@ -397,17 +398,17 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         config->json["tp"] = tp;
         config->json["pp"] = pp;
         config->json["gpu_id"] = gpu_id;
-        config->json["temperature"] = temperature;
-        config->json["top_p"] = top_p;
-        config->json["top_k"] = top_k;
-        config->json["repeat_penalty"] = repeat_penalty;
-        config->json["frequency_penalty"] = frequency_penalty;
-        config->json["presence_penalty"] = presence_penalty;
+        if (config->temperature_override < 0) config->json["temperature"] = temperature;
+        if (config->top_p_override < 0) config->json["top_p"] = top_p;
+        if (config->top_k_override < 0) config->json["top_k"] = top_k;
+        if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
+        if (config->frequency_penalty_override < 0) config->json["frequency_penalty"] = frequency_penalty;
+        if (config->presence_penalty_override < 0) config->json["presence_penalty"] = presence_penalty;
     } else if (type == "ollama") {
         config->api_base = base_url.empty() ? "http://localhost:11434" : base_url;
-        config->json["temperature"] = temperature;
-        config->json["top_p"] = top_p;
-        config->json["top_k"] = top_k;
+        if (config->temperature_override < 0) config->json["temperature"] = temperature;
+        if (config->top_p_override < 0) config->json["top_p"] = top_p;
+        if (config->top_k_override < 0) config->json["top_k"] = top_k;
         config->json["repeat_penalty"] = repeat_penalty;
         if (num_ctx > 0) config->json["num_ctx"] = num_ctx;
         if (num_predict != -1) config->json["num_predict"] = num_predict;

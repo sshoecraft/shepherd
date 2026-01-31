@@ -307,13 +307,16 @@ void CLIClientBackend::sse_listener_thread() {
     dout(1) << "SSE listener thread stopped" << std::endl;
 }
 
-Response CLIClientBackend::send_request(const std::string& prompt, EventCallback cb) {
+Response CLIClientBackend::send_request(const std::string& prompt, int max_tokens, EventCallback cb) {
     Response resp;
     std::string endpoint = base_url + "/request";
 
     nlohmann::json request;
     request["prompt"] = prompt;
-    request["stream"] = false;  // Non-streaming - SSE /updates handles all display
+    if (max_tokens != 0) {
+        request["max_tokens"] = max_tokens;
+    }
+    // Don't set stream - let server use its default (streaming broadcasts to SSE observers)
 
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
@@ -375,7 +378,7 @@ void CLIClientBackend::generate_from_session(Session& session, int max_tokens) {
         return;
     }
 
-    send_request(prompt, callback);
+    send_request(prompt, max_tokens, callback);
 }
 
 int CLIClientBackend::count_message_tokens(Message::Role role,

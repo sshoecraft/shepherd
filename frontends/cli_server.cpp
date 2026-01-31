@@ -95,7 +95,8 @@ void CLIServer::init(bool no_mcp_flag, bool no_tools_flag) {
 // Unified generation function - sends to requester AND all observers
 static void do_generation(CliServerState& state,
                           ClientOutputs::ClientOutput* requester,
-                          const std::string& prompt) {
+                          const std::string& prompt,
+                          int max_tokens = 0) {
     std::string accumulated_response;
 
     // Send user prompt to requester and observers
@@ -221,7 +222,7 @@ static void do_generation(CliServerState& state,
                 auto lock = state.backend->acquire_lock();
                 state.server->add_message_to_session(
                     Message::TOOL_RESPONSE, tool_result.content, tool_name_arg, tool_call_id);
-                state.server->generate_response();
+                state.server->generate_response(max_tokens);
             }
 
             return true;
@@ -283,7 +284,7 @@ static void do_generation(CliServerState& state,
     {
         auto lock = state.backend->acquire_lock();
         state.server->add_message_to_session(Message::USER, prompt);
-        state.server->generate_response();
+        state.server->generate_response(max_tokens);
     }
 
     // Build Response from session's last message
@@ -471,6 +472,7 @@ void CLIServer::register_endpoints() {
         std::string prompt;
         bool stream = false;
         bool async_mode = false;
+        int max_tokens = 0;
 
         if (!req.body.empty()) {
             try {
@@ -481,6 +483,7 @@ void CLIServer::register_endpoints() {
                 }
                 stream = request_json.value("stream", false);
                 async_mode = request_json.value("async", false);
+                max_tokens = request_json.value("max_tokens", 0);
             } catch (const json::exception&) {
                 // Not JSON, treat body as raw prompt
                 prompt = req.body;
@@ -547,12 +550,12 @@ void CLIServer::register_endpoints() {
 
                 res.set_content_provider(
                     "text/event-stream",
-                    [state_ptr, prompt, client_info](size_t offset, httplib::DataSink& sink) mutable {
+                    [state_ptr, prompt, client_info, max_tokens](size_t offset, httplib::DataSink& sink) mutable {
                         // Create streaming output for this request
                         ClientOutputs::StreamingOutput requester(&sink, client_info);
 
                         // Run unified generation
-                        do_generation(*state_ptr, &requester, prompt);
+                        do_generation(*state_ptr, &requester, prompt, max_tokens);
 
                         // Flush (sends done marker) and close
                         requester.flush();
@@ -563,7 +566,7 @@ void CLIServer::register_endpoints() {
             } else {
                 // Non-streaming response using BatchedOutput
                 ClientOutputs::BatchedOutput requester(&res);
-                do_generation(state, &requester, prompt);
+                do_generation(state, &requester, prompt, max_tokens);
                 requester.flush();
             }
 

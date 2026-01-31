@@ -32,6 +32,7 @@ void Config::set_defaults() {
 	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.  **IMPORTANT:** DO NOT USE TOOLS!";
 	warmup = false;  // Disable warmup by default
 	calibration = false;  // Disable calibration by default (slow for thinking models)
+	single_query_mode = false;  // Set to true when --prompt is specified
 
     backend = "llamacpp";
     model = "";
@@ -54,6 +55,9 @@ void Config::set_defaults() {
 
 	// Tool truncation limit, in tokens (0 = use 85% of available space)
 	truncate_limit = 0;
+
+	// Max generation tokens: -1=max, 0=auto, >0=explicit
+	max_tokens = 0;
 
 	// Streaming enabled by default
 	streaming = true;

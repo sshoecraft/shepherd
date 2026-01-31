@@ -4,6 +4,9 @@
 #include <vector>
 #include <memory>
 
+// Forward declaration
+class DatabaseBackend;
+
 /// @brief Search result from RAG database
 struct SearchResult {
     std::string content;        // Content of the result
@@ -23,37 +26,6 @@ struct ConversationTurn {
     ConversationTurn(const std::string& user, const std::string& assistant, int64_t ts = 0);
 
     static int64_t get_current_timestamp();
-};
-
-/// @brief RAG database implementation for conversation archival and search
-class RAGDatabase {
-public:
-    explicit RAGDatabase(const std::string& db_path, size_t max_db_size = 10ULL * 1024 * 1024 * 1024);
-    ~RAGDatabase();
-
-    bool initialize();
-    void shutdown();
-    void archive_turn(const ConversationTurn& turn);
-    std::vector<SearchResult> search(const std::string& query, int max_results = 5);
-    size_t get_archived_turn_count() const;
-
-    // Memory management
-    void store_memory(const std::string& question, const std::string& answer);
-    bool clear_memory(const std::string& question);
-
-    // Fact storage
-    void set_fact(const std::string& key, const std::string& value);
-    std::string get_fact(const std::string& key) const;
-    bool has_fact(const std::string& key) const;
-    bool clear_fact(const std::string& key);
-
-private:
-    bool create_tables();
-    void check_and_prune_if_needed();  // Check DB size and prune old entries if over limit
-
-    std::string db_path_;
-    void* db_;  // sqlite3* database handle (void* to avoid header dependency)
-    size_t max_db_size_;  // Maximum database size in bytes
 };
 
 /// @brief Global RAG manager for conversation memory
@@ -207,5 +179,5 @@ public:
     static std::string execute_clear_memory_tool(const std::string& question);
 
 private:
-    static std::unique_ptr<RAGDatabase> instance_;
+    static std::unique_ptr<DatabaseBackend> instance_;
 };

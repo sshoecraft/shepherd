@@ -92,9 +92,19 @@ Authorization: Bearer <api_key>  (optional)
 
 {
   "prompt": "What is the capital of France?",
-  "stream": false
+  "stream": false,
+  "max_tokens": 4096
 }
 ```
+
+**Parameters:**
+- `prompt` (required): The user message to process
+- `stream` (optional, default: false): If true, returns SSE stream; if false, returns JSON
+- `async` (optional, default: false): If true, queues request and returns immediately
+- `max_tokens` (optional, default: 0): Maximum generation tokens
+  - `0` = auto (server calculates based on available context)
+  - `-1` = maximum available (use all remaining context)
+  - `>0` = explicit limit (cap generation at this many tokens)
 
 **Response (non-streaming):**
 ```json
@@ -370,10 +380,13 @@ async def handle_event(self, event: dict):
 ### 3. Sending Messages
 
 ```python
-async def send_message(self, prompt: str) -> dict:
+async def send_message(self, prompt: str, max_tokens: int = 0) -> dict:
+    request = {"prompt": prompt, "stream": False}
+    if max_tokens != 0:
+        request["max_tokens"] = max_tokens
     response = await self.http_client.post(
         f"{self.base_url}/request",
-        json={"prompt": prompt, "stream": False},
+        json=request,
         headers=self.get_headers()
     )
     return response.json()
@@ -546,7 +559,7 @@ if __name__ == "__main__":
 See `backends/cli_client.cpp` for the complete C++ reference implementation used by Shepherd's CLI frontend when connecting to a remote CLI server.
 
 Key sections:
-- Constructor (lines 10-175): Initialization and session sync
-- `sse_listener_thread` (lines 195-291): SSE event handling
-- `send_request` (lines 293-341): Sending messages
-- `add_message` (lines 343-357): Message handling
+- Constructor: Initialization and session sync
+- `sse_listener_thread`: SSE event handling
+- `send_request`: Sending messages with optional max_tokens
+- `generate_from_session`: Passes max_tokens through to server

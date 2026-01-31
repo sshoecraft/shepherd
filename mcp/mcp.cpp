@@ -98,11 +98,13 @@ bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_confi
 
     for (const auto& sconfig : server_configs) {
         dout(1) << "Connecting to MCP server: " + sconfig.name << std::endl;
-        if (connect_server(tools, sconfig)) {
+        ServerInitResult result = init_server(sconfig);
+        if (result.success) {
+            register_server(tools, result);
             any_success = true;
             dout(1) << "Successfully connected to MCP server: " + sconfig.name << std::endl;
         } else {
-            dout(1) << std::string("WARNING: ") +"Failed to connect to MCP server: " + sconfig.name << std::endl;
+            dout(1) << std::string("WARNING: ") + "Failed to connect to MCP server: " + sconfig.name << std::endl;
         }
     }
 
@@ -117,7 +119,10 @@ bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_confi
     return any_success;
 }
 
-bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
+MCP::ServerInitResult MCP::init_server(const ServerConfig& sconfig) {
+    ServerInitResult result;
+    result.server_name = sconfig.name;
+
     try {
         // Create server config
         MCPServer::Config server_config;
@@ -137,37 +142,42 @@ bool MCP::connect_server(Tools& tools, const ServerConfig& sconfig) {
         // Initialize protocol
         client->initialize();  // Throws on error
 
-        // Discover tools
-        auto mcp_tools = client->list_tools();
-        dout(1) << "Discovered " + std::to_string(mcp_tools.size()) + " tools from " + server_config.name << std::endl;
+        // Discover tools (thread-safe, no shared state)
+        result.tools = client->list_tools();
+        dout(1) << "Discovered " + std::to_string(result.tools.size()) + " tools from " + server_config.name << std::endl;
 
-        // Register tools with Tools instance
-        for (const auto& mcp_tool : mcp_tools) {
-            // Skip deprecated tools
-            if (mcp_tool.description.find("DEPRECATED") != std::string::npos) {
-                dout(1) << "Skipping deprecated MCP tool: " + mcp_tool.name << std::endl;
-                continue;
-            }
-
-            // Create adapter and register as MCP tool
-            auto adapter = std::make_unique<MCPToolAdapter>(client, mcp_tool);
-            std::string tool_name = adapter->unsanitized_name();
-
-            tools.register_tool(std::move(adapter), "mcp");
-            dout(1) << "Registered MCP tool: " + tool_name + " (sanitized)" << std::endl;
-            total_tools_++;
-        }
-
-        // Save client reference
-        clients_.push_back(client);
-        servers_by_name_[server_config.name] = client;
-
-        return true;
+        result.client = client;
+        result.success = true;
 
     } catch (const std::exception& e) {
         std::cerr << "Exception connecting to MCP server " + sconfig.name + ": " + e.what() << std::endl;
-        return false;
+        result.success = false;
     }
+
+    return result;
+}
+
+void MCP::register_server(Tools& tools, ServerInitResult& result) {
+    // Register tools with Tools instance (single-threaded)
+    for (const auto& mcp_tool : result.tools) {
+        // Skip deprecated tools
+        if (mcp_tool.description.find("DEPRECATED") != std::string::npos) {
+            dout(1) << "Skipping deprecated MCP tool: " + mcp_tool.name << std::endl;
+            continue;
+        }
+
+        // Create adapter and register as MCP tool
+        auto adapter = std::make_unique<MCPToolAdapter>(result.client, mcp_tool);
+        std::string tool_name = adapter->unsanitized_name();
+
+        tools.register_tool(std::move(adapter), "mcp");
+        dout(1) << "Registered MCP tool: " + tool_name + " (sanitized)" << std::endl;
+        total_tools_++;
+    }
+
+    // Save client reference
+    clients_.push_back(result.client);
+    servers_by_name_[result.server_name] = result.client;
 }
 
 void MCP::shutdown() {

@@ -1,6 +1,7 @@
 #include "tui.h"
 #include "shepherd.h"
 #include "ansi.h"
+#include <climits>
 #include "tools/tool.h"
 #include "tools/utf8_sanitizer.h"
 #include "tools/filesystem_tools.h"
@@ -1296,8 +1297,17 @@ int TUI::run(Provider* cmdline_provider) {
     }
 
     // Configure session based on backend capabilities
-    session.desired_completion_tokens = calculate_desired_completion_tokens(
-        backend->context_size, backend->max_output_tokens);
+    if (config->max_tokens == -1) {
+        // -1 = max possible: no cap on completion tokens (use all available)
+        session.desired_completion_tokens = INT_MAX;
+    } else if (config->max_tokens > 0) {
+        // Explicit value
+        session.desired_completion_tokens = config->max_tokens;
+    } else {
+        // 0 = auto: calculate based on context size
+        session.desired_completion_tokens = calculate_desired_completion_tokens(
+            backend->context_size, backend->max_output_tokens);
+    }
     session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
 
     Scheduler scheduler;

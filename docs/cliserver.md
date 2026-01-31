@@ -183,9 +183,16 @@ Main request endpoint. Supports three modes:
 {
     "prompt": "What files are in the current directory?",
     "stream": false,
-    "async": false
+    "async": false,
+    "max_tokens": 4096
 }
 ```
+
+**Parameters:**
+- `prompt` (required): The user message to process
+- `stream` (optional, default: false): If true, return SSE stream; if false, return complete JSON
+- `async` (optional, default: false): If true, queue request and return immediately
+- `max_tokens` (optional, default: 0): Maximum generation tokens. 0 = auto, -1 = maximum available, >0 = explicit limit. Overrides server's default.
 
 **Streaming Response (SSE when stream=true):**
 ```
@@ -278,10 +285,13 @@ void do_generation(CliServerState& state, ClientOutput* requester, const std::st
 ### send_request Method
 
 ```cpp
-Response send_request(const std::string& prompt, EventCallback callback) {
+Response send_request(const std::string& prompt, int max_tokens, EventCallback callback) {
     json request;
     request["prompt"] = prompt;
-    request["stream"] = false;  // Non-streaming - SSE handles display
+    if (max_tokens != 0) {
+        request["max_tokens"] = max_tokens;
+    }
+    // stream not set - let server use its default
 
     // Simple synchronous POST
     HttpResponse http_resp = http_client->post(endpoint, request.dump(), headers);
@@ -378,6 +388,7 @@ curl -X POST http://localhost:8000/request \
 
 ## Version History
 
+- **2.17.0** - Added max_tokens parameter to /request endpoint, flows through to backend
 - **2.16.0** - Unified ClientOutput architecture, fixed duplicate output
 - **2.15.0** - Previous architecture with dual streaming paths
 - **2.13.0** - Unified EventCallback pattern

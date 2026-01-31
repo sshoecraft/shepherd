@@ -298,6 +298,14 @@ void APIServer::register_endpoints() {
                 return;
             }
 
+            // Log the last message (current user prompt)
+            if (request.contains("messages") && request["messages"].is_array() && !request["messages"].empty()) {
+                const auto& last_msg = request["messages"].back();
+                if (last_msg.contains("content") && last_msg["content"].is_string()) {
+                    std::cout << "[prompt] " << req.remote_addr << " " << last_msg["content"].get<std::string>() << std::endl;
+                }
+            }
+
             // Check authentication and route based on permissions
             std::string api_key = extract_bearer_token(req);
             bool auth_required = key_store && key_store->is_enabled();
@@ -463,7 +471,7 @@ void APIServer::register_endpoints() {
                      (stream ? "true" : "false") + ")" << std::endl;
 
             // Log incoming request details
-            std::cout << "[api] " << request.value("model", "shepherd")
+            dout(1) << "[api] " << request.value("model", "shepherd")
                       << " msgs=" << request_session.messages.size()
                       << ", tools=" << request_session.tools.size()
                       << ", stream=" << (stream ? "true" : "false")
@@ -520,7 +528,7 @@ void APIServer::register_endpoints() {
                 } catch (const ContextFullException& e) {
                     request_handler = nullptr;
                     // Context overflow - return proper HTTP 400 (headers not sent yet!)
-                    std::cout << "[api] ERROR: Context overflow during prefill - " << e.what() << std::endl;
+                    dout(1) << "[api] ERROR: Context overflow during prefill - " << e.what() << std::endl;
                     res.status = 400;
                     json error_resp = {
                         {"error", {
@@ -534,7 +542,7 @@ void APIServer::register_endpoints() {
                 } catch (const std::exception& e) {
                     request_handler = nullptr;
                     // Other errors during prefill
-                    std::cout << "[api] ERROR: Prefill failed - " << e.what() << std::endl;
+                    dout(1) << "[api] ERROR: Prefill failed - " << e.what() << std::endl;
                     res.status = 500;
                     json error_resp = {
                         {"error", {
@@ -829,7 +837,7 @@ void APIServer::register_endpoints() {
                         // Log streaming completion details
                         auto stream_end_time = std::chrono::high_resolution_clock::now();
                         auto stream_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stream_end_time - request_start_time).count();
-                        std::cout << "[api] " << model_name
+                        dout(1) << "[api] " << model_name
                                   << " stream completed: " << prompt_tokens << " prompt + " << completion_tokens << " completion = "
                                   << (prompt_tokens + completion_tokens) << " tokens"
                                   << " (" << stream_duration_ms << "ms)"
@@ -1036,7 +1044,7 @@ void APIServer::register_endpoints() {
             // Log completion details
             auto request_end_time = std::chrono::high_resolution_clock::now();
             auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(request_end_time - request_start_time).count();
-            std::cout << "[api] " << request.value("model", "shepherd")
+            dout(1) << "[api] " << request.value("model", "shepherd")
                       << " completed: " << prompt_tokens << " prompt + " << completion_tokens << " completion = "
                       << (prompt_tokens + completion_tokens) << " tokens"
                       << " (" << duration_ms << "ms)"
@@ -1045,11 +1053,11 @@ void APIServer::register_endpoints() {
             res.set_content(response_body.dump(), "application/json");
 
         } catch (const ContextFullException& ctx_e) {
-            std::cout << "[api] ERROR: Context overflow - " << ctx_e.what() << std::endl;
+            dout(1) << "[api] ERROR: Context overflow - " << ctx_e.what() << std::endl;
             res.status = 400;
             res.set_content(create_error_response(400, ctx_e.what()).dump(), "application/json");
         } catch (const std::exception& e) {
-            std::cout << "[api] ERROR: " << e.what() << std::endl;
+            dout(1) << "[api] ERROR: " << e.what() << std::endl;
             res.status = 500;
             res.set_content(create_error_response(500, e.what()).dump(), "application/json");
         }

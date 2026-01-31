@@ -11,6 +11,8 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <thread>
+#include <algorithm>
 
 // Forward declaration
 class Tools;
@@ -76,11 +78,23 @@ private:
     MCP(const MCP&) = delete;
     MCP& operator=(const MCP&) = delete;
 
-    /// @brief Connect to a single MCP server
-    /// @param tools Tools instance to register MCP tools with
+    /// @brief Result of parallel server initialization
+    struct ServerInitResult {
+        std::shared_ptr<MCPClient> client;
+        std::string server_name;
+        std::vector<MCPTool> tools;
+        bool success = false;
+    };
+
+    /// @brief Initialize a single server (thread-safe, no shared state access)
     /// @param config Server configuration
-    /// @return True if successful
-    bool connect_server(Tools& tools, const ServerConfig& config);
+    /// @return Initialization result with client and discovered tools
+    ServerInitResult init_server(const ServerConfig& config);
+
+    /// @brief Register an initialized server's tools (single-threaded)
+    /// @param tools Tools instance to register MCP tools with
+    /// @param result Initialization result from init_server
+    void register_server(Tools& tools, ServerInitResult& result);
 
     std::vector<std::shared_ptr<MCPClient>> clients_;
     std::map<std::string, std::shared_ptr<MCPClient>> servers_by_name_;

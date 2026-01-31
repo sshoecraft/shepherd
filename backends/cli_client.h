@@ -40,5 +40,5 @@ private:
     // Track when we're making a request (to skip our own user message echo)
     std::atomic<bool> request_in_progress{false};
 
-    Response send_request(const std::string& prompt, EventCallback callback = nullptr);
+    Response send_request(const std::string& prompt, int max_tokens = 0, EventCallback callback = nullptr);
 };

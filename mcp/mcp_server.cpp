@@ -5,6 +5,7 @@
 
 #include <sys/wait.h>
 #include <sys/select.h>
+#include <sys/prctl.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <cstring>
@@ -72,6 +73,9 @@ void MCPServer::start() {
 
     if (pid_ == 0) {
         // Child process
+        // Die when parent dies (Linux-specific)
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+
         // Redirect stdin from pipe
         dup2(stdin_pipe[0], STDIN_FILENO);
         close(stdin_pipe[0]);
@@ -149,24 +153,19 @@ void MCPServer::stop() {
         stdin_fd_ = -1;
     }
 
-    // Wait briefly for graceful shutdown
+    // Send SIGTERM and wait briefly
+    kill(pid_, SIGTERM);
+
     int status;
-    pid_t result = waitpid(pid_, &status, WNOHANG);
-
-    if (result == 0) {
-        // Still running, give it 1 second
-        usleep(1000000);
-        result = waitpid(pid_, &status, WNOHANG);
-    }
-
-    if (result == 0) {
-        // Force kill
-        dout(1) << "Forcefully terminating MCP server '" + config_.name + "'" << std::endl;
-        kill(pid_, SIGTERM);
-        usleep(500000);
-        waitpid(pid_, &status, WNOHANG);
-        kill(pid_, SIGKILL);
-        waitpid(pid_, &status, 0);
+    // Quick non-blocking check first
+    if (waitpid(pid_, &status, WNOHANG) == 0) {
+        // Still running, wait up to 100ms
+        usleep(100000);
+        if (waitpid(pid_, &status, WNOHANG) == 0) {
+            // Force kill
+            kill(pid_, SIGKILL);
+            waitpid(pid_, &status, 0);
+        }
     }
 
     close_fds();

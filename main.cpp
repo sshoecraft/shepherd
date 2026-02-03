@@ -1099,7 +1099,7 @@ int main(int argc, char** argv) {
 	if (!override.models_file.empty()) {
 		config->models_file = override.models_file;
 	}
-	if (!override.system_prompt.empty()) {
+	if (override.system_prompt_set) {
 		config->system_message = override.system_prompt;
 	}
 	if (override.single_query_mode) {

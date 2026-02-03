@@ -156,6 +156,7 @@ Provider Provider::from_json(const json& j) {
     // Azure
     p.deployment_name = j.value("deployment_name", "");
     p.api_version = j.value("api_version", "");
+    p.max_tokens_param_name = j.value("max_tokens_param_name", "");
     p.openai_strict = j.value("openai_strict", false);
     p.sampling = j.value("sampling", true);
 
@@ -233,6 +234,7 @@ json Provider::to_json() const {
 
         if (!deployment_name.empty()) j["deployment_name"] = deployment_name;
         if (!api_version.empty()) j["api_version"] = api_version;
+        if (!max_tokens_param_name.empty()) j["max_tokens_param_name"] = max_tokens_param_name;
         if (openai_strict) j["openai_strict"] = openai_strict;
         if (!sampling) j["sampling"] = sampling;
     }
@@ -378,6 +380,7 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         if (!token_scope.empty()) config->json["token_scope"] = token_scope;
         if (!deployment_name.empty()) config->json["deployment_name"] = deployment_name;
         if (!api_version.empty()) config->json["api_version"] = api_version;
+        if (!max_tokens_param_name.empty()) config->json["max_tokens_param_name"] = max_tokens_param_name;
         if (openai_strict) config->json["openai_strict"] = openai_strict;
         config->json["sampling"] = sampling;
     } else if (type == "llamacpp") {
@@ -646,6 +649,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("token_scope = " + (prov->token_scope.empty() ? "(not set)" : prov->token_scope) + "\n");
 			callback("deployment_name = " + (prov->deployment_name.empty() ? "(not set)" : prov->deployment_name) + "\n");
 			callback("api_version = " + (prov->api_version.empty() ? "(not set)" : prov->api_version) + "\n");
+			callback("max_tokens_param_name = " + (prov->max_tokens_param_name.empty() ? "(auto)" : prov->max_tokens_param_name) + "\n");
 			callback("openai_strict = " + std::string(prov->openai_strict ? "true" : "false") + "\n");
 			callback("ssl_verify = " + std::string(prov->ssl_verify ? "true" : "false") + "\n");
 			callback("ca_bundle_path = " + (prov->ca_bundle_path.empty() ? "(not set)" : prov->ca_bundle_path) + "\n");
@@ -852,7 +856,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			         "  type, model, priority, context_size, display_name\n"
 			         "\nAPI backends (openai, anthropic, gemini, ollama):\n"
 			         "  api_key, base_url, client_id, client_secret, token_url, token_scope\n"
-			         "  deployment_name, api_version, openai_strict, ssl_verify, ca_bundle_path\n"
+			         "  deployment_name, api_version, max_tokens_param_name, openai_strict, ssl_verify, ca_bundle_path\n"
 			         "\nLocal backends (llamacpp, tensorrt):\n"
 			         "  model_path, tp, pp, gpu_layers, gpu_id, n_batch, ubatch, n_threads, cache_type\n"
 			         "\nOllama:\n"
@@ -909,6 +913,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->deployment_name = value;
 			} else if (field == "api_version") {
 				prov->api_version = value;
+			} else if (field == "max_tokens_param_name") {
+				prov->max_tokens_param_name = value;
 			} else if (field == "openai_strict") {
 				prov->openai_strict = (value == "true" || value == "1" || value == "yes");
 			} else if (field == "ssl_verify") {

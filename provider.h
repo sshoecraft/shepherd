@@ -80,6 +80,7 @@ public:
     // Azure OpenAI specific
     std::string deployment_name;
     std::string api_version;
+    std::string max_tokens_param_name;  // Override: "max_tokens" or "max_completion_tokens"
 
     // OpenAI compatibility mode (skip non-standard params like top_k, repetition_penalty)
     bool openai_strict = false;

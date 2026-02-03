@@ -42,6 +42,15 @@ OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallbac
                   ", param_name=" + model_config.max_tokens_param_name << std::endl;
     }
 
+    // Override max_tokens_param_name from provider config if specified
+    if (!config->json.is_null() && config->json.contains("max_tokens_param_name")) {
+        std::string override_param = config->json["max_tokens_param_name"].get<std::string>();
+        if (!override_param.empty()) {
+            model_config.max_tokens_param_name = override_param;
+            dout(1) << "Provider override max_tokens_param_name: " + override_param << std::endl;
+        }
+    }
+
     // Set API endpoint from config (api_base or default)
     if (!config->api_base.empty()) {
         // User specified custom API base

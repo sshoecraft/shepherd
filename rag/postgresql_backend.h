@@ -29,8 +29,11 @@ public:
 private:
     bool create_tables();
     bool prepare_statements();
+    bool set_schema();
     std::string compute_content_hash(const std::string& content);
+    static std::string extract_schema(std::string& connection_string);
 
     std::string connection_string_;
+    std::string schema_;  // Optional schema (search_path)
     void* conn_;  // PGconn* (void* to avoid header dependency)
 };

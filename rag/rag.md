@@ -38,6 +38,7 @@ The factory auto-detects backend type from connection string:
 - **PostgreSQL**: Connection URLs (requires `-DENABLE_POSTGRESQL=ON`)
   - `postgresql://user:pass@host:5432/dbname`
   - `postgres://user:pass@host:5432/dbname`
+  - Optional `schema` parameter to set search_path: `postgresql://...?schema=myschema`
 
 ## Database Schema
 
@@ -168,5 +169,6 @@ bool RAGManager::clear_fact(const std::string& key);
 
 ## History
 
+- **v2.25.1**: Added `schema` parameter to PostgreSQL connection string for search_path
 - **v2.23.0**: Added PostgreSQL backend support with abstract DatabaseBackend interface
 - **v2.22.x**: Initial SQLite-only implementation with FTS5

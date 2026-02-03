@@ -8,10 +8,74 @@
 #include <cmath>
 #include <openssl/sha.h>
 
+std::string PostgreSQLBackend::extract_schema(std::string& connection_string) {
+    // Look for schema= parameter in query string and extract it
+    // e.g., postgresql://...?sslmode=require&schema=acmai -> extracts "acmai"
+    std::string schema;
+
+    size_t query_start = connection_string.find('?');
+    if (query_start == std::string::npos) {
+        return schema;
+    }
+
+    // Find schema= in the query string
+    std::string query = connection_string.substr(query_start + 1);
+    size_t schema_pos = query.find("schema=");
+    if (schema_pos == std::string::npos) {
+        return schema;
+    }
+
+    // Extract schema value
+    size_t value_start = schema_pos + 7;  // len("schema=")
+    size_t value_end = query.find('&', value_start);
+    if (value_end == std::string::npos) {
+        schema = query.substr(value_start);
+    } else {
+        schema = query.substr(value_start, value_end - value_start);
+    }
+
+    // Remove schema= from connection string (libpq doesn't understand it)
+    std::string new_query;
+    size_t pos = 0;
+    while (pos < query.length()) {
+        size_t amp = query.find('&', pos);
+        std::string param;
+        if (amp == std::string::npos) {
+            param = query.substr(pos);
+            pos = query.length();
+        } else {
+            param = query.substr(pos, amp - pos);
+            pos = amp + 1;
+        }
+
+        if (param.find("schema=") != 0) {
+            if (!new_query.empty()) {
+                new_query += '&';
+            }
+            new_query += param;
+        }
+    }
+
+    // Rebuild connection string without schema parameter
+    if (new_query.empty()) {
+        connection_string = connection_string.substr(0, query_start);
+    } else {
+        connection_string = connection_string.substr(0, query_start + 1) + new_query;
+    }
+
+    return schema;
+}
+
 PostgreSQLBackend::PostgreSQLBackend(const std::string& connection_string)
     : connection_string_(connection_string), conn_(nullptr) {
+    // Extract and remove schema parameter before passing to libpq
+    schema_ = extract_schema(connection_string_);
+
     dout(1) << "PostgreSQLBackend created with connection string: " +
-             connection_string.substr(0, connection_string.find('@')) + "@..." << std::endl;
+             connection_string_.substr(0, connection_string_.find('@')) + "@..." << std::endl;
+    if (!schema_.empty()) {
+        dout(1) << "PostgreSQLBackend using schema: " + schema_ << std::endl;
+    }
 }
 
 PostgreSQLBackend::~PostgreSQLBackend() {
@@ -32,6 +96,15 @@ bool PostgreSQLBackend::initialize() {
     conn_ = conn;
     dout(1) << "Connected to PostgreSQL server" << std::endl;
 
+    // Suppress NOTICE messages (e.g., "relation already exists, skipping")
+    PQexec(conn, "SET client_min_messages TO WARNING");
+
+    if (!set_schema()) {
+        std::cerr << "Failed to set PostgreSQL schema" << std::endl;
+        shutdown();
+        return false;
+    }
+
     if (!create_tables()) {
         std::cerr << "Failed to create PostgreSQL tables" << std::endl;
         shutdown();
@@ -45,6 +118,37 @@ bool PostgreSQLBackend::initialize() {
     }
 
     dout(1) << "PostgreSQL RAG database initialized successfully" << std::endl;
+    return true;
+}
+
+bool PostgreSQLBackend::set_schema() {
+    if (schema_.empty()) {
+        return true;  // No schema specified, use default
+    }
+
+    PGconn* conn = static_cast<PGconn*>(conn_);
+
+    // Create schema if it doesn't exist
+    std::string create_schema_sql = "CREATE SCHEMA IF NOT EXISTS " + schema_;
+    PGresult* res = PQexec(conn, create_schema_sql.c_str());
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        std::cerr << "Failed to create schema: " + std::string(PQerrorMessage(conn)) << std::endl;
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+
+    // Set search_path to use the schema
+    std::string set_path_sql = "SET search_path TO " + schema_;
+    res = PQexec(conn, set_path_sql.c_str());
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        std::cerr << "Failed to set search_path: " + std::string(PQerrorMessage(conn)) << std::endl;
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+
+    dout(1) << "Set PostgreSQL search_path to schema: " + schema_ << std::endl;
     return true;
 }
 

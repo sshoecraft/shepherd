@@ -494,6 +494,10 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "web_search_api_key") return cfg.web_search_api_key.empty() ? "" : "(set)";
     if (key == "web_search_instance_url") return cfg.web_search_instance_url;
     if (key == "memory_database") return cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database;
+    if (key == "system_prompt") return cfg.system_prompt.empty() ? "(default)" : cfg.system_prompt;
+    if (key == "auto_provider") return cfg.auto_provider ? "true" : "false";
+    if (key == "auth_mode") return cfg.auth_mode;
+    if (key == "server_tools") return cfg.server_tools ? "true" : "false";
     return "";
 }
 
@@ -521,6 +525,14 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.web_search_instance_url = value;
     } else if (key == "memory_database") {
         cfg.memory_database = value;
+    } else if (key == "system_prompt") {
+        cfg.system_prompt = value;
+    } else if (key == "auto_provider") {
+        cfg.auto_provider = (value == "true" || value == "1" || value == "on");
+    } else if (key == "auth_mode") {
+        cfg.auth_mode = value;
+    } else if (key == "server_tools") {
+        cfg.server_tools = (value == "true" || value == "1" || value == "on");
     } else {
         return false;
     }
@@ -531,7 +543,8 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
 static const std::vector<std::string> CONFIG_KEYS = {
     "warmup", "calibration", "streaming", "thinking", "tui",
     "truncate_limit", "max_db_size", "web_search_provider",
-    "web_search_api_key", "web_search_instance_url", "memory_database"
+    "web_search_api_key", "web_search_instance_url", "memory_database",
+    "system_prompt", "auto_provider", "auth_mode", "server_tools"
 };
 
 static bool is_config_key(const std::string& s) {

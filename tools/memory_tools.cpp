@@ -302,7 +302,11 @@ std::vector<ParameterDef> StoreMemoryTool::get_parameters_schema() const {
 std::map<std::string, std::any> StoreMemoryTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    // Accept "key" as alias for "question"
     std::string question = tool_utils::get_string(args, "question");
+    if (question.empty()) {
+        question = tool_utils::get_string(args, "key");
+    }
     std::string answer = tool_utils::get_string(args, "answer");
 
     std::string response = RAGManager::execute_store_memory_tool(question, answer);
@@ -342,7 +346,11 @@ std::vector<ParameterDef> ClearMemoryTool::get_parameters_schema() const {
 std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    // Accept "key" as alias for "question"
     std::string question = tool_utils::get_string(args, "question");
+    if (question.empty()) {
+        question = tool_utils::get_string(args, "key");
+    }
 
     std::string response = RAGManager::execute_clear_memory_tool(question);
 

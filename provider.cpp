@@ -558,6 +558,17 @@ int handle_provider_args(const std::vector<std::string>& args,
 		std::string name = args[1];
 		std::vector<std::string> cmd_args(args.begin() + 2, args.end());
 
+		// Check for reserved keywords
+		static const std::vector<std::string> reserved = {
+			"add", "remove", "show", "set", "edit", "use", "list", "next", "help"
+		};
+		for (const auto& kw : reserved) {
+			if (name == kw) {
+				callback("Error: '" + name + "' is a reserved keyword and cannot be used as a provider name\n");
+				return 1;
+			}
+		}
+
 		// Check if provider already exists
 		if (find_provider(name)) {
 			callback("Provider '" + name + "' already exists. Use 'shepherd provider " + name + " set' to modify.\n");

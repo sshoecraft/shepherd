@@ -291,8 +291,9 @@ Provider Provider::from_config() {
 }
 
 void Provider::save() const {
-    // If using unified config (providers in config.json), update there
-    if (config && !config->providers_json.empty()) {
+    // Save to unified config (providers in config.json) by default
+    // Only fall back to legacy files if no config object exists
+    if (config && !config->is_read_only()) {
         // Find and update this provider in the config
         bool found = false;
         for (auto& pj : config->providers_json) {
@@ -310,7 +311,7 @@ void Provider::save() const {
         return;
     }
 
-    // Legacy: save to individual provider files
+    // Legacy: save to individual provider files (only if no config or read-only mode)
     std::string providers_dir = get_providers_dir();
     fs::create_directories(providers_dir);
 
@@ -324,8 +325,8 @@ void Provider::save() const {
 }
 
 void Provider::remove(const std::string& name) {
-    // If using unified config, remove from there
-    if (config && !config->providers_json.empty()) {
+    // Remove from unified config by default
+    if (config && !config->is_read_only()) {
         auto& providers = config->providers_json;
         providers.erase(
             std::remove_if(providers.begin(), providers.end(),

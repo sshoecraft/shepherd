@@ -2,6 +2,7 @@
 #include "scheduler_tools.h"
 #include "tools.h"
 #include "../scheduler.h"
+#include "../config.h"
 
 #include <sstream>
 
@@ -27,7 +28,7 @@ std::map<std::string, std::any> ListSchedulesTool::execute(const std::map<std::s
     (void)args;
     std::map<std::string, std::any> result;
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     auto schedules = scheduler.list();
@@ -85,6 +86,11 @@ std::vector<ParameterDef> AddScheduleTool::get_parameters_schema() const {
 std::map<std::string, std::any> AddScheduleTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    if (config && config->is_read_only()) {
+        result["error"] = std::string("Cannot modify schedules in read-only mode");
+        return result;
+    }
+
     std::string name = tool_utils::get_string(args, "name");
     std::string cron = tool_utils::get_string(args, "cron");
     std::string prompt = tool_utils::get_string(args, "prompt");
@@ -109,7 +115,7 @@ std::map<std::string, std::any> AddScheduleTool::execute(const std::map<std::str
         return result;
     }
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     // Check if name already exists
@@ -149,6 +155,11 @@ std::vector<ParameterDef> RemoveScheduleTool::get_parameters_schema() const {
 std::map<std::string, std::any> RemoveScheduleTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    if (config && config->is_read_only()) {
+        result["error"] = std::string("Cannot modify schedules in read-only mode");
+        return result;
+    }
+
     std::string name_or_id = tool_utils::get_string(args, "name_or_id");
 
     if (name_or_id.empty()) {
@@ -156,7 +167,7 @@ std::map<std::string, std::any> RemoveScheduleTool::execute(const std::map<std::
         return result;
     }
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     if (!scheduler.remove(name_or_id)) {
@@ -192,6 +203,11 @@ std::vector<ParameterDef> EnableScheduleTool::get_parameters_schema() const {
 std::map<std::string, std::any> EnableScheduleTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    if (config && config->is_read_only()) {
+        result["error"] = std::string("Cannot modify schedules in read-only mode");
+        return result;
+    }
+
     std::string name_or_id = tool_utils::get_string(args, "name_or_id");
 
     if (name_or_id.empty()) {
@@ -199,7 +215,7 @@ std::map<std::string, std::any> EnableScheduleTool::execute(const std::map<std::
         return result;
     }
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     if (!scheduler.enable(name_or_id)) {
@@ -235,6 +251,11 @@ std::vector<ParameterDef> DisableScheduleTool::get_parameters_schema() const {
 std::map<std::string, std::any> DisableScheduleTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
+    if (config && config->is_read_only()) {
+        result["error"] = std::string("Cannot modify schedules in read-only mode");
+        return result;
+    }
+
     std::string name_or_id = tool_utils::get_string(args, "name_or_id");
 
     if (name_or_id.empty()) {
@@ -242,7 +263,7 @@ std::map<std::string, std::any> DisableScheduleTool::execute(const std::map<std:
         return result;
     }
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     if (!scheduler.disable(name_or_id)) {
@@ -285,7 +306,7 @@ std::map<std::string, std::any> GetScheduleTool::execute(const std::map<std::str
         return result;
     }
 
-    Scheduler scheduler;
+    Scheduler scheduler(config ? config->scheduler_name : "default");
     scheduler.load();
 
     const auto* entry = scheduler.get(name_or_id);

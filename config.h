@@ -84,6 +84,10 @@ public:
     // SMCP servers config (JSON string, like mcp_config)
     std::string smcp_config;
 
+    // Named schedulers (persisted in config.json)
+    std::string scheduler_name;              // Active scheduler name (from --scheduler flag)
+    nlohmann::json schedulers_json;          // All schedulers data
+
     // Config source mode
     enum class SourceMode { LOCAL_FILE, KEY_VAULT };
     SourceMode source_mode = SourceMode::LOCAL_FILE;

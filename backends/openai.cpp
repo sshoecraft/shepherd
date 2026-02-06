@@ -617,7 +617,7 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
     for (const auto& msg : session.messages) {
         nlohmann::json jmsg;
         jmsg["role"] = msg.get_role();
-        jmsg["content"] = msg.content;
+        jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
 
         // Restore tool_calls for assistant messages that made tool calls
         if (msg.role == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
@@ -740,7 +740,7 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     for (const auto& msg : session.messages) {
         nlohmann::json jmsg;
         jmsg["role"] = msg.get_role();
-        jmsg["content"] = msg.content;
+        jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
 
         // Restore tool_calls for assistant messages that made tool calls
         if (msg.role == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
@@ -769,7 +769,7 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
         case Message::FUNCTION: role_str = "function"; break;
     }
     new_msg["role"] = role_str;
-    new_msg["content"] = content;
+    new_msg["content"] = utf8_sanitizer::sanitize_utf8(content);
     if (!tool_name.empty()) new_msg["name"] = tool_name;
     if (!tool_id.empty()) new_msg["tool_call_id"] = tool_id;
     messages.push_back(new_msg);

@@ -42,7 +42,7 @@ Frontend::Frontend() {
 Frontend::~Frontend() {
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider) {
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -70,6 +70,17 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     // Add command-line provider at the front (highest priority)
     if (cmdline_provider) {
         frontend->providers.insert(frontend->providers.begin(), *cmdline_provider);
+    }
+
+    // Check if target provider is CLI backend - if so, skip tools
+    if (!target_provider.empty()) {
+        for (const auto& p : frontend->providers) {
+            if (p.name == target_provider && p.type == "cli") {
+                no_tools = true;
+                dout(1) << "CLI backend provider '" + target_provider + "': disabling local tools" << std::endl;
+                break;
+            }
+        }
     }
 
     // Log mode

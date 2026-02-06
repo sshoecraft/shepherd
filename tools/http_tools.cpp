@@ -105,6 +105,7 @@ std::vector<ParameterDef> HTTPRequestTool::get_parameters_schema() const {
     return {
         {"url", "string", "The URL to make the HTTP request to", true, "", "", {}},
         {"method", "string", "HTTP method (GET, POST, PUT, DELETE)", false, "GET", "", {}},
+        {"headers", "object", "Optional HTTP headers as key-value pairs (e.g. {\"Authorization\": \"Bearer token\"})", false, "", "", {}},
         {"body", "string", "Optional request body (JSON format)", false, "", "", {}}
     };
 }
@@ -115,6 +116,7 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
     std::string url = tool_utils::get_string(args, "url");
     std::string method = tool_utils::get_string(args, "method", "GET");
     std::string body = tool_utils::get_string(args, "body");
+    std::string headers_json = tool_utils::get_string(args, "headers");
 
     if (url.empty()) {
         result["error"] = std::string("url is required");
@@ -125,12 +127,21 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
     try {
         SimpleHTTPClient client;
 
-        // Parse headers if provided
         std::map<std::string, std::string> headers;
         headers["User-Agent"] = "Shepherd/1.0";
 
-        // If body is provided, set content-type to JSON
-        if (!body.empty()) {
+        // Parse custom headers
+        if (!headers_json.empty()) {
+            try {
+                auto j = nlohmann::json::parse(headers_json);
+                for (auto& [key, value] : j.items()) {
+                    headers[key] = value.get<std::string>();
+                }
+            } catch (...) {}
+        }
+
+        // If body is provided, set content-type to JSON (if not already set)
+        if (!body.empty() && headers.find("Content-Type") == headers.end()) {
             headers["Content-Type"] = "application/json";
         }
 
@@ -160,7 +171,8 @@ std::map<std::string, std::any> HTTPRequestTool::execute(const std::map<std::str
 
 std::vector<ParameterDef> HTTPGetTool::get_parameters_schema() const {
     return {
-        {"url", "string", "The URL to make the HTTP GET request to", true, "", "", {}}
+        {"url", "string", "The URL to make the HTTP GET request to", true, "", "", {}},
+        {"headers", "object", "Optional HTTP headers as key-value pairs (e.g. {\"Authorization\": \"Bearer token\"})", false, "", "", {}}
     };
 }
 
@@ -168,6 +180,7 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
     std::map<std::string, std::any> result;
 
     std::string url = tool_utils::get_string(args, "url");
+    std::string headers_json = tool_utils::get_string(args, "headers");
 
     if (url.empty()) {
         result["error"] = std::string("url is required");
@@ -180,6 +193,16 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
 
         std::map<std::string, std::string> headers;
         headers["User-Agent"] = "Shepherd/1.0";
+
+        // Parse custom headers
+        if (!headers_json.empty()) {
+            try {
+                auto j = nlohmann::json::parse(headers_json);
+                for (auto& [key, value] : j.items()) {
+                    headers[key] = value.get<std::string>();
+                }
+            } catch (...) {}
+        }
 
         auto response = client.request("GET", url, headers);
 
@@ -210,6 +233,7 @@ std::map<std::string, std::any> HTTPGetTool::execute(const std::map<std::string,
 std::vector<ParameterDef> HTTPPostTool::get_parameters_schema() const {
     return {
         {"url", "string", "The URL to make the HTTP POST request to", true, "", "", {}},
+        {"headers", "object", "Optional HTTP headers as key-value pairs (e.g. {\"Authorization\": \"Bearer token\"})", false, "", "", {}},
         {"body", "string", "Optional request body (JSON format)", false, "", "", {}}
     };
 }
@@ -219,6 +243,7 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
 
     std::string url = tool_utils::get_string(args, "url");
     std::string body = tool_utils::get_string(args, "body");
+    std::string headers_json = tool_utils::get_string(args, "headers");
 
     if (url.empty()) {
         result["error"] = std::string("url is required");
@@ -231,7 +256,21 @@ std::map<std::string, std::any> HTTPPostTool::execute(const std::map<std::string
 
         std::map<std::string, std::string> headers;
         headers["User-Agent"] = "Shepherd/1.0";
-        headers["Content-Type"] = "application/json";
+
+        // Parse custom headers
+        if (!headers_json.empty()) {
+            try {
+                auto j = nlohmann::json::parse(headers_json);
+                for (auto& [key, value] : j.items()) {
+                    headers[key] = value.get<std::string>();
+                }
+            } catch (...) {}
+        }
+
+        // Default Content-Type for POST if not set by custom headers
+        if (headers.find("Content-Type") == headers.end()) {
+            headers["Content-Type"] = "application/json";
+        }
 
         auto response = client.request("POST", url, headers, body);
 

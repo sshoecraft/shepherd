@@ -81,6 +81,10 @@ void Config::set_defaults() {
 	// Server settings
 	auth_mode = "none";
 	server_tools = false;
+
+	// Scheduler defaults
+	scheduler_name = "default";
+	schedulers_json = nlohmann::json::array();
 }
 
 size_t Config::parse_size_string(const std::string& size_str) {
@@ -215,6 +219,33 @@ void Config::load() {
         load_from_json(json);
 
         dout(1) << "Loaded configuration from: " + config_path << std::endl;
+
+        // Migrate standalone schedule.json into config if no schedulers exist yet
+        if (schedulers_json.empty()) {
+            std::string schedule_path = std::filesystem::path(config_path).parent_path().string() + "/schedule.json";
+            if (std::filesystem::exists(schedule_path)) {
+                try {
+                    std::ifstream sched_file(schedule_path);
+                    nlohmann::json sched_json;
+                    sched_file >> sched_json;
+
+                    if (sched_json.contains("schedules") && sched_json["schedules"].is_array() && !sched_json["schedules"].empty()) {
+                        nlohmann::json default_scheduler;
+                        default_scheduler["name"] = "default";
+                        default_scheduler["schedules"] = sched_json["schedules"];
+                        schedulers_json.push_back(default_scheduler);
+
+                        dout(1) << "Migrated " << sched_json["schedules"].size()
+                                << " schedules from schedule.json to config.json" << std::endl;
+                        save();
+                        std::filesystem::rename(schedule_path, schedule_path + ".migrated");
+                        dout(1) << "Renamed schedule.json to schedule.json.migrated" << std::endl;
+                    }
+                } catch (const std::exception& e) {
+                    dout(1) << "Failed to migrate schedule.json: " << e.what() << std::endl;
+                }
+            }
+        }
 
     } catch (const json::exception& e) {
         throw ConfigError("Invalid JSON in config file: " + std::string(e.what()));
@@ -368,6 +399,12 @@ void Config::load_from_json(const nlohmann::json& j) {
         smcp_config = j["smcp_servers"].dump();
         dout(1) << "Loaded SMCP config: " << smcp_config << std::endl;
     }
+
+    // Load named schedulers
+    if (j.contains("schedulers") && j["schedulers"].is_array()) {
+        schedulers_json = j["schedulers"];
+        dout(1) << "Loaded " << schedulers_json.size() << " scheduler(s) from config" << std::endl;
+    }
 }
 
 void Config::save() const {
@@ -413,6 +450,9 @@ void Config::save() const {
         }
         if (!smcp_config.empty()) {
             save_json["smcp_servers"] = nlohmann::json::parse(smcp_config);
+        }
+        if (!schedulers_json.empty()) {
+            save_json["schedulers"] = schedulers_json;
         }
 
         std::ofstream file(config_path);

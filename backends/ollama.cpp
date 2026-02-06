@@ -301,18 +301,18 @@ nlohmann::json OllamaBackend::build_request_from_session(const Session& session,
         switch (msg.role) {
             case Message::USER:
                 message["role"] = "user";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 break;
 
             case Message::ASSISTANT:
                 message["role"] = "assistant";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 break;
 
             case Message::TOOL_RESPONSE:
             case Message::FUNCTION:
                 message["role"] = "tool";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 if (!msg.tool_call_id.empty()) {
                     message["tool_call_id"] = msg.tool_call_id;
                 }
@@ -414,18 +414,18 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
         switch (msg.role) {
             case Message::USER:
                 message["role"] = "user";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 break;
 
             case Message::ASSISTANT:
                 message["role"] = "assistant";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 break;
 
             case Message::TOOL_RESPONSE:
             case Message::FUNCTION:
                 message["role"] = "tool";
-                message["content"] = msg.content;
+                message["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 if (!msg.tool_call_id.empty()) {
                     message["tool_call_id"] = msg.tool_call_id;
                 }
@@ -446,18 +446,18 @@ nlohmann::json OllamaBackend::build_request(const Session& session,
     switch (role) {
         case Message::USER:
             new_message["role"] = "user";
-            new_message["content"] = content;
+            new_message["content"] = utf8_sanitizer::sanitize_utf8(content);
             break;
 
         case Message::ASSISTANT:
             new_message["role"] = "assistant";
-            new_message["content"] = content;
+            new_message["content"] = utf8_sanitizer::sanitize_utf8(content);
             break;
 
         case Message::TOOL_RESPONSE:
         case Message::FUNCTION:
             new_message["role"] = "tool";
-            new_message["content"] = content;
+            new_message["content"] = utf8_sanitizer::sanitize_utf8(content);
             if (!tool_id.empty()) {
                 new_message["tool_call_id"] = tool_id;
             }

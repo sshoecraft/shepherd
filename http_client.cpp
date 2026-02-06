@@ -475,6 +475,9 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
         curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, header_list);
     }
 
+    // Remove handle from multi if still attached from a previous call (defensive)
+    curl_multi_remove_handle(multi_handle_, curl_);
+
     // Add handle to multi interface
     CURLMcode mres = curl_multi_add_handle(multi_handle_, curl_);
     if (mres != CURLM_OK) {

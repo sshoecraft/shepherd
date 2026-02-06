@@ -375,6 +375,7 @@ void CLIServer::add_status_info(nlohmann::json& status) {
 void CLIServer::on_server_start() {
     // Initialize scheduler (unless disabled)
     if (!g_disable_scheduler) {
+        scheduler.name = config->scheduler_name;
         scheduler.load();
         scheduler.set_fire_callback([this](const std::string& prompt) {
             state.add_input(prompt);
@@ -401,7 +402,11 @@ void CLIServer::on_server_start() {
             state.current_request = prompt;
 
             dout(1) << "Processing async request: " + prompt.substr(0, 50) + "..." << std::endl;
+
+            // Acquire request mutex to prevent concurrent backend access
+            std::unique_lock<std::mutex> request_lock(state.request_mutex);
             json result = process_request(state, prompt);
+            request_lock.unlock();
 
             // Increment request counter
             requests_processed++;
@@ -619,7 +624,7 @@ void CLIServer::register_endpoints() {
         for (const auto& msg : state.session->messages) {
             json m;
             m["role"] = msg.get_role();
-            m["content"] = msg.content;
+            m["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
             m["tokens"] = msg.tokens;
 
             if (!msg.tool_name.empty()) {
@@ -632,7 +637,7 @@ void CLIServer::register_endpoints() {
                 try {
                     m["tool_calls"] = json::parse(msg.tool_calls_json);
                 } catch (...) {
-                    m["tool_calls_raw"] = msg.tool_calls_json;
+                    m["tool_calls_raw"] = utf8_sanitizer::sanitize_utf8(msg.tool_calls_json);
                 }
             }
 
@@ -642,7 +647,7 @@ void CLIServer::register_endpoints() {
 
         // System message if set
         if (!state.session->system_message.empty()) {
-            response["system_message"] = state.session->system_message;
+            response["system_message"] = utf8_sanitizer::sanitize_utf8(state.session->system_message);
         }
 
         res.set_content(response.dump(), "application/json");

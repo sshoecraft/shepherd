@@ -275,7 +275,7 @@ int CLI::run(Provider* cmdline_provider) {
     session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
 
     // Initialize scheduler (unless disabled)
-    Scheduler scheduler;
+    Scheduler scheduler(config->scheduler_name);
     if (!g_disable_scheduler) {
         scheduler.load();
         scheduler.set_fire_callback([this](const std::string& prompt) {

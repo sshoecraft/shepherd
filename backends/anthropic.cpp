@@ -239,7 +239,7 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
 
         if (msg.role == Message::USER) {
             jmsg["role"] = "user";
-            jmsg["content"] = msg.content;
+            jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
         } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
 
@@ -259,7 +259,7 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
                         } catch (...) {}
 
                         if (!is_json_array) {
-                            content_array.push_back({{"type", "text"}, {"text", msg.content}});
+                            content_array.push_back({{"type", "text"}, {"text", utf8_sanitizer::sanitize_utf8(msg.content)}});
                         }
                     }
 
@@ -291,7 +291,7 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
                     jmsg["content"] = content_array;
                 } catch (const std::exception& e) {
                     dout(1) << "Failed to parse tool_calls_json: " << e.what() << std::endl;
-                    jmsg["content"] = msg.content;
+                    jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 }
             } else {
                 // Check if content is JSON array (from native tool_use blocks)
@@ -300,10 +300,10 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
                     if (content_json.is_array()) {
                         jmsg["content"] = content_json;
                     } else {
-                        jmsg["content"] = msg.content;
+                        jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                     }
                 } catch (...) {
-                    jmsg["content"] = msg.content;
+                    jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 }
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
@@ -419,7 +419,7 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
 
         if (msg.role == Message::USER) {
             jmsg["role"] = "user";
-            jmsg["content"] = msg.content;
+            jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
         } else if (msg.role == Message::ASSISTANT) {
             jmsg["role"] = "assistant";
 
@@ -444,7 +444,7 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
                         } catch (...) {}
 
                         if (!is_json_array) {
-                            content_array.push_back({{"type", "text"}, {"text", msg.content}});
+                            content_array.push_back({{"type", "text"}, {"text", utf8_sanitizer::sanitize_utf8(msg.content)}});
                         }
                     }
 
@@ -476,7 +476,7 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
                     jmsg["content"] = content_array;
                 } catch (const std::exception& e) {
                     dout(1) << "Failed to parse tool_calls_json: " << e.what() << std::endl;
-                    jmsg["content"] = msg.content;
+                    jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 }
             } else {
                 // Check if content is JSON array (from native tool_use blocks)
@@ -485,10 +485,10 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
                     if (content_json.is_array()) {
                         jmsg["content"] = content_json;
                     } else {
-                        jmsg["content"] = msg.content;
+                        jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                     }
                 } catch (...) {
-                    jmsg["content"] = msg.content;
+                    jmsg["content"] = utf8_sanitizer::sanitize_utf8(msg.content);
                 }
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
@@ -525,13 +525,13 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
     json new_msg;
     if (role == Message::USER) {
         new_msg["role"] = "user";
-        new_msg["content"] = content;
+        new_msg["content"] = utf8_sanitizer::sanitize_utf8(content);
     } else if (role == Message::TOOL_RESPONSE) {
         // Tool result - check if we should merge with previous tool_result message
         json tool_result_block = {
             {"type", "tool_result"},
             {"tool_use_id", tool_id},
-            {"content", content}
+            {"content", utf8_sanitizer::sanitize_utf8(content)}
         };
 
         if (!messages.empty() && messages.back()["role"] == "user" &&

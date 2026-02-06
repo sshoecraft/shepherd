@@ -1,5 +1,6 @@
 #include "shepherd.h"
 #include "scheduler.h"
+#include "config.h"
 #include <fstream>
 
 #include <filesystem>
@@ -43,31 +44,11 @@ Scheduler::ScheduleEntry Scheduler::ScheduleEntry::from_json(const json& j) {
     return entry;
 }
 
-Scheduler::Scheduler() : running(false) {
-    config_path = get_config_path();
+Scheduler::Scheduler(const std::string& scheduler_name) : name(scheduler_name), running(false) {
 }
 
 Scheduler::~Scheduler() {
     stop();
-}
-
-std::string Scheduler::get_config_path() {
-    std::string config_dir;
-
-    // Use XDG_CONFIG_HOME if set, otherwise ~/.config
-    const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
-    if (xdg_config && xdg_config[0] != '\0') {
-        config_dir = xdg_config;
-    } else {
-        const char* home = std::getenv("HOME");
-        if (home) {
-            config_dir = std::string(home) + "/.config";
-        } else {
-            config_dir = "/tmp";
-        }
-    }
-
-    return config_dir + "/shepherd/schedule.json";
 }
 
 void Scheduler::load() {
@@ -75,53 +56,67 @@ void Scheduler::load() {
 
     schedules.clear();
 
-    if (!std::filesystem::exists(config_path)) {
-        dout(1) << "Schedule file does not exist: " + config_path << std::endl;
+    if (!config) {
+        dout(1) << "Config not initialized, cannot load scheduler" << std::endl;
         return;
     }
 
-    try {
-        std::ifstream file(config_path);
-        if (!file.is_open()) {
-            dout(1) << "Could not open schedule file: " + config_path << std::endl;
+    // Find our named scheduler in config->schedulers_json
+    for (const auto& sched : config->schedulers_json) {
+        if (sched.value("name", "") == name) {
+            if (sched.contains("schedules") && sched["schedules"].is_array()) {
+                for (const auto& item : sched["schedules"]) {
+                    schedules.push_back(ScheduleEntry::from_json(item));
+                }
+            }
+            dout(1) << "Loaded " + std::to_string(schedules.size()) + " schedules for '" + name + "'" << std::endl;
             return;
         }
-
-        json j;
-        file >> j;
-
-        if (j.contains("schedules") && j["schedules"].is_array()) {
-            for (const auto& item : j["schedules"]) {
-                schedules.push_back(ScheduleEntry::from_json(item));
-            }
-        }
-
-        dout(1) << "Loaded " + std::to_string(schedules.size()) + " schedules" << std::endl;
-    } catch (const std::exception& e) {
-        dout(1) << "Error loading schedules: " + std::string(e.what()) << std::endl;
     }
+
+    dout(1) << "No scheduler named '" + name + "' found in config, starting empty" << std::endl;
 }
 
 void Scheduler::save() {
     // Note: caller should hold lock, or this is called from within locked context
+    if (!config) {
+        dout(1) << "Config not initialized, cannot save scheduler" << std::endl;
+        return;
+    }
+
+    if (config->is_read_only()) {
+        dout(1) << "Config is read-only, cannot save scheduler" << std::endl;
+        return;
+    }
+
+    // Build our schedules array
+    json sched_array = json::array();
+    for (const auto& entry : schedules) {
+        sched_array.push_back(entry.to_json());
+    }
+
+    // Find and update our entry in schedulers_json, or create it
+    bool found = false;
+    for (auto& sched : config->schedulers_json) {
+        if (sched.value("name", "") == name) {
+            sched["schedules"] = sched_array;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        json new_sched;
+        new_sched["name"] = name;
+        new_sched["schedules"] = sched_array;
+        config->schedulers_json.push_back(new_sched);
+    }
+
     try {
-        // Ensure directory exists
-        std::filesystem::path path(config_path);
-        std::filesystem::create_directories(path.parent_path());
-
-        json j;
-        j["schedules"] = json::array();
-        for (const auto& entry : schedules) {
-            j["schedules"].push_back(entry.to_json());
-        }
-
-        std::ofstream file(config_path);
-        if (file.is_open()) {
-            file << j.dump(2);
-            dout(1) << "Saved " + std::to_string(schedules.size()) + " schedules" << std::endl;
-        }
+        config->save();
+        dout(1) << "Saved " + std::to_string(schedules.size()) + " schedules for '" + name + "'" << std::endl;
     } catch (const std::exception& e) {
-        dout(1) << "Error saving schedules: " + std::string(e.what()) << std::endl;
+        dout(1) << "Error saving scheduler: " + std::string(e.what()) << std::endl;
     }
 }
 
@@ -585,7 +580,8 @@ std::string Scheduler::format_next_run(const std::string& cron) {
 int handle_sched_args(const std::vector<std::string>& args,
                       std::function<void(const std::string&)> callback) {
 	// Create and load scheduler
-	Scheduler scheduler;
+	std::string sched_name = config ? config->scheduler_name : "default";
+	Scheduler scheduler(sched_name);
 	scheduler.load();
 
 	// Helper to format schedule entry
@@ -626,6 +622,14 @@ int handle_sched_args(const std::vector<std::string>& args,
 		// Name-first: sched NAME [action]
 		name = first_arg;
 		subcmd = (args.size() >= 2) ? args[1] : "help";  // No action = show help
+	}
+
+	// Check for read-only mode for modifying commands
+	if (config && config->is_read_only()) {
+		if (subcmd == "add" || subcmd == "remove" || subcmd == "enable" || subcmd == "disable") {
+			callback("Error: Cannot modify schedules in read-only mode (config from Key Vault)\n");
+			return 1;
+		}
 	}
 
 	if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {

@@ -92,7 +92,8 @@ public:
     /// @param no_tools If true, skip all tool initialization
     static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
                                             Provider* cmdline_provider = nullptr,
-                                            bool no_mcp = false, bool no_tools = false);
+                                            bool no_mcp = false, bool no_tools = false,
+                                            const std::string& target_provider = "");
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
     virtual void init(bool no_mcp = false, bool no_tools = false) {}

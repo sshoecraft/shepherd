@@ -33,7 +33,7 @@ public:
         std::set<int> weekdays;     // 0-6 (0=Sunday)
     };
 
-    Scheduler();
+    Scheduler(const std::string& scheduler_name = "default");
     ~Scheduler();
 
     // Persistence
@@ -67,14 +67,13 @@ public:
     // Validation
     static bool validate_cron(const std::string& cron, std::string& error);
 
-    // Config path
-    static std::string get_config_path();
+    // Scheduler name
+    std::string name;
 
 private:
     std::vector<ScheduleEntry> schedules;
     std::atomic<bool> running;
     mutable std::mutex mutex;
-    std::string config_path;
     FireCallback fire_callback;
 
     // SIGALRM handler (static for signal compatibility)

@@ -192,6 +192,11 @@ ask_openai(prompt=what time is it)
   - Added nested tool call display with indentation
   - Fixed Gemini callback to emit TOOL_CALL events
 
+- v2.25.2: Added `headers` parameter to HTTPRequestTool, HTTPGetTool, HTTPPostTool
+  - Accepts an object of key-value pairs (e.g. `{"Authorization": "Bearer token"}`)
+  - Custom headers override defaults except User-Agent
+  - Content-Type defaults preserved when not explicitly set
+
 - v2.6.0: Replaced ToolRegistry singleton with instance-based Tools class
   - CLI and CLIServer each own their Tools instance
   - Removed global execute_tool() function

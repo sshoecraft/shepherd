@@ -24,6 +24,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <cstring>
 #include <getopt.h>
@@ -158,10 +159,12 @@ static void print_usage(int, char** argv) {
 	printf("	--memory-db		   Path to RAG memory database (default: ~/.local/share/shepherd/memory.db)\n");
 	printf("	--nomcp			   Disable MCP system (no MCP servers loaded)\n");
 	printf("	--nosched		   Disable scheduler (no scheduled tasks run)\n");
+	printf("	--scheduler NAME	   Named scheduler to use (default: 'default')\n");
 	printf("	--nostream		   Disable streaming (wait for complete response)\n");
 	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
+	printf("	--system-prompt-file   Read system prompt from file\n");
 	printf("	-e, --prompt TEXT  Initial user prompt (non-interactive single query)\n");
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
 	printf("	--apiserver		   Start HTTP API server mode (OpenAI-compatible)\n");
@@ -440,10 +443,21 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 }
 
 static int handle_sched_command(int argc, char** argv) {
+	// Initialize config if not already done
+	if (!config) {
+		config = std::make_unique<Config>();
+		config->load();
+	}
+
 	// Convert argc/argv to vector of args (skip "shepherd" and "sched")
+	// Also extract --scheduler flag if present
 	std::vector<std::string> args;
 	for (int i = 2; i < argc; i++) {
-		args.push_back(argv[i]);
+		if (std::string(argv[i]) == "--scheduler" && i + 1 < argc) {
+			config->scheduler_name = argv[++i];
+		} else {
+			args.push_back(argv[i]);
+		}
 	}
 
 	// Call common implementation with stdout output
@@ -696,6 +710,7 @@ int main(int argc, char** argv) {
 		std::string api_key;
 		std::string api_base;
 		std::string template_name;
+		std::string scheduler_name;
 		std::string memory_db;
 		std::string models_file;
 		std::string system_prompt;
@@ -730,10 +745,12 @@ int main(int argc, char** argv) {
 		{"models-file", required_argument, 0, 1024},
 		{"nomcp", no_argument, 0, 1005},
 		{"nosched", no_argument, 0, 1037},
+		{"scheduler", required_argument, 0, 1058},
 		{"nostream", no_argument, 0, 1041},
 		{"raw", no_argument, 0, 1043},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
+		{"system-prompt-file", required_argument, 0, 1057},
 		{"prompt", required_argument, 0, 'e'},
 		{"template", required_argument, 0, 1006},
 		{"apiserver", no_argument, 0, 1015},
@@ -832,6 +849,9 @@ int main(int argc, char** argv) {
 			case 1037: // --nosched
 				g_disable_scheduler = true;
 				break;
+			case 1058: // --scheduler
+				override.scheduler_name = optarg;
+				break;
 			case 1041: // --nostream
 				no_stream = true;
 				break;
@@ -845,6 +865,18 @@ int main(int argc, char** argv) {
 				override.system_prompt = optarg;
 				override.system_prompt_set = true;
 				break;
+			case 1057: { // --system-prompt-file
+				std::ifstream spf(optarg);
+				if (!spf.is_open()) {
+					fprintf(stderr, "Error: cannot open system prompt file: %s\n", optarg);
+					return 1;
+				}
+				std::ostringstream ss;
+				ss << spf.rdbuf();
+				override.system_prompt = ss.str();
+				override.system_prompt_set = true;
+				break;
+			}
 			case 1006: // --template
 				override.template_name = optarg;
 				break;
@@ -1102,6 +1134,9 @@ int main(int argc, char** argv) {
 	if (override.system_prompt_set) {
 		config->system_message = override.system_prompt;
 	}
+	if (!override.scheduler_name.empty()) {
+		config->scheduler_name = override.scheduler_name;
+	}
 	if (override.single_query_mode) {
 		config->single_query_mode = true;
 		config->initial_prompt = override.initial_prompt;
@@ -1287,7 +1322,8 @@ int main(int argc, char** argv) {
 		// Create and initialize frontend (loads providers, registers tools)
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
-		                                 cmdline_provider_ptr, no_mcp, no_tools);
+		                                 cmdline_provider_ptr, no_mcp, no_tools,
+		                                 override.provider);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

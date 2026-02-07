@@ -45,6 +45,8 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <pwd.h>
+#include <grp.h>
+#include <sys/prctl.h>
 #include <set>
 
 // MPI support for multi-GPU TensorRT
@@ -451,6 +453,21 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 static void apply_chroot(const std::string& chroot_path, const std::string& run_as_user) {
 	if (chroot_path.empty()) return;
 
+	// Resolve uid/gid BEFORE chroot while we still have access to /etc/passwd and NSS
+	uid_t target_uid = 0;
+	gid_t target_gid = 0;
+	bool drop_privs = false;
+	if (!run_as_user.empty()) {
+		struct passwd* pw = getpwnam(run_as_user.c_str());
+		if (!pw) {
+			fprintf(stderr, "Unknown user: %s\n", run_as_user.c_str());
+			exit(1);
+		}
+		target_uid = pw->pw_uid;
+		target_gid = pw->pw_gid;
+		drop_privs = true;
+	}
+
 	if (chroot(chroot_path.c_str()) != 0) {
 		perror("chroot failed");
 		exit(1);
@@ -460,22 +477,32 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 		exit(1);
 	}
 
-	if (!run_as_user.empty()) {
-		struct passwd* pw = getpwnam(run_as_user.c_str());
-		if (!pw) {
-			fprintf(stderr, "Unknown user: %s\n", run_as_user.c_str());
+	// Close inherited file descriptors to prevent jail bypass via leaked FDs
+	long max_fd = sysconf(_SC_OPEN_MAX);
+	if (max_fd < 0) max_fd = 1024;
+	for (int fd = 3; fd < max_fd; fd++) {
+		close(fd);
+	}
+
+	if (drop_privs) {
+		// Clear supplementary groups before dropping privileges
+		if (setgroups(0, NULL) != 0) {
+			perror("setgroups failed");
 			exit(1);
 		}
-		if (setgid(pw->pw_gid) != 0) {
+		if (setgid(target_gid) != 0) {
 			perror("setgid failed");
 			exit(1);
 		}
-		if (setuid(pw->pw_uid) != 0) {
+		if (setuid(target_uid) != 0) {
 			perror("setuid failed");
 			exit(1);
 		}
 		dout(1) << "Dropped privileges to user: " + run_as_user << std::endl;
 	}
+
+	// Prevent privilege escalation via setuid binaries or file capabilities
+	prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
 
 	dout(1) << "Chrooted to: " + chroot_path << std::endl;
 }

@@ -4,7 +4,7 @@
 #include "tools/tool.h"
 #include "tools/tool_parser.h"
 #include "models.h"
-#include "../include/minja.hpp"
+#include "minja.hpp"
 #include "nlohmann/json.hpp"
 #include "config.h"
 #include "rag.h"

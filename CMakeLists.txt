@@ -128,6 +128,7 @@ add_executable(shepherd ${SHEPHERD_SOURCES})
 # Include directories
 target_include_directories(shepherd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/frontends
     ${SQLITE3_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}

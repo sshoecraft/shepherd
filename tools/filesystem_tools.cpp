@@ -1,7 +1,7 @@
 #include "shepherd.h"
 #include "filesystem_tools.h"
 #include "tools.h"
-#include "../include/base64.hpp"
+#include "base64.hpp"
 
 #include <filesystem>
 #include <fstream>

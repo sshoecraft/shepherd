@@ -4,7 +4,7 @@
 #include "gpu.h"
 #include "models.h"
 #include "chat_template.h"
-#include "../include/minja.hpp"
+#include "minja.hpp"
 #include <regex>
 
 #ifdef ENABLE_LLAMACPP

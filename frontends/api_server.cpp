@@ -298,11 +298,14 @@ void APIServer::register_endpoints() {
                 return;
             }
 
-            // Log the last message (current user prompt)
+            // Log the last message with role-appropriate tag
             if (request.contains("messages") && request["messages"].is_array() && !request["messages"].empty()) {
                 const auto& last_msg = request["messages"].back();
                 if (last_msg.contains("content") && last_msg["content"].is_string()) {
-                    std::cout << "[prompt] " << req.remote_addr << " " << last_msg["content"].get<std::string>() << std::endl;
+                    std::string role = last_msg.value("role", "user");
+                    std::string tag = (role == "assistant") ? "assistant" :
+                                      (role == "tool")      ? "tool-result" : "prompt";
+                    std::cout << "[" << tag << "] " << req.remote_addr << " " << last_msg["content"].get<std::string>() << std::endl;
                 }
             }
 

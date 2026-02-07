@@ -159,7 +159,18 @@ std::string Config::get_home_directory() {
     throw ConfigError("Unable to determine home directory");
 }
 
+static std::string g_config_path_override;
+
+void Config::set_config_path_override(const std::string& path) {
+    g_config_path_override = path;
+}
+
 std::string Config::get_default_config_path() {
+    // Return override if set (from --config flag before subcommand dispatch)
+    if (!g_config_path_override.empty()) {
+        return g_config_path_override;
+    }
+
     // Use XDG base directory
     std::string config_home;
     const char* xdg_config = getenv("XDG_CONFIG_HOME");

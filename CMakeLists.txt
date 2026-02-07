@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.26.0
+    VERSION 2.26.1
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
@@ -50,6 +50,7 @@ set(SHEPHERD_SOURCES
     server.cpp
     auth.cpp
     azure_msi.cpp
+    hashicorp_vault.cpp
     session_manager.cpp
 
     # Frontend sources

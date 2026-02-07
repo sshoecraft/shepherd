@@ -34,8 +34,12 @@ public:
     // Get user's home directory (tries getpwuid first, then HOME env var)
     static std::string get_home_directory();
 
-    // Get default config path (XDG-compliant)
+    // Get default config path (XDG-compliant), or override if set
     static std::string get_default_config_path();
+
+    // Set a global config path override (used before subcommand dispatch)
+    static void set_config_path_override(const std::string& path);
+
 
     // Get default memory database path (XDG-compliant)
     static std::string get_default_memory_db_path();
@@ -89,11 +93,11 @@ public:
     nlohmann::json schedulers_json;          // All schedulers data
 
     // Config source mode
-    enum class SourceMode { LOCAL_FILE, KEY_VAULT };
+    enum class SourceMode { LOCAL_FILE, KEY_VAULT, HASHICORP_VAULT };
     SourceMode source_mode = SourceMode::LOCAL_FILE;
     std::string keyvault_name;  // Azure Key Vault name (when source_mode == KEY_VAULT)
 
-    // Check if config is read-only (Key Vault mode)
+    // Check if config is read-only (vault modes)
     bool is_read_only() const { return source_mode != SourceMode::LOCAL_FILE; }
 
     // Legacy/runtime fields (not saved to config, only used for command-line overrides)

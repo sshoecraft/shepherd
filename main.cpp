@@ -21,6 +21,7 @@
 #include "scheduler.h"
 #include "auth.h"
 #include "azure_msi.h"
+#include "hashicorp_vault.h"
 
 #include <iostream>
 #include <fstream>
@@ -43,6 +44,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <cerrno>
+#include <pwd.h>
+#include <set>
 
 // MPI support for multi-GPU TensorRT
 #ifdef ENABLE_TENSORRT
@@ -129,7 +132,10 @@ static void print_usage(int, char** argv) {
 	printf("\nOptions:\n");
 	printf("	-c, --config FILE  Specify config file (default: ~/.shepherd/config.json)\n");
 	printf("	                   Use '--config msi --kv <vault>' to load from Azure Key Vault\n");
-	printf("	--kv VAULT         Azure Key Vault name (requires --config msi)\n");
+	printf("	                   Use '--config vault --kv <addr>' to load from HashiCorp Vault\n");
+	printf("	--kv VAULT         Azure Key Vault name or HashiCorp Vault address\n");
+	printf("	--chroot PATH      Chroot to PATH before LLM interaction (requires root/CAP_SYS_CHROOT)\n");
+	printf("	--run-as USER      Drop privileges to USER after chroot\n");
 #ifdef _DEBUG
 	printf("	-d, --debug[=N]    Enable debug mode with optional level (1-9, default: 1)\n");
 #endif
@@ -442,6 +448,38 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 	return 1;
 }
 
+static void apply_chroot(const std::string& chroot_path, const std::string& run_as_user) {
+	if (chroot_path.empty()) return;
+
+	if (chroot(chroot_path.c_str()) != 0) {
+		perror("chroot failed");
+		exit(1);
+	}
+	if (chdir("/") != 0) {
+		perror("chdir failed after chroot");
+		exit(1);
+	}
+
+	if (!run_as_user.empty()) {
+		struct passwd* pw = getpwnam(run_as_user.c_str());
+		if (!pw) {
+			fprintf(stderr, "Unknown user: %s\n", run_as_user.c_str());
+			exit(1);
+		}
+		if (setgid(pw->pw_gid) != 0) {
+			perror("setgid failed");
+			exit(1);
+		}
+		if (setuid(pw->pw_uid) != 0) {
+			perror("setuid failed");
+			exit(1);
+		}
+		dout(1) << "Dropped privileges to user: " + run_as_user << std::endl;
+	}
+
+	dout(1) << "Chrooted to: " + chroot_path << std::endl;
+}
+
 static int handle_sched_command(int argc, char** argv) {
 	// Initialize config if not already done
 	if (!config) {
@@ -599,13 +637,46 @@ int main(int argc, char** argv) {
 	}
 	bool is_mpi_leader = (mpi_rank == 0);
 
+	// Pre-scan argv for --config/-c flag and find the subcommand
+	// This allows: shepherd --config /path/to/file smcp add ...
+	std::string pre_config_path;
+	std::string subcommand;
+	int subcommand_index = -1;
+	// Rebuilt argv with --config/-c stripped so subcommand handlers see clean args
+	std::vector<char*> subcmd_argv;
+	int subcmd_argc = 0;
+	{
+		static const std::set<std::string> known_subcmds = {
+			"edit-system", "tools", "provider", "config", "mcp",
+			"smcp", "sched", "ctl", "apikey"
+		};
+		subcmd_argv.push_back(argv[0]);  // program name always first
+		for (int i = 1; i < argc; i++) {
+			std::string arg = argv[i];
+			if ((arg == "-c" || arg == "--config") && i + 1 < argc) {
+				pre_config_path = argv[++i];  // consume the value, skip both
+			} else {
+				if (subcommand.empty() && known_subcmds.count(arg)) {
+					subcommand = arg;
+					subcommand_index = i;
+				}
+				subcmd_argv.push_back(argv[i]);
+			}
+		}
+		subcmd_argc = subcmd_argv.size();
+		// If a config path was specified, set it globally before subcommand dispatch
+		if (!pre_config_path.empty() && pre_config_path != "msi" && pre_config_path != "vault") {
+			Config::set_config_path_override(pre_config_path);
+		}
+	}
+
 	// Handle edit-system subcommand
-	if (argc >= 2 && std::string(argv[1]) == "edit-system") {
-		return handle_edit_system_command(argc, argv);
+	if (subcommand == "edit-system") {
+		return handle_edit_system_command(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle tools subcommand
-	if (argc >= 2 && std::string(argv[1]) == "tools") {
+	if (subcommand == "tools") {
 		// Initialize tools system
 		Tools tools;
 		register_filesystem_tools(tools);
@@ -630,32 +701,32 @@ int main(int argc, char** argv) {
 	}
 
 	// Handle provider subcommand
-	if (argc >= 2 && std::string(argv[1]) == "provider") {
-		return handle_provider_subcommand(argc, argv);
+	if (subcommand == "provider") {
+		return handle_provider_subcommand(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle config subcommand
-	if (argc >= 2 && std::string(argv[1]) == "config") {
-		return handle_config_subcommand(argc, argv);
+	if (subcommand == "config") {
+		return handle_config_subcommand(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle MCP subcommand
-	if (argc >= 2 && std::string(argv[1]) == "mcp") {
-		return handle_mcp_subcommand(argc, argv);
+	if (subcommand == "mcp") {
+		return handle_mcp_subcommand(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle SMCP subcommand (config-only, no server connection)
-	if (argc >= 2 && std::string(argv[1]) == "smcp") {
-		return handle_smcp_subcommand(argc, argv);
+	if (subcommand == "smcp") {
+		return handle_smcp_subcommand(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle sched subcommand
-	if (argc >= 2 && std::string(argv[1]) == "sched") {
-		return handle_sched_command(argc, argv);
+	if (subcommand == "sched") {
+		return handle_sched_command(subcmd_argc, subcmd_argv.data());
 	}
 
 	// Handle ctl subcommand (server control)
-	if (argc >= 2 && std::string(argv[1]) == "ctl") {
+	if (subcommand == "ctl") {
 		std::vector<std::string> args;
 		for (int i = 2; i < argc; i++) {
 			args.push_back(argv[i]);
@@ -664,7 +735,7 @@ int main(int argc, char** argv) {
 	}
 
 	// Handle apikey subcommand (API key management)
-	if (argc >= 2 && std::string(argv[1]) == "apikey") {
+	if (subcommand == "apikey") {
 		std::vector<std::string> args;
 		for (int i = 2; i < argc; i++) {
 			args.push_back(argv[i]);
@@ -681,7 +752,9 @@ int main(int argc, char** argv) {
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string config_file_path;
-	std::string keyvault_name;  // Azure Key Vault name for --config msi --kv <vault>
+	std::string keyvault_name;  // Azure Key Vault name or HashiCorp Vault address
+	std::string chroot_path;
+	std::string run_as_user;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
 	std::string auth_mode = "none";
@@ -784,6 +857,9 @@ int main(int argc, char** argv) {
 		{"no-tui", no_argument, 0, 1039},
 		{"calibration", no_argument, 0, 1034},
 		{"kv", required_argument, 0, 1046},
+		{"chroot", required_argument, 0, 1059},
+		{"run-as", required_argument, 0, 1060},
+		{"user", required_argument, 0, 1060},  // Alias for --run-as
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -1012,8 +1088,14 @@ int main(int argc, char** argv) {
 			case 1034: // --calibration
 				override.calibration = true;
 				break;
-			case 1046: // --kv (Azure Key Vault name for MSI config)
+			case 1046: // --kv (vault name/address)
 				keyvault_name = optarg;
+				break;
+			case 1059: // --chroot
+				chroot_path = optarg;
+				break;
+			case 1060: // --run-as
+				run_as_user = optarg;
 				break;
 			case 'v':
 				printf("Shepherd version %s\n", SHEPHERD_VERSION);
@@ -1030,7 +1112,7 @@ int main(int argc, char** argv) {
 	// Load configuration early (before terminal init to get TUI setting)
 	config = std::make_unique<Config>();
 
-	// Check for Azure Managed Identity config source
+	// Check for vault-based config sources
 	if (config_file_path == "msi") {
 		// Load config from Azure Key Vault using Managed Identity
 		if (keyvault_name.empty()) {
@@ -1052,6 +1134,28 @@ int main(int argc, char** argv) {
 			dout(1) << "Loaded config from Key Vault (read-only mode)" << std::endl;
 		} catch (const ConfigError& e) {
 			fprintf(stderr, "Error parsing Key Vault config: %s\n", e.what());
+			return 1;
+		}
+	} else if (config_file_path == "vault") {
+		// Load config from HashiCorp Vault using pre-injected token
+		if (keyvault_name.empty()) {
+			fprintf(stderr, "Error: --config vault requires --kv <vault-address>\n");
+			return 1;
+		}
+
+		auto secret = hashicorp_vault::get_config(keyvault_name);
+		if (!secret) {
+			fprintf(stderr, "Error: Failed to fetch config from Vault '%s'\n",
+			        keyvault_name.c_str());
+			return 1;
+		}
+
+		try {
+			config->load_from_json_string(*secret);
+			config->source_mode = Config::SourceMode::HASHICORP_VAULT;
+			dout(1) << "Loaded config from HashiCorp Vault (read-only mode)" << std::endl;
+		} catch (const ConfigError& e) {
+			fprintf(stderr, "Error parsing Vault config: %s\n", e.what());
 			return 1;
 		}
 	} else {
@@ -1359,6 +1463,8 @@ int main(int argc, char** argv) {
 			}
 
 			// Only rank 0 continues to run server
+			// Apply chroot sandbox before LLM interaction
+			apply_chroot(chroot_path, run_as_user);
 			// Provider connection happens inside run()
 			return frontend->run(provider_for_run);
 		}
@@ -1385,6 +1491,8 @@ int main(int argc, char** argv) {
 	// ============================================================================
 	// Run Frontend - provider connection happens inside run()
 	// ============================================================================
+	// Apply chroot sandbox before LLM interaction
+	apply_chroot(chroot_path, run_as_user);
 	int result = frontend->run(provider_for_run);
 
 	// Clean shutdown for MPI

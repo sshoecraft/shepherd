@@ -5,7 +5,7 @@
 #include <ctime>
 
 // Minja includes
-#include "llama.cpp/vendor/minja/minja.hpp"
+#include "../include/minja.hpp"
 
 // External config for thinking setting
 #include "config.h"

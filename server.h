@@ -2,7 +2,7 @@
 
 #include "frontend.h"
 #include "auth.h"
-#include "llama.cpp/vendor/cpp-httplib/httplib.h"
+#include "include/httplib.h"
 #include "nlohmann/json.hpp"
 #include <memory>
 #include <string>

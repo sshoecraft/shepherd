@@ -3,7 +3,7 @@
 #include "models.h"
 #include "tools/tool.h"
 #include "nlohmann/json.hpp"
-#include "llama.cpp/vendor/minja/minja.hpp"
+#include "../include/minja.hpp"
 #include <algorithm>
 #include <cctype>
 #include <sstream>

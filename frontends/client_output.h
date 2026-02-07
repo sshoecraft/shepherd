@@ -4,7 +4,7 @@
 #include <functional>
 #include <atomic>
 #include "nlohmann/json.hpp"
-#include "llama.cpp/vendor/cpp-httplib/httplib.h"
+#include "../include/httplib.h"
 
 namespace ClientOutputs {
 

@@ -92,12 +92,13 @@ if(ENABLE_API_BACKENDS)
 endif()
 
 if(ENABLE_LLAMACPP)
-    set(LLAMACPP_DIR ${CMAKE_SOURCE_DIR}/llama.cpp)
+    set(LLAMACPP_DIR ${CMAKE_SOURCE_DIR}/vendor/llama.cpp)
     target_compile_definitions(shepherd_testlib PUBLIC ENABLE_LLAMACPP)
     target_include_directories(shepherd_testlib PUBLIC
-        ${CMAKE_SOURCE_DIR}/llama.cpp/include
-        ${CMAKE_SOURCE_DIR}/llama.cpp/ggml/include
-        ${CMAKE_SOURCE_DIR}/llama.cpp/common
+        ${LLAMACPP_DIR}/include
+        ${LLAMACPP_DIR}/ggml/include
+        ${LLAMACPP_DIR}/common
+        ${LLAMACPP_DIR}/src
     )
     target_link_libraries(shepherd_testlib PUBLIC
         ${LLAMACPP_DIR}/build/common/libcommon.a

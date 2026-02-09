@@ -1,6 +1,6 @@
 #include "shepherd.h"
 #include "tool_parser.h"
-#include "../nlohmann/json.hpp"
+#include "nlohmann/json.hpp"
 
 #include <sstream>
 #include <regex>

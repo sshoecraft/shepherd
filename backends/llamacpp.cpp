@@ -15,11 +15,11 @@
 // Use config->thinking instead of config->thinking
 
 #ifdef ENABLE_LLAMACPP
-#include "llama.cpp/include/llama.h"
-#include "llama.cpp/src/llama-batch.h"
-#include "llama.cpp/common/chat.h"
-#include "llama.cpp/common/sampling.h"
-#include "llama.cpp/common/speculative.h"
+#include "llama.h"
+#include "llama-batch.h"
+#include "chat.h"
+#include "sampling.h"
+#include "speculative.h"
 #endif
 
 // Helper to build consistent ContextFullException message

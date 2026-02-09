@@ -84,7 +84,13 @@ void GenerationThread::worker_loop() {
                 current_request.tool_name,
                 current_request.tool_id
             );
+            if (current_request.role == Message::USER) {
+                frontend->enrich_with_rag_context(frontend->session);
+            }
             frontend->generate_response(current_request.max_tokens);
+
+            // Queue memory extraction after generation completes
+            frontend->queue_memory_extraction();
 
             dout(1) << "GenerationThread: generation complete" << std::endl;
 

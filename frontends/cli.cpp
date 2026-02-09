@@ -308,6 +308,9 @@ int CLI::run(Provider* cmdline_provider) {
         cli_debug(1, "Input thread started");
     }
 
+    // Track idle time for memory extraction
+    auto last_activity = std::chrono::steady_clock::now();
+
     // Main loop - wait for input from queue with timeout for scheduler polling
     while (true) {
         // Poll scheduler (prompts go to queue via add_input callback)
@@ -317,6 +320,16 @@ int CLI::run(Provider* cmdline_provider) {
 
         // Wait for input with 100ms timeout (allows scheduler polling)
         auto queued = wait_for_input(100);
+
+        // Check idle timeout for memory extraction
+        if (config->memory_extraction && config->memory_extraction_idle_timeout > 0 && extraction_thread) {
+            auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - last_activity).count();
+            if (idle_ms > config->memory_extraction_idle_timeout * 1000) {
+                queue_memory_extraction();
+                last_activity = std::chrono::steady_clock::now();
+            }
+        }
 
         // Check for EOF
         if (eof_received) {
@@ -331,6 +344,7 @@ int CLI::run(Provider* cmdline_provider) {
         }
 
         std::string user_input = queued.text;
+        last_activity = std::chrono::steady_clock::now();
 
         // Display user prompt via callback (unified with TUI and CLI Server)
         // Only echo in interactive mode - piped input is already visible in terminal
@@ -397,9 +411,13 @@ int CLI::run(Provider* cmdline_provider) {
         {
             auto lock = backend->acquire_lock();
             add_message_to_session(Message::USER, user_input);
+            enrich_with_rag_context(session);
             generate_response();
         }
         exit_generation_mode();
+
+        // Queue memory extraction after response
+        queue_memory_extraction();
 
         // Exit after response completes in single query mode (--prompt)
         if (config->single_query_mode) {
@@ -416,6 +434,13 @@ int CLI::run(Provider* cmdline_provider) {
         if (backend->is_gpu) {
             fprintf(stderr, "tokens: %d/%zu\n", session.total_tokens, backend->context_size);
         }
+    }
+
+    // Flush any remaining memory extraction before shutdown
+    if (extraction_thread) {
+        queue_memory_extraction();  // Queue any remaining unprocessed turns
+        extraction_thread->flush();
+        extraction_thread->stop();
     }
 
     // Cleanup

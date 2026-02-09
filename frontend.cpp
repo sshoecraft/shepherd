@@ -15,6 +15,9 @@
 #include <algorithm>
 #include <sstream>
 #include <regex>
+#include <unistd.h>
+#include <climits>
+#include <pwd.h>
 
 // Use config->thinking instead of g_show_thinking
 
@@ -40,6 +43,10 @@ Frontend::Frontend() {
 }
 
 Frontend::~Frontend() {
+    if (extraction_thread) {
+        extraction_thread->flush();
+        extraction_thread->stop();
+    }
 }
 
 std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider) {
@@ -169,6 +176,31 @@ bool Frontend::connect_provider(const std::string& name) {
 }
 
 void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
+    // Resolve user_id: config override > hostname:username auto-detect > "unknown"
+    if (!config->user_id.empty()) {
+        user_id = config->user_id;
+    } else {
+        char hostname[HOST_NAME_MAX + 1] = {};
+        if (gethostname(hostname, sizeof(hostname)) != 0) {
+            hostname[0] = '\0';
+        }
+        std::string username;
+        struct passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_name) {
+            username = pw->pw_name;
+        }
+        if (hostname[0] && !username.empty()) {
+            user_id = std::string(hostname) + ":" + username;
+        } else if (!username.empty()) {
+            user_id = username;
+        } else if (hostname[0]) {
+            user_id = hostname;
+        } else {
+            user_id = "unknown";
+        }
+    }
+    dout(1) << "Frontend user_id: " << user_id << std::endl;
+
     // Initialize RAG system using global config
     std::string db_path = config->memory_database;
     if (db_path.empty()) {
@@ -186,7 +218,24 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
     if (!RAGManager::initialize(db_path, config->max_db_size)) {
         throw std::runtime_error("Failed to initialize RAG system");
     }
+
+    // Set user_id for RAG operations on the main thread
+    RAGManager::set_current_user_id(user_id);
+    if (user_id == "unknown") {
+        dout(1) << "WARNING: user_id is 'unknown' - RAG storage and injection disabled" << std::endl;
+    }
     dout(1) << "RAG initialized with database: " + db_path << std::endl;
+
+    // Start memory extraction thread if enabled and configured
+    if (config->memory_extraction) {
+        if (config->memory_extraction_endpoint.empty() || config->memory_extraction_model.empty()) {
+            std::cerr << "memory_extraction enabled but memory_extraction_endpoint or memory_extraction_model not set, disabling" << std::endl;
+        } else {
+            extraction_thread = std::make_unique<MemoryExtractionThread>();
+            extraction_thread->start();
+            dout(1) << "Memory extraction thread started (model=" + config->memory_extraction_model + ", endpoint=" + config->memory_extraction_endpoint + ")" << std::endl;
+        }
+    }
 
     if (no_tools) {
         dout(1) << "Tools disabled" << std::endl;
@@ -357,6 +406,187 @@ void Frontend::add_message_to_session(Message::Role role,
     dout(1) << "Frontend::add_message_to_session: role=" + std::to_string(static_cast<int>(role)) +
              ", tokens=" + std::to_string(message_tokens) +
              ", total_tokens=" + std::to_string(session.total_tokens) << std::endl;
+}
+
+std::string Frontend::extract_keywords(const std::string& message) {
+    static const std::vector<std::string> stop_words = {
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "and", "or", "not", "no", "but", "if", "then", "so", "too",
+        "of", "to", "for", "in", "on", "at", "by", "with", "from", "up",
+        "about", "into", "through", "during", "before", "after",
+        "what", "how", "who", "where", "when", "why", "which",
+        "do", "does", "did", "have", "has", "had",
+        "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+        "i", "me", "my", "mine", "we", "us", "our", "ours",
+        "you", "your", "yours",
+        "he", "him", "his", "she", "her", "hers",
+        "it", "its", "they", "them", "their", "theirs",
+        "this", "that", "these", "those",
+        "am", "just", "also", "very", "really", "please", "thanks", "thank",
+        "tell", "know", "think", "want", "need", "like", "get", "got",
+        "some", "any", "all", "each", "every", "both", "few", "more", "most",
+        "other", "another"
+    };
+
+    std::istringstream iss(message);
+    std::string word;
+    std::vector<std::string> keywords;
+
+    while (iss >> word) {
+        // Strip punctuation and lowercase
+        std::string lower;
+        lower.reserve(word.size());
+        for (char c : word) {
+            if (std::isalnum(static_cast<unsigned char>(c))) {
+                lower += std::tolower(static_cast<unsigned char>(c));
+            }
+        }
+        if (lower.empty()) continue;
+        if (lower.length() <= 2) continue;
+
+        if (std::find(stop_words.begin(), stop_words.end(), lower) == stop_words.end()) {
+            keywords.push_back(lower);
+        }
+    }
+
+    std::string result;
+    for (size_t i = 0; i < keywords.size(); i++) {
+        if (i > 0) result += " ";
+        result += keywords[i];
+    }
+    return result;
+}
+
+void Frontend::enrich_with_rag_context(Session& sess) {
+    if (!config || !config->rag_context_injection) return;
+    if (!RAGManager::is_initialized()) return;
+    if (RAGManager::get_current_user_id() == "unknown") return;
+    if (sess.messages.empty()) return;
+    if (sess.last_user_message_index < 0) return;
+
+    Message& last_msg = sess.messages[sess.last_user_message_index];
+    if (last_msg.role != Message::USER) return;
+
+    std::string keywords = extract_keywords(last_msg.content);
+    if (keywords.empty()) {
+        dout(1) << "RAG context injection: no keywords extracted, skipping" << std::endl;
+        return;
+    }
+
+    dout(1) << "RAG context injection: searching with keywords: " + keywords << std::endl;
+
+    auto results = RAGManager::search_memory(keywords, config->rag_max_results);
+    if (results.empty()) {
+        dout(1) << "RAG context injection: no results found" << std::endl;
+        return;
+    }
+
+    // Filter by relevance threshold
+    std::vector<SearchResult> relevant;
+    for (const auto& r : results) {
+        if (r.relevance_score >= config->rag_relevance_threshold) {
+            relevant.push_back(r);
+        }
+    }
+
+    if (relevant.empty()) {
+        dout(1) << "RAG context injection: no results above threshold "
+                + std::to_string(config->rag_relevance_threshold) << std::endl;
+        return;
+    }
+
+    // Build context string
+    std::string context;
+    for (size_t i = 0; i < relevant.size(); i++) {
+        if (i > 0) context += " | ";
+        context += relevant[i].content;
+    }
+
+    // Postfix onto user message
+    last_msg.content += "\n\n[context: " + context + "]";
+
+    std::cout << "[prompt+context] " << last_msg.content << std::endl;
+
+    dout(1) << "RAG context injection: enriched message with "
+            + std::to_string(relevant.size()) + " result(s)" << std::endl;
+
+    // Recount tokens and update session totals
+    if (backend) {
+        int old_tokens = last_msg.tokens;
+        last_msg.tokens = backend->count_message_tokens(
+            Message::USER, last_msg.content, "", "");
+        int delta = last_msg.tokens - old_tokens;
+        sess.total_tokens += delta;
+        sess.last_user_message_tokens = last_msg.tokens;
+
+        dout(1) << "RAG context injection: tokens " + std::to_string(old_tokens)
+                + " -> " + std::to_string(last_msg.tokens)
+                + " (delta=" + std::to_string(delta) + ")" << std::endl;
+    }
+}
+
+void Frontend::queue_memory_extraction() {
+    if (!config || !config->memory_extraction) return;
+    if (!extraction_thread || !extraction_thread->is_running()) return;
+    if (!RAGManager::is_initialized()) return;
+    if (user_id == "unknown") return;
+
+    // Count user turns since last extraction
+    int new_user_turns = 0;
+    for (size_t i = static_cast<size_t>(std::max(0, extraction_thread->last_processed_index + 1));
+         i < session.messages.size(); i++) {
+        if (session.messages[i].role == Message::USER) {
+            new_user_turns++;
+        }
+    }
+
+    if (new_user_turns < config->memory_extraction_min_turns) return;
+
+    // Deep copy messages into work item
+    ExtractionWorkItem item;
+    item.messages.assign(session.messages.begin(), session.messages.end());
+    item.session_id = current_provider;
+    item.user_id = user_id;
+    item.timestamp = ConversationTurn::get_current_timestamp();
+    item.start_index = extraction_thread->last_processed_index + 1;
+
+    if (item.start_index >= static_cast<int>(item.messages.size())) return;
+
+    extraction_thread->queue(std::move(item));
+    dout(1) << "Queued memory extraction: " << new_user_turns << " new user turns" << std::endl;
+}
+
+void Frontend::queue_memory_extraction_last(const Session& sess, const std::string& req_user_id) {
+    if (!config || !config->memory_extraction) return;
+    if (!extraction_thread || !extraction_thread->is_running()) return;
+    if (!RAGManager::is_initialized()) return;
+    if (req_user_id == "unknown") return;
+
+    // Find last USER and last ASSISTANT messages
+    const Message* last_user = nullptr;
+    const Message* last_assistant = nullptr;
+    for (auto it = sess.messages.rbegin(); it != sess.messages.rend(); ++it) {
+        if (!last_assistant && it->role == Message::ASSISTANT) {
+            last_assistant = &(*it);
+        }
+        if (!last_user && it->role == Message::USER) {
+            last_user = &(*it);
+        }
+        if (last_user && last_assistant) break;
+    }
+
+    if (!last_user || !last_assistant) return;
+
+    ExtractionWorkItem item;
+    item.messages.push_back(*last_user);
+    item.messages.push_back(*last_assistant);
+    item.session_id = "api";
+    item.user_id = req_user_id;
+    item.timestamp = ConversationTurn::get_current_timestamp();
+    item.start_index = 0;
+
+    extraction_thread->queue(std::move(item));
+    dout(1) << "Queued memory extraction (last exchange) for user " << req_user_id << std::endl;
 }
 
 bool Frontend::generate_response(int max_tokens) {

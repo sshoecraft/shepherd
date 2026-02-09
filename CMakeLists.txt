@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.26.1
+    VERSION 2.28.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
@@ -41,6 +41,7 @@ set(SHEPHERD_SOURCES
     generation_thread.cpp
     http_client.cpp
     rag.cpp
+    memory_extraction.cpp
     rag/database_factory.cpp
     rag/sqlite_backend.cpp
     sse_parser.cpp
@@ -372,11 +373,12 @@ endif()
 if(ENABLE_LLAMACPP)
     target_compile_definitions(shepherd PRIVATE ENABLE_LLAMACPP)
     # Link llama.cpp library
-    set(LLAMACPP_DIR "${CMAKE_SOURCE_DIR}/llama.cpp")
+    set(LLAMACPP_DIR "${CMAKE_SOURCE_DIR}/vendor/llama.cpp")
     target_include_directories(shepherd PRIVATE
         ${LLAMACPP_DIR}/include
         ${LLAMACPP_DIR}/ggml/include
         ${LLAMACPP_DIR}/common
+        ${LLAMACPP_DIR}/src
     )
 
     # Determine shared library extension based on platform

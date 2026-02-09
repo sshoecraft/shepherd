@@ -51,7 +51,8 @@ CREATE TABLE conversations (
     user_message TEXT NOT NULL,
     assistant_response TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    content_hash TEXT UNIQUE NOT NULL
+    content_hash TEXT UNIQUE NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'local'
 );
 
 -- FTS5 virtual table for full-text search
@@ -80,6 +81,7 @@ CREATE TABLE conversations (
     assistant_response TEXT NOT NULL,
     timestamp BIGINT NOT NULL,
     content_hash CHAR(64) UNIQUE NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'local',
     search_vector TSVECTOR GENERATED ALWAYS AS (
         setweight(to_tsvector('english', user_message), 'A') ||
         setweight(to_tsvector('english', assistant_response), 'B')
@@ -88,6 +90,7 @@ CREATE TABLE conversations (
 
 CREATE INDEX conversations_search_idx ON conversations USING GIN(search_vector);
 CREATE INDEX conversations_timestamp_idx ON conversations(timestamp);
+CREATE INDEX conversations_user_id_idx ON conversations(user_id);
 
 CREATE TABLE facts (
     key TEXT PRIMARY KEY NOT NULL,
@@ -165,10 +168,24 @@ std::vector<SearchResult> RAGManager::search(const std::string& query, int max_r
 void RAGManager::set_fact(const std::string& key, const std::string& value);
 std::string RAGManager::get_fact(const std::string& key);
 bool RAGManager::clear_fact(const std::string& key);
+
+// Multi-tenant user isolation (thread-local)
+void RAGManager::set_current_user_id(const std::string& id);
+std::string RAGManager::get_current_user_id();
 ```
+
+## Multi-Tenant Isolation
+
+All write/search/clear operations filter by `user_id`. The active user is controlled via thread-local `RAGManager::current_user_id`:
+- API server sets it per-request from API key prefix
+- CLI/TUI defaults to `"local"`
+- Memory extraction thread sets it from work item
+
+See `memory_extraction.md` for the background extraction system.
 
 ## History
 
+- **v2.28.0**: Added user_id column for multi-tenant isolation, WAL mode for SQLite concurrent access, idempotent schema migration
 - **v2.25.1**: Added `schema` parameter to PostgreSQL connection string for search_path
 - **v2.23.0**: Added PostgreSQL backend support with abstract DatabaseBackend interface
 - **v2.22.x**: Initial SQLite-only implementation with FTS5

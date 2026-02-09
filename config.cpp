@@ -48,10 +48,30 @@ void Config::set_defaults() {
     max_db_size_str = "10G";
     max_db_size = parse_size_string(max_db_size_str);
 
+    // RAG context injection defaults (disabled by default)
+    rag_context_injection = false;
+    rag_relevance_threshold = 0.3;
+    rag_max_results = 3;
+
     // Web search defaults (disabled by default)
     web_search_provider = "";
     web_search_api_key = "";
     web_search_instance_url = "";
+
+    // User identity (empty = auto-detect)
+    user_id = "";
+
+    // Memory extraction defaults (disabled by default)
+    memory_extraction = false;
+    memory_extraction_model = "";
+    memory_extraction_endpoint = "";
+    memory_extraction_api_key = "";
+    memory_extraction_max_tokens = 512;
+    memory_extraction_temperature = 0.1;
+    memory_extraction_min_turns = 2;
+    memory_extraction_idle_timeout = 180;
+    memory_extraction_max_turns = 20;
+    memory_extraction_queue_limit = 0;
 
 	// Tool truncation limit, in tokens (0 = use 85% of available space)
 	truncate_limit = 0;
@@ -396,6 +416,54 @@ void Config::load_from_json(const nlohmann::json& j) {
         }
     }
 
+    // Load RAG context injection settings
+    if (j.contains("rag_context_injection")) {
+        rag_context_injection = j["rag_context_injection"].get<bool>();
+    }
+    if (j.contains("rag_relevance_threshold")) {
+        rag_relevance_threshold = j["rag_relevance_threshold"].get<double>();
+    }
+    if (j.contains("rag_max_results")) {
+        rag_max_results = j["rag_max_results"].get<int>();
+    }
+
+    // Load user identity
+    if (j.contains("user_id")) {
+        user_id = j["user_id"].get<std::string>();
+    }
+
+    // Load memory extraction settings
+    if (j.contains("memory_extraction")) {
+        memory_extraction = j["memory_extraction"].get<bool>();
+    }
+    if (j.contains("memory_extraction_model")) {
+        memory_extraction_model = j["memory_extraction_model"].get<std::string>();
+    }
+    if (j.contains("memory_extraction_endpoint")) {
+        memory_extraction_endpoint = j["memory_extraction_endpoint"].get<std::string>();
+    }
+    if (j.contains("memory_extraction_api_key")) {
+        memory_extraction_api_key = j["memory_extraction_api_key"].get<std::string>();
+    }
+    if (j.contains("memory_extraction_max_tokens")) {
+        memory_extraction_max_tokens = j["memory_extraction_max_tokens"].get<int>();
+    }
+    if (j.contains("memory_extraction_temperature")) {
+        memory_extraction_temperature = j["memory_extraction_temperature"].get<double>();
+    }
+    if (j.contains("memory_extraction_min_turns")) {
+        memory_extraction_min_turns = j["memory_extraction_min_turns"].get<int>();
+    }
+    if (j.contains("memory_extraction_idle_timeout")) {
+        memory_extraction_idle_timeout = j["memory_extraction_idle_timeout"].get<int>();
+    }
+    if (j.contains("memory_extraction_max_turns")) {
+        memory_extraction_max_turns = j["memory_extraction_max_turns"].get<int>();
+    }
+    if (j.contains("memory_extraction_queue_limit")) {
+        memory_extraction_queue_limit = j["memory_extraction_queue_limit"].get<int>();
+    }
+
     // Load providers from unified config
     if (j.contains("providers") && j["providers"].is_array()) {
         providers_json.clear();
@@ -434,7 +502,17 @@ void Config::save() const {
             {"auto_provider", auto_provider},
             {"tui", tui},
             {"truncate_limit", truncate_limit},
-            {"max_db_size", max_db_size_str}
+            {"max_db_size", max_db_size_str},
+            {"rag_context_injection", rag_context_injection},
+            {"rag_relevance_threshold", rag_relevance_threshold},
+            {"rag_max_results", rag_max_results},
+            {"memory_extraction", memory_extraction},
+            {"memory_extraction_max_tokens", memory_extraction_max_tokens},
+            {"memory_extraction_temperature", memory_extraction_temperature},
+            {"memory_extraction_min_turns", memory_extraction_min_turns},
+            {"memory_extraction_idle_timeout", memory_extraction_idle_timeout},
+            {"memory_extraction_max_turns", memory_extraction_max_turns},
+            {"memory_extraction_queue_limit", memory_extraction_queue_limit}
         };
 
         // Optional fields
@@ -455,6 +533,18 @@ void Config::save() const {
         }
         if (!web_search_instance_url.empty()) {
             save_json["web_search_instance_url"] = web_search_instance_url;
+        }
+        if (!user_id.empty()) {
+            save_json["user_id"] = user_id;
+        }
+        if (!memory_extraction_model.empty()) {
+            save_json["memory_extraction_model"] = memory_extraction_model;
+        }
+        if (!memory_extraction_endpoint.empty()) {
+            save_json["memory_extraction_endpoint"] = memory_extraction_endpoint;
+        }
+        if (!memory_extraction_api_key.empty()) {
+            save_json["memory_extraction_api_key"] = memory_extraction_api_key;
         }
         if (!providers_json.empty()) {
             save_json["providers"] = providers_json;
@@ -549,6 +639,20 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "auto_provider") return cfg.auto_provider ? "true" : "false";
     if (key == "auth_mode") return cfg.auth_mode;
     if (key == "server_tools") return cfg.server_tools ? "true" : "false";
+    if (key == "rag_context_injection") return cfg.rag_context_injection ? "true" : "false";
+    if (key == "rag_relevance_threshold") return std::to_string(cfg.rag_relevance_threshold);
+    if (key == "rag_max_results") return std::to_string(cfg.rag_max_results);
+    if (key == "user_id") return cfg.user_id;
+    if (key == "memory_extraction") return cfg.memory_extraction ? "true" : "false";
+    if (key == "memory_extraction_model") return cfg.memory_extraction_model;
+    if (key == "memory_extraction_endpoint") return cfg.memory_extraction_endpoint;
+    if (key == "memory_extraction_api_key") return cfg.memory_extraction_api_key.empty() ? "" : "(set)";
+    if (key == "memory_extraction_max_tokens") return std::to_string(cfg.memory_extraction_max_tokens);
+    if (key == "memory_extraction_temperature") return std::to_string(cfg.memory_extraction_temperature);
+    if (key == "memory_extraction_min_turns") return std::to_string(cfg.memory_extraction_min_turns);
+    if (key == "memory_extraction_idle_timeout") return std::to_string(cfg.memory_extraction_idle_timeout);
+    if (key == "memory_extraction_max_turns") return std::to_string(cfg.memory_extraction_max_turns);
+    if (key == "memory_extraction_queue_limit") return std::to_string(cfg.memory_extraction_queue_limit);
     return "";
 }
 
@@ -584,6 +688,34 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.auth_mode = value;
     } else if (key == "server_tools") {
         cfg.server_tools = (value == "true" || value == "1" || value == "on");
+    } else if (key == "rag_context_injection") {
+        cfg.rag_context_injection = (value == "true" || value == "1" || value == "on");
+    } else if (key == "rag_relevance_threshold") {
+        cfg.rag_relevance_threshold = std::stod(value);
+    } else if (key == "rag_max_results") {
+        cfg.rag_max_results = std::stoi(value);
+    } else if (key == "user_id") {
+        cfg.user_id = value;
+    } else if (key == "memory_extraction") {
+        cfg.memory_extraction = (value == "true" || value == "1" || value == "on");
+    } else if (key == "memory_extraction_model") {
+        cfg.memory_extraction_model = value;
+    } else if (key == "memory_extraction_endpoint") {
+        cfg.memory_extraction_endpoint = value;
+    } else if (key == "memory_extraction_api_key") {
+        cfg.memory_extraction_api_key = value;
+    } else if (key == "memory_extraction_max_tokens") {
+        cfg.memory_extraction_max_tokens = std::stoi(value);
+    } else if (key == "memory_extraction_temperature") {
+        cfg.memory_extraction_temperature = std::stod(value);
+    } else if (key == "memory_extraction_min_turns") {
+        cfg.memory_extraction_min_turns = std::stoi(value);
+    } else if (key == "memory_extraction_idle_timeout") {
+        cfg.memory_extraction_idle_timeout = std::stoi(value);
+    } else if (key == "memory_extraction_max_turns") {
+        cfg.memory_extraction_max_turns = std::stoi(value);
+    } else if (key == "memory_extraction_queue_limit") {
+        cfg.memory_extraction_queue_limit = std::stoi(value);
     } else {
         return false;
     }
@@ -595,7 +727,13 @@ static const std::vector<std::string> CONFIG_KEYS = {
     "warmup", "calibration", "streaming", "thinking", "tui",
     "truncate_limit", "max_db_size", "web_search_provider",
     "web_search_api_key", "web_search_instance_url", "memory_database",
-    "system_prompt", "auto_provider", "auth_mode", "server_tools"
+    "system_prompt", "auto_provider", "auth_mode", "server_tools",
+    "rag_context_injection", "rag_relevance_threshold", "rag_max_results", "user_id",
+    "memory_extraction", "memory_extraction_model", "memory_extraction_endpoint",
+    "memory_extraction_api_key", "memory_extraction_max_tokens",
+    "memory_extraction_temperature", "memory_extraction_min_turns",
+    "memory_extraction_idle_timeout", "memory_extraction_max_turns",
+    "memory_extraction_queue_limit"
 };
 
 static bool is_config_key(const std::string& s) {

@@ -163,6 +163,7 @@ bool PostgreSQLBackend::create_tables() {
             assistant_response TEXT NOT NULL,
             timestamp BIGINT NOT NULL,
             content_hash CHAR(64) UNIQUE NOT NULL,
+            user_id TEXT NOT NULL DEFAULT 'local',
             search_vector TSVECTOR GENERATED ALWAYS AS (
                 setweight(to_tsvector('english', user_message), 'A') ||
                 setweight(to_tsvector('english', assistant_response), 'B')
@@ -206,6 +207,23 @@ bool PostgreSQLBackend::create_tables() {
     }
     PQclear(res);
 
+    // Create user_id index
+    const char* create_user_id_index_sql = R"(
+        CREATE INDEX IF NOT EXISTS conversations_user_id_idx
+        ON conversations(user_id);
+    )";
+
+    res = PQexec(conn, create_user_id_index_sql);
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        std::cerr << "Failed to create user_id index: " + std::string(PQerrorMessage(conn)) << std::endl;
+        PQclear(res);
+        return false;
+    }
+    PQclear(res);
+
+    // Migration: add user_id column to existing databases (idempotent)
+    PQexec(conn, "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local'");
+
     // Create facts table
     const char* create_facts_sql = R"(
         CREATE TABLE IF NOT EXISTS facts (
@@ -233,9 +251,9 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare archive_turn statement
     PGresult* res = PQprepare(conn, "archive_turn",
-        "INSERT INTO conversations (user_message, assistant_response, timestamp, content_hash) "
-        "VALUES ($1, $2, $3, $4) ON CONFLICT (content_hash) DO NOTHING",
-        4, nullptr);
+        "INSERT INTO conversations (user_message, assistant_response, timestamp, content_hash, user_id) "
+        "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (content_hash) DO NOTHING",
+        5, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare archive_turn: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -248,10 +266,10 @@ bool PostgreSQLBackend::prepare_statements() {
         "SELECT user_message, assistant_response, timestamp, "
         "ts_rank_cd(search_vector, plainto_tsquery('english', $1)) as score "
         "FROM conversations "
-        "WHERE search_vector @@ plainto_tsquery('english', $1) "
+        "WHERE search_vector @@ plainto_tsquery('english', $1) AND user_id = $3 "
         "ORDER BY score DESC "
         "LIMIT $2",
-        2, nullptr);
+        3, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare search_memory: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -296,8 +314,8 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare clear_memory statement
     res = PQprepare(conn, "clear_memory",
-        "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = $1 LIMIT 1)",
-        1, nullptr);
+        "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = $1 AND user_id = $2 LIMIT 1)",
+        2, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare clear_memory: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -328,15 +346,17 @@ void PostgreSQLBackend::archive_turn(const ConversationTurn& turn) {
     std::string combined = turn.user_message + turn.assistant_response;
     std::string content_hash = compute_content_hash(combined);
     std::string timestamp_str = std::to_string(turn.timestamp);
+    std::string user_id = RAGManager::get_current_user_id();
 
-    const char* params[4] = {
+    const char* params[5] = {
         turn.user_message.c_str(),
         turn.assistant_response.c_str(),
         timestamp_str.c_str(),
-        content_hash.c_str()
+        content_hash.c_str(),
+        user_id.c_str()
     };
 
-    PGresult* res = PQexecPrepared(conn, "archive_turn", 4, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "archive_turn", 5, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to archive turn: " + std::string(PQerrorMessage(conn)) << std::endl;
     } else {
@@ -357,9 +377,10 @@ std::vector<SearchResult> PostgreSQLBackend::search(const std::string& query, in
     std::vector<SearchResult> results;
 
     std::string limit_str = std::to_string(max_results);
-    const char* params[2] = { query.c_str(), limit_str.c_str() };
+    std::string user_id = RAGManager::get_current_user_id();
+    const char* params[3] = { query.c_str(), limit_str.c_str(), user_id.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "search_memory", 2, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "search_memory", 3, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         std::cerr << "Search query failed: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -421,9 +442,10 @@ bool PostgreSQLBackend::clear_memory(const std::string& question) {
     dout(1) << "Clearing memory by question: " + question << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    const char* params[1] = { question.c_str() };
+    std::string user_id = RAGManager::get_current_user_id();
+    const char* params[2] = { question.c_str(), user_id.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "clear_memory", 1, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "clear_memory", 2, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to clear memory: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);

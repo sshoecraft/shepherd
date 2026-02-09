@@ -178,6 +178,14 @@ public:
     /// @return Success/error message
     static std::string execute_clear_memory_tool(const std::string& question);
 
+    // Multi-tenant user isolation
+    // Thread-local user_id used by all RAG write/search operations.
+    // API server sets this per-request from the API key.
+    // CLI/TUI defaults to "local" (single-user).
+    static void set_current_user_id(const std::string& id);
+    static std::string get_current_user_id();
+
 private:
     static std::unique_ptr<DatabaseBackend> instance_;
+    static thread_local std::string current_user_id;
 };

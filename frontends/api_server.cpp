@@ -8,6 +8,7 @@
 #include "../tools/utf8_sanitizer.h"
 #include "../config.h"
 #include "../provider.h"
+#include "../rag.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>
@@ -327,6 +328,22 @@ void APIServer::register_endpoints() {
                 }
             }
 
+            // Resolve user_id for multi-tenant memory isolation
+            // Priority: OpenAI "user" field > API key name > config user_id > "unknown"
+            std::string req_user_id = "unknown";
+            if (request.contains("user") && request["user"].is_string() && !request["user"].get<std::string>().empty()) {
+                req_user_id = request["user"].get<std::string>();
+            } else if (key_store && !api_key.empty()) {
+                const ApiKeyEntry* entry = key_store->get_entry(api_key);
+                if (entry && !entry->name.empty()) {
+                    req_user_id = entry->name;
+                }
+            }
+            if (req_user_id == "unknown" && !config->user_id.empty()) {
+                req_user_id = config->user_id;
+            }
+            RAGManager::set_current_user_id(req_user_id);
+
             // Standard OpenAI behavior - stateless request handling
 
             // Ensure tools array exists - some models require it for proper chat template formatting
@@ -430,6 +447,9 @@ void APIServer::register_endpoints() {
                     request_session.last_assistant_message_index = request_session.messages.size() - 1;
                 }
             }
+
+            // Enrich last user message with RAG context
+            enrich_with_rag_context(request_session);
 
             // Parse parameters
             int max_tokens = 0;
@@ -567,7 +587,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -848,6 +868,10 @@ void APIServer::register_endpoints() {
 
                         std::string done = "data: [DONE]\n\n";
                         sink.write(done.c_str(), done.size());
+
+                        // Queue memory extraction for this exchange
+                        queue_memory_extraction_last(request_session, req_user_id);
+
                         sink.done();
                         return false;  // Done - no more data
                     }
@@ -1054,6 +1078,9 @@ void APIServer::register_endpoints() {
                       << std::endl;
 
             res.set_content(response_body.dump(), "application/json");
+
+            // Queue memory extraction for this exchange
+            queue_memory_extraction_last(request_session, req_user_id);
 
         } catch (const ContextFullException& ctx_e) {
             dout(1) << "[api] ERROR: Context overflow - " << ctx_e.what() << std::endl;

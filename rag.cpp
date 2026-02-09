@@ -18,6 +18,15 @@ int64_t ConversationTurn::get_current_timestamp() {
 
 // RAGManager static implementation
 std::unique_ptr<DatabaseBackend> RAGManager::instance_ = nullptr;
+thread_local std::string RAGManager::current_user_id = "unknown";
+
+void RAGManager::set_current_user_id(const std::string& id) {
+    current_user_id = id.empty() ? "unknown" : id;
+}
+
+std::string RAGManager::get_current_user_id() {
+    return current_user_id;
+}
 
 bool RAGManager::initialize(const std::string& db_path, size_t max_db_size) {
     if (instance_) {
@@ -68,12 +77,20 @@ void RAGManager::archive_turn(const ConversationTurn& turn) {
         std::cerr << "RAGManager not initialized - cannot archive turn" << std::endl;
         return;
     }
+    if (current_user_id == "unknown") {
+        dout(1) << "RAGManager: skipping archive_turn for unknown user" << std::endl;
+        return;
+    }
     instance_->archive_turn(turn);
 }
 
 std::vector<SearchResult> RAGManager::search_memory(const std::string& query, int max_results) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot search" << std::endl;
+        return {};
+    }
+    if (current_user_id == "unknown") {
+        dout(1) << "RAGManager: skipping search for unknown user" << std::endl;
         return {};
     }
     return instance_->search(query, max_results);
@@ -313,12 +330,20 @@ void RAGManager::store_memory(const std::string& question, const std::string& an
         std::cerr << "RAGManager not initialized - cannot store memory" << std::endl;
         return;
     }
+    if (current_user_id == "unknown") {
+        dout(1) << "RAGManager: skipping store_memory for unknown user" << std::endl;
+        return;
+    }
     instance_->store_memory(question, answer);
 }
 
 bool RAGManager::clear_memory(const std::string& question) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot clear memory" << std::endl;
+        return false;
+    }
+    if (current_user_id == "unknown") {
+        dout(1) << "RAGManager: skipping clear_memory for unknown user" << std::endl;
         return false;
     }
     return instance_->clear_memory(question);

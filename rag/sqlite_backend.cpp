@@ -50,6 +50,18 @@ bool SQLiteBackend::initialize() {
 
     db_ = db;
 
+    // Enable WAL mode for concurrent read/write access
+    // Required for memory extraction thread (writer) + main thread (reader) coexistence
+    rc = sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
+    if (rc != SQLITE_OK) {
+        dout(1) << "WARNING: Failed to enable WAL mode: " + std::string(sqlite3_errmsg(db)) << std::endl;
+    } else {
+        dout(1) << "Enabled WAL journal mode for concurrent access" << std::endl;
+    }
+
+    // Set busy timeout for lock contention
+    sqlite3_busy_timeout(db, 5000);
+
     // Enable memory-mapped I/O for better performance
     std::string mmap_pragma = "PRAGMA mmap_size = " + std::to_string(max_db_size_);
     rc = sqlite3_exec(db, mmap_pragma.c_str(), nullptr, nullptr, nullptr);
@@ -66,6 +78,12 @@ bool SQLiteBackend::initialize() {
         return false;
     }
 
+    // Migration: add user_id column to existing databases (idempotent)
+    sqlite3_exec(db, "ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'",
+                 nullptr, nullptr, nullptr);  // Silently fails if column already exists
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)",
+                 nullptr, nullptr, nullptr);
+
     dout(1) << "SQLite RAG database initialized successfully" << std::endl;
     return true;
 }
@@ -81,7 +99,8 @@ bool SQLiteBackend::create_tables() {
             user_message TEXT NOT NULL,
             assistant_response TEXT NOT NULL,
             timestamp INTEGER NOT NULL,
-            content_hash TEXT UNIQUE NOT NULL
+            content_hash TEXT UNIQUE NOT NULL,
+            user_id TEXT NOT NULL DEFAULT 'local'
         );
     )";
 
@@ -175,7 +194,9 @@ void SQLiteBackend::archive_turn(const ConversationTurn& turn) {
     dout(1) << "Content hash: " + content_hash << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "INSERT OR IGNORE INTO conversations (user_message, assistant_response, timestamp, content_hash) VALUES (?, ?, ?, ?)";
+    const char* sql = "INSERT OR IGNORE INTO conversations (user_message, assistant_response, timestamp, content_hash, user_id) VALUES (?, ?, ?, ?, ?)";
+
+    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -189,6 +210,7 @@ void SQLiteBackend::archive_turn(const ConversationTurn& turn) {
     sqlite3_bind_text(stmt, 2, turn.assistant_response.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 3, turn.timestamp);
     sqlite3_bind_text(stmt, 4, content_hash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, user_id.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -258,10 +280,12 @@ std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int ma
                bm25(conversations_fts) as score
         FROM conversations_fts
         JOIN conversations c ON conversations_fts.rowid = c.id
-        WHERE conversations_fts MATCH ?
+        WHERE conversations_fts MATCH ? AND c.user_id = ?
         ORDER BY score
         LIMIT ?
     )";
+
+    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -272,7 +296,8 @@ std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int ma
     }
 
     sqlite3_bind_text(stmt, 1, fts_query.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, max_results);
+    sqlite3_bind_text(stmt, 2, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, max_results);
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         std::string user_msg = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
@@ -336,7 +361,9 @@ bool SQLiteBackend::clear_memory(const std::string& question) {
     dout(1) << "Clearing memory by question: " + question << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = ? LIMIT 1)";
+    const char* sql = "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = ? AND user_id = ? LIMIT 1)";
+
+    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -347,6 +374,7 @@ bool SQLiteBackend::clear_memory(const std::string& question) {
     }
 
     sqlite3_bind_text(stmt, 1, question.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, user_id.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);

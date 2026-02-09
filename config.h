@@ -66,9 +66,29 @@ public:
     std::string memory_database;
     std::string max_db_size_str;
     size_t max_db_size;
+    bool rag_context_injection;       // Enable automatic RAG context injection before inference
+    double rag_relevance_threshold;   // Minimum relevance score for RAG results (0.0-1.0)
+    int rag_max_results;              // Maximum number of RAG results to inject
     std::string web_search_provider;
     std::string web_search_api_key;
     std::string web_search_instance_url;
+
+    // User identity for multi-tenant RAG isolation
+    // Set this to share the same memory pool across platforms (e.g., "steve")
+    // If empty, falls back to hostname:username for CLI/TUI, API key name for API server
+    std::string user_id;
+
+    // Memory extraction settings (background fact extraction from conversations)
+    bool memory_extraction;
+    std::string memory_extraction_model;
+    std::string memory_extraction_endpoint;
+    std::string memory_extraction_api_key;
+    int memory_extraction_max_tokens;
+    double memory_extraction_temperature;
+    int memory_extraction_min_turns;
+    int memory_extraction_idle_timeout;
+    int memory_extraction_max_turns;
+    int memory_extraction_queue_limit;
     int truncate_limit;
     int max_tokens;       // Max generation tokens: -1=max, 0=auto, >0=explicit
     bool streaming;

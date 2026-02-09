@@ -225,6 +225,9 @@ static void do_generation(CliServerState& state,
                 state.server->generate_response(max_tokens);
             }
 
+            // Queue memory extraction after tool-response generation
+            state.server->queue_memory_extraction();
+
             return true;
         }
 
@@ -284,8 +287,12 @@ static void do_generation(CliServerState& state,
     {
         auto lock = state.backend->acquire_lock();
         state.server->add_message_to_session(Message::USER, prompt);
+        state.server->enrich_with_rag_context(state.server->session);
         state.server->generate_response(max_tokens);
     }
+
+    // Queue memory extraction after generation
+    state.server->queue_memory_extraction();
 
     // Build Response from session's last message
     Response resp;

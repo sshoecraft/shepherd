@@ -29,6 +29,11 @@ public:
     /// @return true if keys are configured and auth is required
     virtual bool is_enabled() = 0;
 
+    /// @brief Get entry for a validated key
+    /// @param key The API key to look up
+    /// @return Pointer to entry if found, nullptr otherwise
+    virtual const ApiKeyEntry* get_entry(const std::string& key) const { (void)key; return nullptr; }
+
     /// @brief Factory method to create KeyStore from mode string
     /// @param mode "none", "json", "sqlite", "vault", "managed"
     /// @return Unique pointer to KeyStore implementation

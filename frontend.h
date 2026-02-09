@@ -4,6 +4,7 @@
 #include "provider.h"
 #include "session.h"
 #include "tools/tools.h"
+#include "memory_extraction.h"
 #include <string>
 #include <memory>
 #include <vector>
@@ -172,6 +173,15 @@ public:
                                 const std::string& tool_name = "",
                                 const std::string& tool_id = "");
 
+    /// @brief Enrich the last user message with RAG context injection
+    /// Searches RAG backend using keywords from the message, appends
+    /// relevant results as [context: ...] suffix. No-op if RAG not
+    /// initialized, not enabled in config, or no results found.
+    void enrich_with_rag_context(Session& session);
+
+    /// @brief Extract search keywords from a user message
+    static std::string extract_keywords(const std::string& message);
+
     /// @brief Generate response from current session state
     /// This is the unified generation path used by all frontends.
     /// Handles proactive eviction (if auto_evict enabled) and reactive eviction
@@ -179,6 +189,12 @@ public:
     /// @param max_tokens Max tokens for response (0 = auto-calculate)
     /// @return true if generation completed, false if error or eviction failed
     bool generate_response(int max_tokens = 0);
+
+    // Queue conversation for background memory extraction (persistent sessions)
+    void queue_memory_extraction();
+
+    // Queue only the last exchange for extraction (ephemeral API sessions)
+    void queue_memory_extraction_last(const Session& sess, const std::string& req_user_id);
 
     // Session owned by frontend (source of truth for conversation state)
     Session session;
@@ -195,4 +211,11 @@ public:
 
     // Callback for streaming output - must be set by subclass before connecting
     Backend::EventCallback callback;
+
+    // Background memory extraction thread (started if memory_extraction enabled)
+    std::unique_ptr<MemoryExtractionThread> extraction_thread;
+
+    // User identifier for multi-tenant memory isolation
+    // CLI/TUI/CLI-Server: hostname:username, API Server: from OpenAI "user" field
+    std::string user_id;
 };

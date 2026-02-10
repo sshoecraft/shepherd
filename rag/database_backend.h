@@ -23,13 +23,15 @@ public:
 
     /// @brief Archive a conversation turn
     /// @param turn Conversation turn to archive
-    virtual void archive_turn(const ConversationTurn& turn) = 0;
+    /// @param user_id User identifier for multi-tenant isolation
+    virtual void archive_turn(const ConversationTurn& turn, const std::string& user_id) = 0;
 
     /// @brief Search conversations using full-text search
     /// @param query Search query string
     /// @param max_results Maximum number of results
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Vector of search results with relevance scores
-    virtual std::vector<SearchResult> search(const std::string& query, int max_results) = 0;
+    virtual std::vector<SearchResult> search(const std::string& query, int max_results, const std::string& user_id) = 0;
 
     /// @brief Get count of archived turns
     /// @return Number of archived conversation turns
@@ -38,12 +40,14 @@ public:
     /// @brief Store a question/answer pair to memory
     /// @param question The question text
     /// @param answer The answer text
-    virtual void store_memory(const std::string& question, const std::string& answer) = 0;
+    /// @param user_id User identifier for multi-tenant isolation
+    virtual void store_memory(const std::string& question, const std::string& answer, const std::string& user_id) = 0;
 
     /// @brief Clear a memory by exact question match
     /// @param question The exact question to delete
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if memory was deleted
-    virtual bool clear_memory(const std::string& question) = 0;
+    virtual bool clear_memory(const std::string& question, const std::string& user_id) = 0;
 
     /// @brief Store a key-value fact
     /// @param key Unique identifier for the fact

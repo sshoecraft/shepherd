@@ -71,10 +71,11 @@ CLI::~CLI() {
     }
 }
 
-void CLI::init(bool no_mcp_flag, bool no_tools_flag) {
+void CLI::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag) {
     // Store flags for later use (e.g., fallback to local tools)
     no_mcp = no_mcp_flag;
     no_tools = no_tools_flag;
+    no_rag = no_rag_flag;
 
     // Detect interactive mode
     interactive_mode = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
@@ -147,7 +148,7 @@ void CLI::init(bool no_mcp_flag, bool no_tools_flag) {
                 show_tool_call(tool_name, params_str);
 
                 // Execute tool
-                ToolResult result = execute_tool(tools, tool_name, content, tool_call_id);
+                ToolResult result = execute_tool(tools, tool_name, content, tool_call_id, session.user_id);
 
                 // Show result
                 std::string summary = result.summary.empty() ?
@@ -208,7 +209,7 @@ void CLI::init(bool no_mcp_flag, bool no_tools_flag) {
     };
 
     // Use common tool initialization from Frontend base class
-    init_tools(no_mcp, no_tools);
+    init_tools(no_mcp, no_tools, false, no_rag);
 
     cli_debug(1, "CLI initialized (interactive: " + std::string(interactive_mode ? "yes" : "no") +
               ", colors: " + std::string(colors_enabled ? "yes" : "no") + ")");
@@ -243,7 +244,7 @@ int CLI::run(Provider* cmdline_provider) {
             init_remote_tools(p->base_url, p->api_key);
         } else {
             callback(CallbackEvent::SYSTEM, "Warning: --server-tools requires an API provider with base_url, falling back to local tools\n", "", "");
-            init_tools(no_mcp, no_tools, true);  // force_local = true
+            init_tools(no_mcp, no_tools, true, no_rag);  // force_local = true
         }
     }
 

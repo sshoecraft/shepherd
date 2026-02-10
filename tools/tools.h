@@ -59,8 +59,9 @@ public:
                           std::function<void(const std::string&)> callback);
 
     // Execute a tool by name with JSON parameters string
+    // user_id is injected as "_user_id" into the args map for multi-tenant tools
     // Returns ToolResult with success/failure, content, and error
-    ToolResult execute(const std::string& tool_name, const std::string& params_json);
+    ToolResult execute(const std::string& tool_name, const std::string& params_json, const std::string& user_id = "");
 
     // Populate session.tools from all_tools
     void populate_session_tools(Session& session);

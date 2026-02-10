@@ -159,6 +159,7 @@ Provider Provider::from_json(const json& j) {
     p.max_tokens_param_name = j.value("max_tokens_param_name", "");
     p.openai_strict = j.value("openai_strict", false);
     p.sampling = j.value("sampling", true);
+    p.memory = j.value("memory", false);
 
     // Ollama
     p.num_ctx = j.value("num_ctx", 0);
@@ -253,6 +254,9 @@ json Provider::to_json() const {
     if (presence_penalty != 0.0f) j["presence_penalty"] = presence_penalty;
     if (max_tokens > 0) j["max_tokens"] = max_tokens;
     if (!stop_sequences.empty()) j["stop_sequences"] = stop_sequences;
+
+    // Memory features
+    if (memory) j["memory"] = memory;
 
     return j;
 }
@@ -361,6 +365,10 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
     // Set config globals from this provider
     config->model = model;
     config->backend = type;
+
+    // Set memory feature flags from provider config
+    config->rag_context_injection = memory;
+    config->memory_extraction = memory;
 
     if (is_api()) {
         config->key = api_key;
@@ -556,6 +564,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("  --model-path <path>  Path to model file (llamacpp, tensorrt)\n");
 			callback("  --priority <n>       Provider priority (lower = preferred)\n");
 			callback("  --display-name <n>   Display name for /v1/models API\n");
+			callback("  --memory             Enable memory features (RAG injection + extraction)\n");
 			return args.size() < 2 ? 1 : 0;
 		}
 
@@ -599,6 +608,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				new_prov.priority = std::stoi(cmd_args[++i]);
 			} else if (cmd_args[i] == "--display-name" && i + 1 < cmd_args.size()) {
 				new_prov.display_name = cmd_args[++i];
+			} else if (cmd_args[i] == "--memory") {
+				new_prov.memory = true;
 			}
 		}
 
@@ -634,6 +645,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 		callback("priority = " + std::to_string(prov->priority) + "\n");
 		callback("context_size = " + std::to_string(prov->context_size) + (prov->context_size == 0 ? " (auto)" : "") + "\n");
 		callback("display_name = " + (prov->display_name.empty() ? "(not set)" : prov->display_name) + "\n");
+		callback("memory = " + std::string(prov->memory ? "true" : "false") + "\n");
 
 		// CLI backend fields
 		if (prov->type == "cli") {
@@ -767,6 +779,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 		// Core fields
 		prov->type = prompt("type", prov->type);
 		prov->priority = prompt_int("priority", prov->priority);
+		std::string mem_val = prompt("memory", prov->memory ? "true" : "false");
+		prov->memory = (mem_val == "true" || mem_val == "1" || mem_val == "yes");
 
 		// Type-specific fields
 		if (prov->type == "cli") {
@@ -854,7 +868,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 		if (name.empty() || args.size() < 4) {
 			callback("Usage: shepherd provider <name> set <field> <value>\n"
 			         "\nCommon fields:\n"
-			         "  type, model, priority, context_size, display_name\n"
+			         "  type, model, priority, context_size, display_name, memory\n"
 			         "\nAPI backends (openai, anthropic, gemini, ollama):\n"
 			         "  api_key, base_url, client_id, client_secret, token_url, token_scope\n"
 			         "  deployment_name, api_version, max_tokens_param_name, openai_strict, ssl_verify, ca_bundle_path\n"
@@ -896,6 +910,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->context_size = std::stoull(value);
 			} else if (field == "display_name") {
 				prov->display_name = value;
+			} else if (field == "memory") {
+				prov->memory = (value == "true" || value == "1" || value == "yes");
 			}
 			// API fields
 			else if (field == "api_key") {

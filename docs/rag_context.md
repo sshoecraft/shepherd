@@ -100,7 +100,7 @@ Guard checks (returns immediately if any fail):
 
 Processing:
 1. Extract keywords from last user message
-2. Call `RAGManager::search_memory(keywords, config->rag_max_results)`
+2. Call `RAGManager::search_memory(keywords, config->rag_max_results, sess.user_id)`
 3. Filter results by `config->rag_relevance_threshold`
 4. Build pipe-separated context string from results
 5. Postfix onto message: `content + "\n\n[context: " + context + "]"`
@@ -187,3 +187,19 @@ filtering, and token count changes.
 
 When no context is injected (no keywords, no results, below threshold),
 nothing is logged — no noise.
+
+## Provider Memory Flag (v2.29.0)
+
+As of v2.29.0, the provider config has a `memory` boolean (default `false`) that
+controls both RAG context injection and memory extraction. When a provider connects,
+`Provider::connect()` sets `config->rag_context_injection` and `config->memory_extraction`
+from the provider's `memory` field.
+
+This means injection is only active when the current provider has `memory: true`.
+For providers connecting to a remote Shepherd server (type `cli`), set `memory: false`
+(the default) since the server handles its own RAG. For local models or raw inference
+endpoints (vLLM), set `memory: true` to enable local RAG.
+
+```
+shepherd provider my-local-model set memory true
+```

@@ -87,6 +87,9 @@ public:
     // Used for max_tokens calculation and eviction decisions
     int desired_completion_tokens = 0;
 
+    // User identifier for multi-tenant isolation (sent as "user" field in API requests)
+    std::string user_id;
+
     /// Tool definitions available in this session
     /// This is the single source of truth for tools in a session
     /// - CLI mode: populated from CLI's Tools instance at startup

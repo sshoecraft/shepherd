@@ -82,13 +82,14 @@ CLIServer::CLIServer(const std::string& host, int port)
 CLIServer::~CLIServer() {
 }
 
-void CLIServer::init(bool no_mcp_flag, bool no_tools_flag) {
+void CLIServer::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag) {
     // Store flags for later use (e.g., fallback to local tools in register_endpoints)
     no_mcp = no_mcp_flag;
     no_tools = no_tools_flag;
+    no_rag = no_rag_flag;
 
     // Use common tool initialization from Frontend base class
-    init_tools(no_mcp, no_tools);
+    init_tools(no_mcp, no_tools, false, no_rag);
 }
 
 
@@ -209,7 +210,7 @@ static void do_generation(CliServerState& state,
 
             // Execute tool
             ToolResult tool_result = state.server->execute_tool(
-                *state.tools, tool_name_arg, content, tool_call_id);
+                *state.tools, tool_name_arg, content, tool_call_id, state.server->session.user_id);
 
             // Send tool result to clients
             requester->on_tool_result(tool_name_arg, tool_result.success, tool_result.error);
@@ -461,7 +462,7 @@ void CLIServer::register_endpoints() {
             init_remote_tools(p->base_url, p->api_key);
         } else {
             std::cerr << "Warning: --server-tools requires an API provider with base_url, falling back to local tools" << std::endl;
-            init_tools(no_mcp, no_tools, true);  // force_local = true
+            init_tools(no_mcp, no_tools, true, no_rag);  // force_local = true
         }
     }
 

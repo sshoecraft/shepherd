@@ -338,7 +338,7 @@ std::string PostgreSQLBackend::compute_content_hash(const std::string& content) 
     return hash_stream.str();
 }
 
-void PostgreSQLBackend::archive_turn(const ConversationTurn& turn) {
+void PostgreSQLBackend::archive_turn(const ConversationTurn& turn, const std::string& user_id) {
     dout(1) << "Archiving conversation turn to PostgreSQL RAG database" << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
@@ -346,7 +346,6 @@ void PostgreSQLBackend::archive_turn(const ConversationTurn& turn) {
     std::string combined = turn.user_message + turn.assistant_response;
     std::string content_hash = compute_content_hash(combined);
     std::string timestamp_str = std::to_string(turn.timestamp);
-    std::string user_id = RAGManager::get_current_user_id();
 
     const char* params[5] = {
         turn.user_message.c_str(),
@@ -370,14 +369,13 @@ void PostgreSQLBackend::archive_turn(const ConversationTurn& turn) {
     PQclear(res);
 }
 
-std::vector<SearchResult> PostgreSQLBackend::search(const std::string& query, int max_results) {
+std::vector<SearchResult> PostgreSQLBackend::search(const std::string& query, int max_results, const std::string& user_id) {
     dout(1) << "Searching PostgreSQL RAG database for: " + query << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
     std::vector<SearchResult> results;
 
     std::string limit_str = std::to_string(max_results);
-    std::string user_id = RAGManager::get_current_user_id();
     const char* params[3] = { query.c_str(), limit_str.c_str(), user_id.c_str() };
 
     PGresult* res = PQexecPrepared(conn, "search_memory", 3, params, nullptr, nullptr, 0);
@@ -427,14 +425,14 @@ size_t PostgreSQLBackend::get_archived_turn_count() const {
     return count;
 }
 
-void PostgreSQLBackend::store_memory(const std::string& question, const std::string& answer) {
+void PostgreSQLBackend::store_memory(const std::string& question, const std::string& answer, const std::string& user_id) {
     dout(1) << "Storing memory: " + question << std::endl;
     ConversationTurn turn(question, answer);
-    archive_turn(turn);
+    archive_turn(turn, user_id);
     dout(1) << "Stored memory: question=" + question + ", answer=" + answer << std::endl;
 }
 
-bool PostgreSQLBackend::clear_memory(const std::string& question) {
+bool PostgreSQLBackend::clear_memory(const std::string& question, const std::string& user_id) {
     if (!conn_) {
         return false;
     }
@@ -442,7 +440,6 @@ bool PostgreSQLBackend::clear_memory(const std::string& question) {
     dout(1) << "Clearing memory by question: " + question << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    std::string user_id = RAGManager::get_current_user_id();
     const char* params[2] = { question.c_str(), user_id.c_str() };
 
     PGresult* res = PQexecPrepared(conn, "clear_memory", 2, params, nullptr, nullptr, 0);

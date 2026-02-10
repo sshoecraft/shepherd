@@ -72,6 +72,7 @@ void Config::set_defaults() {
     memory_extraction_idle_timeout = 180;
     memory_extraction_max_turns = 20;
     memory_extraction_queue_limit = 0;
+    memory_extraction_retry_interval = 5;
 
 	// Tool truncation limit, in tokens (0 = use 85% of available space)
 	truncate_limit = 0;
@@ -463,6 +464,9 @@ void Config::load_from_json(const nlohmann::json& j) {
     if (j.contains("memory_extraction_queue_limit")) {
         memory_extraction_queue_limit = j["memory_extraction_queue_limit"].get<int>();
     }
+    if (j.contains("memory_extraction_retry_interval")) {
+        memory_extraction_retry_interval = j["memory_extraction_retry_interval"].get<int>();
+    }
 
     // Load providers from unified config
     if (j.contains("providers") && j["providers"].is_array()) {
@@ -512,7 +516,8 @@ void Config::save() const {
             {"memory_extraction_min_turns", memory_extraction_min_turns},
             {"memory_extraction_idle_timeout", memory_extraction_idle_timeout},
             {"memory_extraction_max_turns", memory_extraction_max_turns},
-            {"memory_extraction_queue_limit", memory_extraction_queue_limit}
+            {"memory_extraction_queue_limit", memory_extraction_queue_limit},
+            {"memory_extraction_retry_interval", memory_extraction_retry_interval}
         };
 
         // Optional fields
@@ -653,6 +658,7 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "memory_extraction_idle_timeout") return std::to_string(cfg.memory_extraction_idle_timeout);
     if (key == "memory_extraction_max_turns") return std::to_string(cfg.memory_extraction_max_turns);
     if (key == "memory_extraction_queue_limit") return std::to_string(cfg.memory_extraction_queue_limit);
+    if (key == "memory_extraction_retry_interval") return std::to_string(cfg.memory_extraction_retry_interval);
     return "";
 }
 
@@ -716,6 +722,8 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.memory_extraction_max_turns = std::stoi(value);
     } else if (key == "memory_extraction_queue_limit") {
         cfg.memory_extraction_queue_limit = std::stoi(value);
+    } else if (key == "memory_extraction_retry_interval") {
+        cfg.memory_extraction_retry_interval = std::stoi(value);
     } else {
         return false;
     }
@@ -733,7 +741,8 @@ static const std::vector<std::string> CONFIG_KEYS = {
     "memory_extraction_api_key", "memory_extraction_max_tokens",
     "memory_extraction_temperature", "memory_extraction_min_turns",
     "memory_extraction_idle_timeout", "memory_extraction_max_turns",
-    "memory_extraction_queue_limit"
+    "memory_extraction_queue_limit",
+    "memory_extraction_retry_interval"
 };
 
 static bool is_config_key(const std::string& s) {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.28.0
+    VERSION 2.30.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX

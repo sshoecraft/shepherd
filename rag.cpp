@@ -18,15 +18,6 @@ int64_t ConversationTurn::get_current_timestamp() {
 
 // RAGManager static implementation
 std::unique_ptr<DatabaseBackend> RAGManager::instance_ = nullptr;
-thread_local std::string RAGManager::current_user_id = "unknown";
-
-void RAGManager::set_current_user_id(const std::string& id) {
-    current_user_id = id.empty() ? "unknown" : id;
-}
-
-std::string RAGManager::get_current_user_id() {
-    return current_user_id;
-}
 
 bool RAGManager::initialize(const std::string& db_path, size_t max_db_size) {
     if (instance_) {
@@ -72,28 +63,28 @@ void RAGManager::shutdown() {
     }
 }
 
-void RAGManager::archive_turn(const ConversationTurn& turn) {
+void RAGManager::archive_turn(const ConversationTurn& turn, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot archive turn" << std::endl;
         return;
     }
-    if (current_user_id == "unknown") {
+    if (user_id == "unknown") {
         dout(1) << "RAGManager: skipping archive_turn for unknown user" << std::endl;
         return;
     }
-    instance_->archive_turn(turn);
+    instance_->archive_turn(turn, user_id);
 }
 
-std::vector<SearchResult> RAGManager::search_memory(const std::string& query, int max_results) {
+std::vector<SearchResult> RAGManager::search_memory(const std::string& query, int max_results, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot search" << std::endl;
         return {};
     }
-    if (current_user_id == "unknown") {
+    if (user_id == "unknown") {
         dout(1) << "RAGManager: skipping search for unknown user" << std::endl;
         return {};
     }
-    return instance_->search(query, max_results);
+    return instance_->search(query, max_results, user_id);
 }
 
 size_t RAGManager::get_archived_turn_count() {
@@ -154,7 +145,7 @@ std::string RAGManager::get_search_tool_parameters() {
     return "query=\"search_query\", max_results=\"5\"";
 }
 
-std::string RAGManager::execute_search_tool(const std::string& query, int max_results) {
+std::string RAGManager::execute_search_tool(const std::string& query, int max_results, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute search tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -168,7 +159,7 @@ std::string RAGManager::execute_search_tool(const std::string& query, int max_re
     dout(1) << "SEARCH_MEMORY tool called with query: '" + query + "', max_results: " + std::to_string(max_results) << std::endl;
 
     try {
-        auto search_results = search_memory(query, max_results);
+        auto search_results = search_memory(query, max_results, user_id);
 
         if (search_results.empty()) {
             dout(1) << "SEARCH_MEMORY: No results found" << std::endl;
@@ -325,28 +316,28 @@ std::string RAGManager::execute_clear_fact_tool(const std::string& key) {
 }
 
 // Memory management wrapper methods
-void RAGManager::store_memory(const std::string& question, const std::string& answer) {
+void RAGManager::store_memory(const std::string& question, const std::string& answer, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot store memory" << std::endl;
         return;
     }
-    if (current_user_id == "unknown") {
+    if (user_id == "unknown") {
         dout(1) << "RAGManager: skipping store_memory for unknown user" << std::endl;
         return;
     }
-    instance_->store_memory(question, answer);
+    instance_->store_memory(question, answer, user_id);
 }
 
-bool RAGManager::clear_memory(const std::string& question) {
+bool RAGManager::clear_memory(const std::string& question, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot clear memory" << std::endl;
         return false;
     }
-    if (current_user_id == "unknown") {
+    if (user_id == "unknown") {
         dout(1) << "RAGManager: skipping clear_memory for unknown user" << std::endl;
         return false;
     }
-    return instance_->clear_memory(question);
+    return instance_->clear_memory(question, user_id);
 }
 
 // store_memory tool interface
@@ -362,7 +353,7 @@ std::string RAGManager::get_store_memory_tool_parameters() {
     return "question=\"the_question\", answer=\"the_answer\"";
 }
 
-std::string RAGManager::execute_store_memory_tool(const std::string& question, const std::string& answer) {
+std::string RAGManager::execute_store_memory_tool(const std::string& question, const std::string& answer, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute store_memory tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -381,7 +372,7 @@ std::string RAGManager::execute_store_memory_tool(const std::string& question, c
     dout(1) << "STORE_MEMORY tool called with question: '" + question + "', answer: '" + answer + "'" << std::endl;
 
     try {
-        store_memory(question, answer);
+        store_memory(question, answer, user_id);
         dout(1) << "STORE_MEMORY: Stored Q/A pair" << std::endl;
         return "Successfully stored memory: " + question;
     } catch (const std::exception& e) {
@@ -403,7 +394,7 @@ std::string RAGManager::get_clear_memory_tool_parameters() {
     return "question=\"exact_question_to_delete\"";
 }
 
-std::string RAGManager::execute_clear_memory_tool(const std::string& question) {
+std::string RAGManager::execute_clear_memory_tool(const std::string& question, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute clear_memory tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -417,7 +408,7 @@ std::string RAGManager::execute_clear_memory_tool(const std::string& question) {
     dout(1) << "CLEAR_MEMORY tool called with question: '" + question + "'" << std::endl;
 
     try {
-        bool deleted = clear_memory(question);
+        bool deleted = clear_memory(question, user_id);
 
         if (deleted) {
             dout(1) << "CLEAR_MEMORY: Deleted memory for question '" + question + "'" << std::endl;

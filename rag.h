@@ -42,13 +42,15 @@ public:
 
     /// @brief Archive a conversation turn to memory
     /// @param turn Conversation turn to archive
-    static void archive_turn(const ConversationTurn& turn);
+    /// @param user_id User identifier for multi-tenant isolation
+    static void archive_turn(const ConversationTurn& turn, const std::string& user_id);
 
     /// @brief Search archived conversations
     /// @param query Search query
     /// @param max_results Maximum number of results to return
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Vector of search results
-    static std::vector<SearchResult> search_memory(const std::string& query, int max_results = 5);
+    static std::vector<SearchResult> search_memory(const std::string& query, int max_results, const std::string& user_id);
 
     /// @brief Get count of archived conversation turns
     /// @return Number of archived turns
@@ -92,8 +94,9 @@ public:
     /// @brief Execute search memory as a tool
     /// @param query Search query string
     /// @param max_results Maximum number of results (default 5)
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Formatted search results as string
-    static std::string execute_search_tool(const std::string& query, int max_results = 5);
+    static std::string execute_search_tool(const std::string& query, int max_results, const std::string& user_id);
 
     /// @brief Get set_fact tool name
     static std::string get_set_fact_tool_name();
@@ -142,12 +145,14 @@ public:
     /// @brief Store a question/answer pair directly to memory
     /// @param question The question text
     /// @param answer The answer text
-    static void store_memory(const std::string& question, const std::string& answer);
+    /// @param user_id User identifier for multi-tenant isolation
+    static void store_memory(const std::string& question, const std::string& answer, const std::string& user_id);
 
     /// @brief Clear a memory by exact question match
     /// @param question The exact question to delete
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if memory was deleted
-    static bool clear_memory(const std::string& question);
+    static bool clear_memory(const std::string& question, const std::string& user_id);
 
     /// @brief Get the name of the store_memory tool
     static std::string get_store_memory_tool_name();
@@ -161,8 +166,9 @@ public:
     /// @brief Execute store_memory as a tool
     /// @param question The question text
     /// @param answer The answer text
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Success/error message
-    static std::string execute_store_memory_tool(const std::string& question, const std::string& answer);
+    static std::string execute_store_memory_tool(const std::string& question, const std::string& answer, const std::string& user_id);
 
     /// @brief Get the name of the clear_memory tool
     static std::string get_clear_memory_tool_name();
@@ -175,17 +181,10 @@ public:
 
     /// @brief Execute clear_memory as a tool
     /// @param question The exact question to delete
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Success/error message
-    static std::string execute_clear_memory_tool(const std::string& question);
-
-    // Multi-tenant user isolation
-    // Thread-local user_id used by all RAG write/search operations.
-    // API server sets this per-request from the API key.
-    // CLI/TUI defaults to "local" (single-user).
-    static void set_current_user_id(const std::string& id);
-    static std::string get_current_user_id();
+    static std::string execute_clear_memory_tool(const std::string& question, const std::string& user_id);
 
 private:
     static std::unique_ptr<DatabaseBackend> instance_;
-    static thread_local std::string current_user_id;
 };

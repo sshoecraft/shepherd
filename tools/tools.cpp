@@ -314,7 +314,7 @@ static std::string extract_string(const std::any& value) {
     }
 }
 
-ToolResult Tools::execute(const std::string& tool_name, const std::string& params_json) {
+ToolResult Tools::execute(const std::string& tool_name, const std::string& params_json, const std::string& user_id) {
     Tool* tool = get(tool_name);
 
     if (!tool) {
@@ -353,6 +353,11 @@ ToolResult Tools::execute(const std::string& tool_name, const std::string& param
         ToolResult r(false, "", "Invalid JSON parameters: " + std::string(e.what()));
         r.summary = "Invalid JSON parameters";
         return r;
+    }
+
+    // Inject user_id for multi-tenant tools (memory, RAG)
+    if (!user_id.empty()) {
+        parameters["_user_id"] = user_id;
     }
 
     try {

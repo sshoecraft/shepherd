@@ -158,33 +158,35 @@ bool RAGManager::initialize(const std::string& db_path, size_t max_db_size);
 // Shutdown and cleanup
 void RAGManager::shutdown();
 
-// Archive a conversation turn
-void RAGManager::archive_turn(const ConversationTurn& turn);
+// Archive a conversation turn (user_id for multi-tenant isolation)
+void RAGManager::archive_turn(const ConversationTurn& turn, const std::string& user_id);
 
 // Search for relevant context
-std::vector<SearchResult> RAGManager::search(const std::string& query, int max_results);
+std::vector<SearchResult> RAGManager::search_memory(const std::string& query, int max_results, const std::string& user_id);
 
-// Fact storage
+// Memory storage
+void RAGManager::store_memory(const std::string& question, const std::string& answer, const std::string& user_id);
+bool RAGManager::clear_memory(const std::string& question, const std::string& user_id);
+
+// Fact storage (not user-scoped)
 void RAGManager::set_fact(const std::string& key, const std::string& value);
 std::string RAGManager::get_fact(const std::string& key);
 bool RAGManager::clear_fact(const std::string& key);
-
-// Multi-tenant user isolation (thread-local)
-void RAGManager::set_current_user_id(const std::string& id);
-std::string RAGManager::get_current_user_id();
 ```
 
 ## Multi-Tenant Isolation
 
-All write/search/clear operations filter by `user_id`. The active user is controlled via thread-local `RAGManager::current_user_id`:
-- API server sets it per-request from API key prefix
-- CLI/TUI defaults to `"local"`
-- Memory extraction thread sets it from work item
+All write/search/clear operations filter by `user_id`, passed explicitly as a parameter:
+- **CLI/TUI/CLI-Server**: `session.user_id` passed through `execute_tool()` and `enrich_with_rag_context()`
+- **API server**: `request_session.user_id` set from API key name / request `user` field
+- **Memory extraction thread**: `item->user_id` passed directly to `store_memory()`
+- **Tool execution**: `user_id` injected as `_user_id` into tool args via `Tools::execute()`
 
 See `memory_extraction.md` for the background extraction system.
 
 ## History
 
+- **v2.30.0**: Replaced thread_local user_id with explicit parameter passing through entire call chain
 - **v2.28.0**: Added user_id column for multi-tenant isolation, WAL mode for SQLite concurrent access, idempotent schema migration
 - **v2.25.1**: Added `schema` parameter to PostgreSQL connection string for search_path
 - **v2.23.0**: Added PostgreSQL backend support with abstract DatabaseBackend interface

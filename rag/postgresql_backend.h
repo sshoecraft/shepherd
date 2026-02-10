@@ -15,11 +15,11 @@ public:
     // DatabaseBackend interface
     bool initialize() override;
     void shutdown() override;
-    void archive_turn(const ConversationTurn& turn) override;
-    std::vector<SearchResult> search(const std::string& query, int max_results) override;
+    void archive_turn(const ConversationTurn& turn, const std::string& user_id) override;
+    std::vector<SearchResult> search(const std::string& query, int max_results, const std::string& user_id) override;
     size_t get_archived_turn_count() const override;
-    void store_memory(const std::string& question, const std::string& answer) override;
-    bool clear_memory(const std::string& question) override;
+    void store_memory(const std::string& question, const std::string& answer, const std::string& user_id) override;
+    bool clear_memory(const std::string& question, const std::string& user_id) override;
     void set_fact(const std::string& key, const std::string& value) override;
     std::string get_fact(const std::string& key) const override;
     bool has_fact(const std::string& key) const override;

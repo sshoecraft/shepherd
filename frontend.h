@@ -94,17 +94,19 @@ public:
     static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
                                             Provider* cmdline_provider = nullptr,
                                             bool no_mcp = false, bool no_tools = false,
-                                            const std::string& target_provider = "");
+                                            const std::string& target_provider = "",
+                                            bool no_rag = false);
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
-    virtual void init(bool no_mcp = false, bool no_tools = false) {}
+    virtual void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false) {}
 
 protected:
     /// @brief Common tool initialization - initializes RAG and registers all tools
     /// @param no_mcp If true, skip MCP initialization
     /// @param no_tools If true, skip all tool initialization
     /// @param force_local If true, force local tool init even if server_tools is set (for fallback)
-    void init_tools(bool no_mcp, bool no_tools, bool force_local = false);
+    /// @param no_rag If true, skip RAG initialization and memory extraction
+    void init_tools(bool no_mcp, bool no_tools, bool force_local = false, bool no_rag = false);
 
     /// @brief Initialize tools from remote server (when --server-tools and API provider)
     /// Called after provider connection when config->server_tools is true
@@ -152,7 +154,8 @@ public:
     ToolResult execute_tool(Tools& tools,
                             const std::string& tool_name,
                             const std::string& params_json,
-                            const std::string& tool_call_id);
+                            const std::string& tool_call_id,
+                            const std::string& user_id = "");
 
     /// @brief Format output for terminal display
     /// Converts LaTeX math notation to Unicode and aligns markdown tables.

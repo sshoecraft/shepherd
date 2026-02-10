@@ -36,6 +36,6 @@ public:
 private:
     void worker_loop();
     std::string build_conversation_text(const std::vector<Message>& messages, int start_index);
-    std::string call_extraction_api(const std::string& conversation_text);
-    void parse_and_store_facts(const std::string& response);
+    std::string call_extraction_api(const std::string& conversation_text, const std::string& user_id);
+    void parse_and_store_facts(const std::string& response, const std::string& user_id);
 };

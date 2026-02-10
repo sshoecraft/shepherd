@@ -66,7 +66,7 @@ public:
     ~CLIServer();
 
     /// @brief Initialize tools and RAG
-    void init(bool no_mcp = false, bool no_tools = false) override;
+    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false) override;
 
 protected:
     /// @brief Register CLI server endpoints
@@ -97,4 +97,5 @@ private:
     // Flags for fallback to local tools
     bool no_tools = false;
     bool no_mcp = false;
+    bool no_rag = false;
 };

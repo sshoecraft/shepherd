@@ -220,6 +220,9 @@ Response AnthropicBackend::parse_http_response(const HttpResponse& http_response
 nlohmann::json AnthropicBackend::build_request_from_session(const Session& session, int max_tokens) {
     json request;
     request["model"] = model_name;
+    if (!session.user_id.empty()) {
+        request["metadata"] = {{"user_id", session.user_id}};
+    }
 
     // Cap max_tokens at model's max_output_tokens limit (Anthropic-specific constraint)
     // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()
@@ -395,6 +398,9 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
                                                 int max_tokens) {
     json request;
     request["model"] = model_name;
+    if (!session.user_id.empty()) {
+        request["metadata"] = {{"user_id", session.user_id}};
+    }
 
     // Cap max_tokens at model's max_output_tokens limit (Anthropic-specific constraint)
     // max_tokens is already capped by session.cpp's calculate_desired_completion_tokens()

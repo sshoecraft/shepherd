@@ -206,7 +206,7 @@ bool Session::evict_messages(const std::vector<std::pair<int, int>>& ranges) {
                     const std::string& user_question = messages[turn_start_idx].content;
                     const std::string& final_answer = messages[final_assistant_idx].content;
                     ConversationTurn turn(user_question, final_answer);
-                    RAGManager::archive_turn(turn);
+                    RAGManager::archive_turn(turn, user_id);
                     dout(1) << "Archived USER question at index " + std::to_string(turn_start_idx) +
                               " with final ASSISTANT answer at index " + std::to_string(final_assistant_idx) << std::endl;
                 } else {

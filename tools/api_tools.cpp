@@ -229,6 +229,12 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
         return result;
     }
 
+    // Capture user_id for multi-tenant tool isolation
+    std::string user_id = tool_utils::get_string(args, "_user_id");
+    if (!user_id.empty()) {
+        tool_session.user_id = user_id;
+    }
+
     // Ensure backend is connected (lazy init on first use)
     ensure_connected();
 
@@ -302,7 +308,12 @@ std::map<std::string, std::any> APIToolAdapter::execute(const std::map<std::stri
 
             std::string tool_result;
             if (tool) {
-                auto tool_result_map = tool->execute(tool_call.parameters);
+                // Inject user_id for multi-tenant tool isolation
+                auto params = tool_call.parameters;
+                if (!tool_session.user_id.empty()) {
+                    params["_user_id"] = tool_session.user_id;
+                }
+                auto tool_result_map = tool->execute(params);
 
                 nlohmann::json result_json;
                 for (const auto& [key, value] : tool_result_map) {

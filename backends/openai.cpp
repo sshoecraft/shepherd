@@ -604,6 +604,9 @@ int OpenAIBackend::extract_tokens_to_evict(const HttpResponse& response) {
 nlohmann::json OpenAIBackend::build_request_from_session(const Session& session, int max_tokens) {
     nlohmann::json request;
     request["model"] = model_name;
+    if (!session.user_id.empty()) {
+        request["user"] = session.user_id;
+    }
 
     // Build messages array from complete session
     nlohmann::json messages = nlohmann::json::array();
@@ -727,6 +730,9 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
                                              int max_tokens) {
     nlohmann::json request;
     request["model"] = model_name;
+    if (!session.user_id.empty()) {
+        request["user"] = session.user_id;
+    }
 
     // Build messages array
     nlohmann::json messages = nlohmann::json::array();

@@ -18,7 +18,7 @@ Added in v2.28.0.
 Single background worker thread consuming from a `ThreadQueue<ExtractionWorkItem>`:
 - Worker calls `wait_for_and_pop(1s)` -- timeout allows checking the `running` flag for clean shutdown.
 - Each work item is self-contained (deep-copied messages) -- no shared references to session state.
-- Thread-local `RAGManager::current_user_id` is set per work item for multi-tenant isolation.
+- `user_id` from each work item is passed explicitly to `RAGManager::store_memory()` for multi-tenant isolation.
 - SQLite uses WAL mode + 5s busy timeout for concurrent reader (main thread) + writer (extraction thread).
 
 ### Extraction Scope by Frontend
@@ -49,10 +49,11 @@ Lines starting with `Q: ` begin a question, lines starting with `A: ` provide th
 
 ## Multi-Tenant Isolation (user_id)
 
-Thread-local `RAGManager::current_user_id` controls which user's memory space is accessed:
-- **CLI/TUI/CLI-Server**: `config.user_id` if set, otherwise auto-detected as `hostname:username`
-- **API server**: OpenAI `user` field from request > API key `name` > `config.user_id` > `"unknown"`
-- **Extraction thread**: Set from work item's `user_id` before processing
+`user_id` is passed explicitly through the call chain to all RAG operations:
+- **CLI/TUI/CLI-Server**: `session.user_id` (from `config.user_id` if set, otherwise auto-detected as `hostname:username`)
+- **API server**: `request_session.user_id` set from OpenAI `user` field > API key `name` > `config.user_id` > `"unknown"`
+- **Extraction thread**: `item->user_id` passed directly to `RAGManager::store_memory()`
+- **Tool execution**: `user_id` injected as `_user_id` parameter via `Tools::execute()` and read by memory tools
 
 When user_id is `"unknown"`, all RAG operations are skipped (no storage, no search, no injection, no extraction).
 
@@ -80,13 +81,38 @@ Schema change: `conversations` table has new `user_id TEXT NOT NULL DEFAULT 'loc
 | `memory_extraction_idle_timeout` | int | `180` | Seconds idle before CLI/TUI trigger (0=disabled) |
 | `memory_extraction_max_turns` | int | `20` | Max conversation turns per extraction call |
 | `memory_extraction_queue_limit` | int | `0` | Max queued items (0=unlimited, >0=drop oldest) |
+| `memory_extraction_retry_interval` | int | `5` | Seconds between retry attempts when API is unreachable |
 
-Thread will not start if `memory_extraction` is true but `memory_extraction_endpoint` or `memory_extraction_model` is empty.
+The extraction thread starts whenever `memory_extraction_endpoint` and `memory_extraction_model` are both configured. The thread itself always runs; the provider's `memory` flag controls whether work items get queued (see below).
+
+## Provider Memory Flag
+
+As of v2.29.0, the provider config has a `memory` boolean (default `false`). When a provider connects, it sets both `config->rag_context_injection` and `config->memory_extraction` from this flag. This controls whether RAG context injection and memory extraction queueing are active for that provider.
+
+| Provider target | `memory` setting | Rationale |
+|---|---|---|
+| Local model (llamacpp) | `true` | Only Shepherd provides RAG |
+| vLLM / raw inference server | `true` | No memory on the server side |
+| Remote Shepherd server (cli) | `false` | Server handles its own RAG |
+| Anthropic/OpenAI/Gemini | User's choice | Shepherd RAG is separate from provider memory |
+
+Set via CLI:
+```
+shepherd provider my-provider set memory true
+```
+
+## Retry Behavior
+
+When the extraction API endpoint is unreachable (connection refused, timeout, HTTP error), the worker retries at a fixed interval configured by `memory_extraction_retry_interval` (default 5 seconds). This handles the case where the extraction model service starts after Shepherd.
+
+- Retries indefinitely until success or shutdown
+- Sleeps in 1-second increments for responsive shutdown (< 2s exit latency)
+- Interval is read from config on each retry, so runtime changes take effect immediately
 
 ## Error Handling
 
 - All errors logged via `dout(1)`, never crash
-- API unreachable: log, drop item, continue
+- API unreachable: retry at configured interval
 - Invalid response: log, discard
 - "NONE" response: normal, skip
 - Entire worker loop body wrapped in try/catch
@@ -97,12 +123,19 @@ Thread will not start if `memory_extraction` is true but `memory_extraction_endp
 |------|------|
 | `memory_extraction.h` | ExtractionWorkItem struct + MemoryExtractionThread class |
 | `memory_extraction.cpp` | Worker loop, API call, response parsing, storage |
-| `rag.h` / `rag.cpp` | Thread-local user_id on RAGManager |
+| `rag.h` / `rag.cpp` | RAGManager static API with explicit user_id params |
 | `rag/sqlite_backend.cpp` | WAL mode, user_id column, filtered SQL queries |
 | `rag/postgresql_backend.cpp` | user_id column, filtered prepared statements |
-| `config.h` / `config.cpp` | 10 new config fields |
+| `config.h` / `config.cpp` | 11 config fields (including retry_interval) |
 | `frontend.h` / `frontend.cpp` | Thread lifecycle, queue methods |
 | `frontends/cli.cpp` | Queue after response, idle timeout, flush on exit |
 | `generation_thread.cpp` | Queue after TUI generation |
 | `frontends/api_server.cpp` | Set user_id, queue last exchange |
 | `frontends/cli_server.cpp` | Queue after generation |
+| `provider.h` / `provider.cpp` | Provider `memory` flag sets config globals on connect |
+
+## History
+
+- **v2.30.0**: Replaced thread_local user_id with explicit parameter passing through entire call chain
+- **v2.29.0**: Added retry with configurable interval (`memory_extraction_retry_interval`), provider `memory` flag controls injection + extraction, thread starts based on endpoint+model presence (not `memory_extraction` bool)
+- **v2.28.0**: Initial implementation with background extraction thread, multi-tenant user_id isolation

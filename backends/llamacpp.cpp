@@ -572,22 +572,6 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
         }
     }
 
-    // Try to load sampling parameters from generation_config.json
-    // Priority: config file values > generation_config.json > hardcoded defaults
-    std::filesystem::path model_file_path(model_path);
-    std::filesystem::path model_dir_path2 = model_file_path.parent_path();
-
-    float gen_temperature = temperature;  // Start with current value
-    float gen_top_p = top_p;
-    int gen_top_k = top_k;
-
-    if (Models::load_generation_config(model_dir_path2.string(), gen_temperature, gen_top_p, gen_top_k)) {
-        // Only apply values that weren't explicitly set in config file
-        if (!temperature_from_config) temperature = gen_temperature;
-        if (!top_p_from_config) top_p = gen_top_p;
-        if (!top_k_from_config) top_k = gen_top_k;
-    }
-
     dout(1) << "LlamaCppBackend initialized with model: " + model_path << std::endl;
     initialized = true;
 
@@ -1289,7 +1273,8 @@ std::string LlamaCppBackend::generate(const Session& session, int max_tokens, Ev
 
     // Content extraction (for channel-based models like GPT-OSS)
     // Uses ChatTemplate's extract_content() which detects format from template
-    if (chat_template) {
+    // Skip if streaming parser already stripped channel markers (response is already clean)
+    if (chat_template && !harmony_enabled && !parser) {
         std::string extracted = chat_template->extract_content(raw_response);
         if (extracted.length() != raw_response.length()) {
             dout(1) << "Content extraction: " + std::to_string(raw_response.length()) +

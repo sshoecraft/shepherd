@@ -17,12 +17,16 @@ extern std::unique_ptr<Config> config;
 static const char* EXTRACTION_SYSTEM_PROMPT = R"(You are a memory extraction system. Your job is to read conversation segments and extract useful facts, decisions, preferences, and technical details that would be valuable to recall in future conversations.
 
 Rules:
-- Extract only concrete, factual information
+- Extract only concrete, factual information that was explicitly stated or confirmed
+- NEVER output a fact where the answer is that information was not provided, not mentioned, or is unknown -- the absence of information is NOT a fact
+- Only store DURABLE facts that will still be true weeks or months from now: identities, preferences, decisions, relationships, configurations, project details, technical choices
+- Do NOT store transient or volatile data: current readings, temperatures, prices, statuses, sensor values, timestamps, counts, or anything that changes frequently -- these must be queried live each time
+- Do NOT store the results of tool calls or API responses -- these are ephemeral data, not lasting facts
 - Ignore small talk, greetings, thank-yous, and filler
 - Ignore dead ends, corrections, and wrong answers -- only keep final conclusions
 - Each extracted fact should be a self-contained question/answer pair
 - Keep facts concise -- one concept per entry
-- If the conversation contains no useful extractable information, respond with NONE
+- If the conversation contains no useful extractable information, respond with exactly: NONE
 
 Output format (one per line):
 Q: <natural language question that this fact answers>
@@ -79,9 +83,6 @@ void MemoryExtractionThread::worker_loop() {
         if (!running) break;
 
         try {
-            // Set user_id for multi-tenant storage
-            RAGManager::set_current_user_id(item->user_id);
-
             // Build conversation text from messages
             std::string conversation_text = build_conversation_text(item->messages, item->start_index);
             if (conversation_text.empty()) {
@@ -92,14 +93,25 @@ void MemoryExtractionThread::worker_loop() {
             dout(1) << "MemoryExtraction: processing " << item->messages.size() - item->start_index
                      << " messages for session " << item->session_id << std::endl;
 
-            // Call extraction API
-            std::string response = call_extraction_api(conversation_text);
-            if (response.empty()) {
-                continue;  // Error already logged
+            // Call extraction API with retry
+            std::string response;
+            while (running) {
+                response = call_extraction_api(conversation_text, item->user_id);
+                if (!response.empty()) break;
+
+                int interval = config ? config->memory_extraction_retry_interval : 5;
+                dout(1) << "MemoryExtraction: API call failed, retrying in "
+                         << interval << "s" << std::endl;
+
+                // Sleep in 1-second increments for responsive shutdown
+                for (int i = 0; i < interval && running; i++) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
             }
+            if (!running) break;
 
             // Parse and store extracted facts
-            parse_and_store_facts(response);
+            parse_and_store_facts(response, item->user_id);
 
             // Update high-water mark
             last_processed_index = static_cast<int>(item->messages.size()) - 1;
@@ -152,7 +164,7 @@ std::string MemoryExtractionThread::build_conversation_text(const std::vector<Me
     return oss.str();
 }
 
-std::string MemoryExtractionThread::call_extraction_api(const std::string& conversation_text) {
+std::string MemoryExtractionThread::call_extraction_api(const std::string& conversation_text, const std::string& user_id) {
 #ifdef ENABLE_API_BACKENDS
     if (!config) return "";
 
@@ -215,7 +227,7 @@ std::string MemoryExtractionThread::call_extraction_api(const std::string& conve
 #endif
 }
 
-void MemoryExtractionThread::parse_and_store_facts(const std::string& response) {
+void MemoryExtractionThread::parse_and_store_facts(const std::string& response, const std::string& user_id) {
     // Check for NONE response
     std::string trimmed = response;
     // Trim whitespace
@@ -250,7 +262,7 @@ void MemoryExtractionThread::parse_and_store_facts(const std::string& response) 
         } else if (line.substr(0, 3) == "A: " && !current_question.empty()) {
             std::string answer = line.substr(3);
             if (!answer.empty()) {
-                RAGManager::store_memory(current_question, answer);
+                RAGManager::store_memory(current_question, answer, user_id);
                 stored_count++;
                 dout(1) << "MemoryExtraction: stored fact: Q=" << current_question.substr(0, 50) << std::endl;
             }

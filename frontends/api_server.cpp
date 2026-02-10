@@ -36,10 +36,10 @@ APIServer::APIServer(const std::string& host, int port, bool, bool)
 APIServer::~APIServer() {
 }
 
-void APIServer::init(bool no_mcp, bool no_tools) {
+void APIServer::init(bool no_mcp, bool no_tools, bool no_rag) {
     // API server always initializes local tools (force_local=true)
     // even when server_tools is set, because it SERVES tools, not fetches them
-    init_tools(no_mcp, no_tools, true);
+    init_tools(no_mcp, no_tools, true, no_rag);
 }
 
 std::string APIServer::extract_bearer_token(const httplib::Request& req) const {
@@ -329,7 +329,9 @@ void APIServer::register_endpoints() {
             }
 
             // Resolve user_id for multi-tenant memory isolation
-            // Priority: OpenAI "user" field > API key name > config user_id > "unknown"
+            // Priority: OpenAI "user" field > API key name > "unknown"
+            // Server-side config/hostname fallbacks intentionally excluded —
+            // they would incorrectly share one user's memory across all API requests.
             std::string req_user_id = "unknown";
             if (request.contains("user") && request["user"].is_string() && !request["user"].get<std::string>().empty()) {
                 req_user_id = request["user"].get<std::string>();
@@ -339,11 +341,6 @@ void APIServer::register_endpoints() {
                     req_user_id = entry->name;
                 }
             }
-            if (req_user_id == "unknown" && !config->user_id.empty()) {
-                req_user_id = config->user_id;
-            }
-            RAGManager::set_current_user_id(req_user_id);
-
             // Standard OpenAI behavior - stateless request handling
 
             // Ensure tools array exists - some models require it for proper chat template formatting
@@ -353,6 +350,7 @@ void APIServer::register_endpoints() {
 
             // Create session for this request
             Session request_session;
+            request_session.user_id = req_user_id;
 
             bool stream = request.value("stream", false);
 
@@ -611,6 +609,7 @@ void APIServer::register_endpoints() {
                         bool in_code_block_for_sse = false;  // Track code block state for SSE output
                         bool in_thinking_block = false;  // Track <think> block state for channel-based models
                         std::string pending_buffer;
+                        std::string streamed_content;  // Accumulate for memory extraction
 
                         // Helper to send an SSE content chunk
                         auto send_content_chunk = [&](const std::string& text) -> bool {
@@ -636,10 +635,19 @@ void APIServer::register_endpoints() {
                                               const std::string& content,
                                               const std::string& tool_name_arg,
                                               const std::string& tool_call_id) -> bool {
-                            // Handle STOP - signals completion, don't treat finish_reason as content
+                            // Accumulate content for memory extraction
+                            if (type == CallbackEvent::CONTENT || type == CallbackEvent::CODEBLOCK) {
+                                streamed_content += content;
+                            }
+
+                            // Handle STOP - add assistant message to session for extraction
                             // Note: Channel parser flush is now handled by backend's flush_output()
                             if (type == CallbackEvent::STOP) {
-                                return true;  // Final chunk with finish_reason sent after this
+                                if (!streamed_content.empty()) {
+                                    request_session.messages.push_back(
+                                        Message(Message::ASSISTANT, streamed_content, 0));
+                                }
+                                return true;
                             }
                             // Handle ERROR
                             if (type == CallbackEvent::ERROR) {
@@ -1221,10 +1229,12 @@ void APIServer::register_endpoints() {
     // POST /v1/tools/execute - Execute a tool for MCP proxy
     tcp_server.Post("/v1/tools/execute", [this](const httplib::Request& req, httplib::Response& res) {
         try {
+            // Extract API key for auth and user_id resolution
+            std::string api_key = extract_bearer_token(req);
+
             // Check authentication if enabled
             bool auth_required = key_store && key_store->is_enabled();
             if (auth_required) {
-                std::string api_key = extract_bearer_token(req);
                 if (api_key.empty()) {
                     res.status = 401;
                     res.set_content(create_error_response(401, "API key required").dump(), "application/json");
@@ -1298,8 +1308,18 @@ void APIServer::register_endpoints() {
             // Log tool call with parameters
             std::cout << "[tool] " << tool_name << ": calling with " << params_log << std::endl;
 
+            // Resolve user_id for multi-tenant tool execution
+            // Only use API key name — no server-side fallbacks for remote clients
+            std::string tool_user_id = "unknown";
+            if (key_store && !api_key.empty()) {
+                const ApiKeyEntry* entry = key_store->get_entry(api_key);
+                if (entry && !entry->name.empty()) {
+                    tool_user_id = entry->name;
+                }
+            }
+
             // Execute the tool (uses Frontend::execute_tool for truncation)
-            ToolResult result = execute_tool(tools, tool_name, arguments_json, tool_call_id);
+            ToolResult result = execute_tool(tools, tool_name, arguments_json, tool_call_id, tool_user_id);
 
             // Log result - use summary if available, otherwise truncated content
             std::string log_summary;

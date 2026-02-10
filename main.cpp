@@ -171,6 +171,7 @@ static void print_usage(int, char** argv) {
 	printf("	--nostream		   Disable streaming (wait for complete response)\n");
 	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
+	printf("	--norag			   Disable RAG and memory extraction\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--system-prompt-file   Read system prompt from file\n");
 	printf("	-e, --prompt TEXT  Initial user prompt (non-interactive single query)\n");
@@ -773,6 +774,7 @@ int main(int argc, char** argv) {
 
 	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
+	bool no_rag = false;
 	bool no_stream = false;
 	bool no_tools = false;
 	bool server_tools = false;
@@ -848,6 +850,7 @@ int main(int argc, char** argv) {
 		{"scheduler", required_argument, 0, 1058},
 		{"nostream", no_argument, 0, 1041},
 		{"raw", no_argument, 0, 1043},
+		{"norag", no_argument, 0, 1061},
 		{"notools", no_argument, 0, 1027},
 		{"system-prompt", required_argument, 0, 1028},
 		{"system-prompt-file", required_argument, 0, 1057},
@@ -960,6 +963,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1043: // --raw
 				override.raw_output = true;
+				break;
+			case 1061: // --norag
+				no_rag = true;
 				break;
 			case 1027: // --notools
 				no_tools = true;
@@ -1454,7 +1460,7 @@ int main(int argc, char** argv) {
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, no_mcp, no_tools,
-		                                 override.provider);
+		                                 override.provider, no_rag);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

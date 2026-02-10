@@ -176,7 +176,7 @@ bool SQLiteBackend::create_tables() {
     return true;
 }
 
-void SQLiteBackend::archive_turn(const ConversationTurn& turn) {
+void SQLiteBackend::archive_turn(const ConversationTurn& turn, const std::string& user_id) {
     dout(1) << "Archiving conversation turn to SQLite RAG database" << std::endl;
 
     // Compute SHA256 hash of user_message + assistant_response to detect duplicates
@@ -195,8 +195,6 @@ void SQLiteBackend::archive_turn(const ConversationTurn& turn) {
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     const char* sql = "INSERT OR IGNORE INTO conversations (user_message, assistant_response, timestamp, content_hash, user_id) VALUES (?, ?, ?, ?, ?)";
-
-    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -230,7 +228,7 @@ void SQLiteBackend::archive_turn(const ConversationTurn& turn) {
     check_and_prune_if_needed();
 }
 
-std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int max_results) {
+std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int max_results, const std::string& user_id) {
     dout(1) << "Searching SQLite RAG database for: " + query << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
@@ -284,8 +282,6 @@ std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int ma
         ORDER BY score
         LIMIT ?
     )";
-
-    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -346,14 +342,14 @@ size_t SQLiteBackend::get_archived_turn_count() const {
     return count;
 }
 
-void SQLiteBackend::store_memory(const std::string& question, const std::string& answer) {
+void SQLiteBackend::store_memory(const std::string& question, const std::string& answer, const std::string& user_id) {
     dout(1) << "Storing memory: " + question << std::endl;
     ConversationTurn turn(question, answer);
-    archive_turn(turn);
+    archive_turn(turn, user_id);
     dout(1) << "Stored memory: question=" + question + ", answer=" + answer << std::endl;
 }
 
-bool SQLiteBackend::clear_memory(const std::string& question) {
+bool SQLiteBackend::clear_memory(const std::string& question, const std::string& user_id) {
     if (!db_) {
         return false;
     }
@@ -362,8 +358,6 @@ bool SQLiteBackend::clear_memory(const std::string& question) {
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     const char* sql = "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = ? AND user_id = ? LIMIT 1)";
-
-    std::string user_id = RAGManager::get_current_user_id();
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);

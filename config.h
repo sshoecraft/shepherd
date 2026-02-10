@@ -89,6 +89,7 @@ public:
     int memory_extraction_idle_timeout;
     int memory_extraction_max_turns;
     int memory_extraction_queue_limit;
+    int memory_extraction_retry_interval;
     int truncate_limit;
     int max_tokens;       // Max generation tokens: -1=max, 0=auto, >0=explicit
     bool streaming;

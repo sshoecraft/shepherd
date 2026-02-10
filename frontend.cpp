@@ -49,7 +49,7 @@ Frontend::~Frontend() {
     }
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider, bool no_rag) {
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -95,7 +95,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     dout(1) << "Frontend initialized in " + mode + " mode" << std::endl;
 
     // Initialize the frontend (RAG, tools, MCP)
-    frontend->init(no_mcp, no_tools);
+    frontend->init(no_mcp, no_tools, no_rag);
 
     return frontend;
 }
@@ -175,7 +175,7 @@ bool Frontend::connect_provider(const std::string& name) {
     }
 }
 
-void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
+void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_rag) {
     // Resolve user_id: config override > hostname:username auto-detect > "unknown"
     if (!config->user_id.empty()) {
         user_id = config->user_id;
@@ -200,41 +200,41 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local) {
         }
     }
     dout(1) << "Frontend user_id: " << user_id << std::endl;
+    session.user_id = user_id;
 
     // Initialize RAG system using global config
-    std::string db_path = config->memory_database;
-    if (db_path.empty()) {
-        try {
-            db_path = Config::get_default_memory_db_path();
-        } catch (const ConfigError& e) {
-            std::cerr << "Failed to determine memory database path: " + std::string(e.what()) << std::endl;
-            throw;
+    if (!no_rag) {
+        std::string db_path = config->memory_database;
+        if (db_path.empty()) {
+            try {
+                db_path = Config::get_default_memory_db_path();
+            } catch (const ConfigError& e) {
+                std::cerr << "Failed to determine memory database path: " + std::string(e.what()) << std::endl;
+                throw;
+            }
+        } else if (db_path[0] == '~') {
+            // Expand ~ if present
+            db_path = Config::get_home_directory() + db_path.substr(1);
         }
-    } else if (db_path[0] == '~') {
-        // Expand ~ if present
-        db_path = Config::get_home_directory() + db_path.substr(1);
-    }
 
-    if (!RAGManager::initialize(db_path, config->max_db_size)) {
-        throw std::runtime_error("Failed to initialize RAG system");
-    }
+        if (!RAGManager::initialize(db_path, config->max_db_size)) {
+            throw std::runtime_error("Failed to initialize RAG system");
+        }
 
-    // Set user_id for RAG operations on the main thread
-    RAGManager::set_current_user_id(user_id);
-    if (user_id == "unknown") {
-        dout(1) << "WARNING: user_id is 'unknown' - RAG storage and injection disabled" << std::endl;
-    }
-    dout(1) << "RAG initialized with database: " + db_path << std::endl;
+        if (user_id == "unknown") {
+            dout(1) << "WARNING: user_id is 'unknown' - RAG storage and injection disabled" << std::endl;
+        }
+        dout(1) << "RAG initialized with database: " + db_path << std::endl;
 
-    // Start memory extraction thread if enabled and configured
-    if (config->memory_extraction) {
-        if (config->memory_extraction_endpoint.empty() || config->memory_extraction_model.empty()) {
-            std::cerr << "memory_extraction enabled but memory_extraction_endpoint or memory_extraction_model not set, disabling" << std::endl;
-        } else {
+        // Start memory extraction thread if endpoint and model are configured
+        // Thread always runs; provider's "memory" flag gates whether items get queued
+        if (!config->memory_extraction_endpoint.empty() && !config->memory_extraction_model.empty()) {
             extraction_thread = std::make_unique<MemoryExtractionThread>();
             extraction_thread->start();
             dout(1) << "Memory extraction thread started (model=" + config->memory_extraction_model + ", endpoint=" + config->memory_extraction_endpoint + ")" << std::endl;
         }
+    } else {
+        dout(1) << "RAG disabled (--norag)" << std::endl;
     }
 
     if (no_tools) {
@@ -305,9 +305,10 @@ void Frontend::init_remote_tools(const std::string& server_url, const std::strin
 ToolResult Frontend::execute_tool(Tools& tools,
                                    const std::string& tool_name,
                                    const std::string& params_json,
-                                   const std::string& tool_call_id) {
+                                   const std::string& tool_call_id,
+                                   const std::string& user_id) {
     // Execute the tool
-    ToolResult tool_result = tools.execute(tool_name, params_json);
+    ToolResult tool_result = tools.execute(tool_name, params_json, user_id);
 
     std::string result_content;
     if (tool_result.success) {
@@ -460,7 +461,7 @@ std::string Frontend::extract_keywords(const std::string& message) {
 void Frontend::enrich_with_rag_context(Session& sess) {
     if (!config || !config->rag_context_injection) return;
     if (!RAGManager::is_initialized()) return;
-    if (RAGManager::get_current_user_id() == "unknown") return;
+    if (sess.user_id.empty() || sess.user_id == "unknown") return;
     if (sess.messages.empty()) return;
     if (sess.last_user_message_index < 0) return;
 
@@ -469,13 +470,15 @@ void Frontend::enrich_with_rag_context(Session& sess) {
 
     std::string keywords = extract_keywords(last_msg.content);
     if (keywords.empty()) {
-        dout(1) << "RAG context injection: no keywords extracted, skipping" << std::endl;
-        return;
+        // Fall back to the raw message when all words are stop words
+        // (e.g., "who am i" — short but still worth searching)
+        keywords = last_msg.content;
+        dout(1) << "RAG context injection: no keywords extracted, using raw message" << std::endl;
     }
 
     dout(1) << "RAG context injection: searching with keywords: " + keywords << std::endl;
 
-    auto results = RAGManager::search_memory(keywords, config->rag_max_results);
+    auto results = RAGManager::search_memory(keywords, config->rag_max_results, sess.user_id);
     if (results.empty()) {
         dout(1) << "RAG context injection: no results found" << std::endl;
         return;

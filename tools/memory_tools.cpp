@@ -42,10 +42,12 @@ std::map<std::string, std::any> SearchMemoryTool::execute(const std::map<std::st
         return result;
     }
 
+    std::string user_id = tool_utils::get_string(args, "_user_id");
+
     dout(1) << "SEARCH_MEMORY called with query: '" + query + "', max_results: " + std::to_string(max_results) << std::endl;
 
     try {
-        auto search_results = RAGManager::search_memory(query, max_results);
+        auto search_results = RAGManager::search_memory(query, max_results, user_id);
 
         if (search_results.empty()) {
             dout(1) << "SEARCH_MEMORY: No results found" << std::endl;
@@ -309,7 +311,8 @@ std::map<std::string, std::any> StoreMemoryTool::execute(const std::map<std::str
     }
     std::string answer = tool_utils::get_string(args, "answer");
 
-    std::string response = RAGManager::execute_store_memory_tool(question, answer);
+    std::string user_id = tool_utils::get_string(args, "_user_id");
+    std::string response = RAGManager::execute_store_memory_tool(question, answer, user_id);
 
     if (response.find("Error:") == 0) {
         result["error"] = response;
@@ -352,7 +355,8 @@ std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::str
         question = tool_utils::get_string(args, "key");
     }
 
-    std::string response = RAGManager::execute_clear_memory_tool(question);
+    std::string user_id = tool_utils::get_string(args, "_user_id");
+    std::string response = RAGManager::execute_clear_memory_tool(question, user_id);
 
     // "Memory not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Memory not found:") != 0) {

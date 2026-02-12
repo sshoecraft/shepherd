@@ -15,6 +15,7 @@ ifneq ("$(wildcard ~/.shepherd_opts)","")
 include ~/.shepherd_opts
 endif
 all:
+	@if [ ! -d build ]; then $(MAKE) config; fi
 	(cd build && make -j$(nproc))
 
 # Build activation command if TensorRT is ON and VENV is set
@@ -30,6 +31,7 @@ ifeq ($(TENSORRT),ON)
 endif
 
 config:
+	@if [ ! -f vendor/replxx/CMakeLists.txt ]; then echo "Initializing replxx submodule..."; git submodule update --init vendor/replxx; fi
 	rm -rf build; mkdir -p build
 	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) -DENABLE_POSTGRESQL=$(POSTGRES) ..
 

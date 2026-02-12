@@ -17,6 +17,9 @@
 #include <regex>
 #include <unistd.h>
 #include <climits>
+#ifndef HOST_NAME_MAX
+#define HOST_NAME_MAX 255
+#endif
 #include <pwd.h>
 
 // Use config->thinking instead of g_show_thinking

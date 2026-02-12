@@ -46,7 +46,9 @@
 #include <cerrno>
 #include <pwd.h>
 #include <grp.h>
+#ifdef __linux__
 #include <sys/prctl.h>
+#endif
 #include <set>
 
 // MPI support for multi-GPU TensorRT
@@ -503,8 +505,10 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 		dout(1) << "Dropped privileges to user: " + run_as_user << std::endl;
 	}
 
+#ifdef __linux__
 	// Prevent privilege escalation via setuid binaries or file capabilities
 	prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+#endif
 
 	dout(1) << "Chrooted to: " + chroot_path << std::endl;
 }

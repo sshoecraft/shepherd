@@ -75,7 +75,7 @@ public:
     /// @brief Get entry for a validated key (for session binding)
     /// @param key The API key to look up
     /// @return Pointer to entry if found, nullptr otherwise
-    const ApiKeyEntry* get_entry(const std::string& key) const;
+    const ApiKeyEntry* get_entry(const std::string& key) const override;
 
 private:
     std::map<std::string, ApiKeyEntry> keys;
@@ -92,7 +92,7 @@ public:
     bool is_enabled() override;
 
     /// @brief Get entry for a validated key
-    const ApiKeyEntry* get_entry(const std::string& key) const;
+    const ApiKeyEntry* get_entry(const std::string& key) const override;
 
 private:
     std::map<std::string, ApiKeyEntry> keys;

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <utility>
 
 // Forward declarations (defined in rag.h)
 struct SearchResult;
@@ -52,22 +53,31 @@ public:
     /// @brief Store a key-value fact
     /// @param key Unique identifier for the fact
     /// @param value The fact value to store
-    virtual void set_fact(const std::string& key, const std::string& value) = 0;
+    /// @param user_id User identifier for multi-tenant isolation
+    virtual void set_fact(const std::string& key, const std::string& value, const std::string& user_id) = 0;
 
     /// @brief Retrieve a fact by key
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return The stored value, or empty string if not found
-    virtual std::string get_fact(const std::string& key) const = 0;
+    virtual std::string get_fact(const std::string& key, const std::string& user_id) const = 0;
 
     /// @brief Check if a fact exists
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if fact exists
-    virtual bool has_fact(const std::string& key) const = 0;
+    virtual bool has_fact(const std::string& key, const std::string& user_id) const = 0;
 
     /// @brief Delete a fact by key
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if fact was deleted, false if it didn't exist
-    virtual bool clear_fact(const std::string& key) = 0;
+    virtual bool clear_fact(const std::string& key, const std::string& user_id) = 0;
+
+    /// @brief Get all facts for a user
+    /// @param user_id User identifier for multi-tenant isolation
+    /// @return Vector of (key, value) pairs
+    virtual std::vector<std::pair<std::string, std::string>> get_all_facts(const std::string& user_id) const = 0;
 
     /// @brief Get database backend type identifier
     /// @return Backend type string ("sqlite", "postgresql")

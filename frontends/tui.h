@@ -28,7 +28,7 @@ public:
     ~TUI();
 
     // Frontend interface
-    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false) override;
+    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) override;
     int run(Provider* cmdline_provider = nullptr) override;
 
     // Legacy init/shutdown for backwards compatibility with main.cpp
@@ -89,6 +89,7 @@ public:
     bool no_tools = false;   // --notools flag
     bool no_mcp = false;     // --nomcp flag (for fallback to local tools)
     bool no_rag = false;     // --norag flag
+    bool mem_tools = false;  // --memtools flag
 
     // Input queue for async input
     struct QueuedInput {

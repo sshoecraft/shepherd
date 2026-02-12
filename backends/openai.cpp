@@ -1080,12 +1080,8 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
 
     flush_output();
 
-    // Update session token counts from streaming response
-    if (prompt_tokens > 0 || completion_tokens > 0) {
-        session.total_tokens = prompt_tokens + completion_tokens;
-        session.last_prompt_tokens = prompt_tokens;
-        session.last_assistant_message_tokens = completion_tokens;
-    }
+    // Update session token counts using delta tracking
+    update_session_tokens(session, prompt_tokens, completion_tokens);
 
     // Record tool calls for emission after STOP
     for (const auto& tc : tool_calls) {

@@ -21,10 +21,11 @@ public:
     size_t get_archived_turn_count() const override;
     void store_memory(const std::string& question, const std::string& answer, const std::string& user_id) override;
     bool clear_memory(const std::string& question, const std::string& user_id) override;
-    void set_fact(const std::string& key, const std::string& value) override;
-    std::string get_fact(const std::string& key) const override;
-    bool has_fact(const std::string& key) const override;
-    bool clear_fact(const std::string& key) override;
+    void set_fact(const std::string& key, const std::string& value, const std::string& user_id) override;
+    std::string get_fact(const std::string& key, const std::string& user_id) const override;
+    bool has_fact(const std::string& key, const std::string& user_id) const override;
+    bool clear_fact(const std::string& key, const std::string& user_id) override;
+    std::vector<std::pair<std::string, std::string>> get_all_facts(const std::string& user_id) const override;
     std::string backend_type() const override { return "sqlite"; }
 
 private:

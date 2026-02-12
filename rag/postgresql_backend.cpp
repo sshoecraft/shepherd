@@ -155,9 +155,9 @@ bool PostgreSQLBackend::set_schema() {
 bool PostgreSQLBackend::create_tables() {
     PGconn* conn = static_cast<PGconn*>(conn_);
 
-    // Create conversations table with tsvector for full-text search
-    const char* create_conversations_sql = R"(
-        CREATE TABLE IF NOT EXISTS conversations (
+    // Create context table with tsvector for full-text search
+    const char* create_context_sql = R"(
+        CREATE TABLE IF NOT EXISTS context (
             id BIGSERIAL PRIMARY KEY,
             user_message TEXT NOT NULL,
             assistant_response TEXT NOT NULL,
@@ -171,9 +171,9 @@ bool PostgreSQLBackend::create_tables() {
         );
     )";
 
-    PGresult* res = PQexec(conn, create_conversations_sql);
+    PGresult* res = PQexec(conn, create_context_sql);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        std::cerr << "Failed to create conversations table: " + std::string(PQerrorMessage(conn)) << std::endl;
+        std::cerr << "Failed to create context table: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
         return false;
     }
@@ -181,8 +181,8 @@ bool PostgreSQLBackend::create_tables() {
 
     // Create GIN index for full-text search
     const char* create_fts_index_sql = R"(
-        CREATE INDEX IF NOT EXISTS conversations_search_idx
-        ON conversations USING GIN(search_vector);
+        CREATE INDEX IF NOT EXISTS context_search_idx
+        ON context USING GIN(search_vector);
     )";
 
     res = PQexec(conn, create_fts_index_sql);
@@ -195,8 +195,8 @@ bool PostgreSQLBackend::create_tables() {
 
     // Create timestamp index for efficient pruning
     const char* create_timestamp_index_sql = R"(
-        CREATE INDEX IF NOT EXISTS conversations_timestamp_idx
-        ON conversations(timestamp);
+        CREATE INDEX IF NOT EXISTS context_timestamp_idx
+        ON context(timestamp);
     )";
 
     res = PQexec(conn, create_timestamp_index_sql);
@@ -209,8 +209,8 @@ bool PostgreSQLBackend::create_tables() {
 
     // Create user_id index
     const char* create_user_id_index_sql = R"(
-        CREATE INDEX IF NOT EXISTS conversations_user_id_idx
-        ON conversations(user_id);
+        CREATE INDEX IF NOT EXISTS context_user_id_idx
+        ON context(user_id);
     )";
 
     res = PQexec(conn, create_user_id_index_sql);
@@ -222,15 +222,17 @@ bool PostgreSQLBackend::create_tables() {
     PQclear(res);
 
     // Migration: add user_id column to existing databases (idempotent)
-    PQexec(conn, "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local'");
+    PQexec(conn, "ALTER TABLE context ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local'");
 
     // Create facts table
     const char* create_facts_sql = R"(
         CREATE TABLE IF NOT EXISTS facts (
-            key TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL DEFAULT 'local',
+            key TEXT NOT NULL,
             value TEXT NOT NULL,
             created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL
+            updated_at BIGINT NOT NULL,
+            PRIMARY KEY (user_id, key)
         );
     )";
 
@@ -251,7 +253,7 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare archive_turn statement
     PGresult* res = PQprepare(conn, "archive_turn",
-        "INSERT INTO conversations (user_message, assistant_response, timestamp, content_hash, user_id) "
+        "INSERT INTO context (user_message, assistant_response, timestamp, content_hash, user_id) "
         "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (content_hash) DO NOTHING",
         5, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
@@ -261,15 +263,18 @@ bool PostgreSQLBackend::prepare_statements() {
     }
     PQclear(res);
 
-    // Prepare search statement
+    // Prepare search statement with time-based relevancy
+    // Recency boost: 1.0 / (1.0 + age_days/30.0) -- halves weight every 30 days
+    // $4 = current timestamp (epoch seconds)
     res = PQprepare(conn, "search_memory",
         "SELECT user_message, assistant_response, timestamp, "
-        "ts_rank_cd(search_vector, plainto_tsquery('english', $1)) as score "
-        "FROM conversations "
+        "ts_rank_cd(search_vector, plainto_tsquery('english', $1)) "
+        "/ (1.0 + ($4::bigint - timestamp) / 2592000.0) as score "
+        "FROM context "
         "WHERE search_vector @@ plainto_tsquery('english', $1) AND user_id = $3 "
         "ORDER BY score DESC "
         "LIMIT $2",
-        3, nullptr);
+        4, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare search_memory: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -279,10 +284,10 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare set_fact statement
     res = PQprepare(conn, "set_fact",
-        "INSERT INTO facts (key, value, created_at, updated_at) "
-        "VALUES ($1, $2, $3, $3) "
-        "ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3",
-        3, nullptr);
+        "INSERT INTO facts (user_id, key, value, created_at, updated_at) "
+        "VALUES ($1, $2, $3, $4, $4) "
+        "ON CONFLICT (user_id, key) DO UPDATE SET value = $3, updated_at = $4",
+        4, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare set_fact: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -292,8 +297,8 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare get_fact statement
     res = PQprepare(conn, "get_fact",
-        "SELECT value FROM facts WHERE key = $1",
-        1, nullptr);
+        "SELECT value FROM facts WHERE user_id = $1 AND key = $2",
+        2, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare get_fact: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -303,8 +308,8 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare clear_fact statement
     res = PQprepare(conn, "clear_fact",
-        "DELETE FROM facts WHERE key = $1",
-        1, nullptr);
+        "DELETE FROM facts WHERE user_id = $1 AND key = $2",
+        2, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare clear_fact: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -314,7 +319,7 @@ bool PostgreSQLBackend::prepare_statements() {
 
     // Prepare clear_memory statement
     res = PQprepare(conn, "clear_memory",
-        "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = $1 AND user_id = $2 LIMIT 1)",
+        "DELETE FROM context WHERE id = (SELECT id FROM context WHERE user_message = $1 AND user_id = $2 LIMIT 1)",
         2, nullptr);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to prepare clear_memory: " + std::string(PQerrorMessage(conn)) << std::endl;
@@ -376,9 +381,10 @@ std::vector<SearchResult> PostgreSQLBackend::search(const std::string& query, in
     std::vector<SearchResult> results;
 
     std::string limit_str = std::to_string(max_results);
-    const char* params[3] = { query.c_str(), limit_str.c_str(), user_id.c_str() };
+    std::string now_str = std::to_string(ConversationTurn::get_current_timestamp());
+    const char* params[4] = { query.c_str(), limit_str.c_str(), user_id.c_str(), now_str.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "search_memory", 3, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "search_memory", 4, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         std::cerr << "Search query failed: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -412,7 +418,7 @@ size_t PostgreSQLBackend::get_archived_turn_count() const {
     }
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    PGresult* res = PQexec(conn, "SELECT COUNT(*) FROM conversations");
+    PGresult* res = PQexec(conn, "SELECT COUNT(*) FROM context");
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         std::cerr << "Failed to get count: " + std::string(PQerrorMessage(conn)) << std::endl;
@@ -461,16 +467,16 @@ bool PostgreSQLBackend::clear_memory(const std::string& question, const std::str
     }
 }
 
-void PostgreSQLBackend::set_fact(const std::string& key, const std::string& value) {
-    dout(1) << "Setting fact: " + key << std::endl;
+void PostgreSQLBackend::set_fact(const std::string& key, const std::string& value, const std::string& user_id) {
+    dout(1) << "Setting fact: " + key + " for user " + user_id << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
     int64_t now = ConversationTurn::get_current_timestamp();
     std::string now_str = std::to_string(now);
 
-    const char* params[3] = { key.c_str(), value.c_str(), now_str.c_str() };
+    const char* params[4] = { user_id.c_str(), key.c_str(), value.c_str(), now_str.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "set_fact", 3, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "set_fact", 4, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to set fact: " + std::string(PQerrorMessage(conn)) << std::endl;
     } else {
@@ -479,17 +485,17 @@ void PostgreSQLBackend::set_fact(const std::string& key, const std::string& valu
     PQclear(res);
 }
 
-std::string PostgreSQLBackend::get_fact(const std::string& key) const {
+std::string PostgreSQLBackend::get_fact(const std::string& key, const std::string& user_id) const {
     if (!conn_) {
         return "";
     }
 
-    dout(1) << "Getting fact: " + key << std::endl;
+    dout(1) << "Getting fact: " + key + " for user " + user_id << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    const char* params[1] = { key.c_str() };
+    const char* params[2] = { user_id.c_str(), key.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "get_fact", 1, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "get_fact", 2, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         std::cerr << "Failed to get fact: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);
@@ -508,15 +514,15 @@ std::string PostgreSQLBackend::get_fact(const std::string& key) const {
     return value;
 }
 
-bool PostgreSQLBackend::has_fact(const std::string& key) const {
+bool PostgreSQLBackend::has_fact(const std::string& key, const std::string& user_id) const {
     if (!conn_) {
         return false;
     }
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    const char* params[1] = { key.c_str() };
+    const char* params[2] = { user_id.c_str(), key.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "get_fact", 1, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "get_fact", 2, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         PQclear(res);
         return false;
@@ -527,17 +533,44 @@ bool PostgreSQLBackend::has_fact(const std::string& key) const {
     return exists;
 }
 
-bool PostgreSQLBackend::clear_fact(const std::string& key) {
+std::vector<std::pair<std::string, std::string>> PostgreSQLBackend::get_all_facts(const std::string& user_id) const {
+    std::vector<std::pair<std::string, std::string>> results;
+    if (!conn_) return results;
+
+    PGconn* conn = static_cast<PGconn*>(conn_);
+    const char* sql = "SELECT key, value FROM facts WHERE user_id = $1 ORDER BY key";
+    const char* params[1] = { user_id.c_str() };
+
+    PGresult* res = PQexecParams(conn, sql, 1, nullptr, params, nullptr, nullptr, 0);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        std::cerr << "Failed to get all facts: " + std::string(PQerrorMessage(conn)) << std::endl;
+        PQclear(res);
+        return results;
+    }
+
+    int rows = PQntuples(res);
+    for (int i = 0; i < rows; i++) {
+        std::string key = PQgetvalue(res, i, 0);
+        std::string value = PQgetvalue(res, i, 1);
+        results.emplace_back(std::move(key), std::move(value));
+    }
+
+    PQclear(res);
+    dout(1) << "get_all_facts: returned " + std::to_string(results.size()) + " facts for user " + user_id << std::endl;
+    return results;
+}
+
+bool PostgreSQLBackend::clear_fact(const std::string& key, const std::string& user_id) {
     if (!conn_) {
         return false;
     }
 
-    dout(1) << "Clearing fact: " + key << std::endl;
+    dout(1) << "Clearing fact: " + key + " for user " + user_id << std::endl;
 
     PGconn* conn = static_cast<PGconn*>(conn_);
-    const char* params[1] = { key.c_str() };
+    const char* params[2] = { user_id.c_str(), key.c_str() };
 
-    PGresult* res = PQexecPrepared(conn, "clear_fact", 1, params, nullptr, nullptr, 0);
+    PGresult* res = PQexecPrepared(conn, "clear_fact", 2, params, nullptr, nullptr, 0);
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         std::cerr << "Failed to clear fact: " + std::string(PQerrorMessage(conn)) << std::endl;
         PQclear(res);

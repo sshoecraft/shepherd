@@ -20,12 +20,13 @@ add_message_to_session(Message::USER, input)
         |
         v
 enrich_with_rag_context(session)
+  - Get all facts for user → format as [facts: key=value, ...]
   - Extract keywords from last user message
-  - Query RAG backend (FTS5/Postgres full-text search)
+  - Query context table (FTS5/Postgres full-text search with recency)
   - Filter by relevance threshold
   - If results: postfix [context: ...] onto user message
   - Recount tokens, update session totals
-  - If no results: leave message unchanged (no-op)
+  - If nothing to inject: leave message unchanged (no-op)
         |
         v
 generate_response() / prefill_session() (unchanged)
@@ -99,14 +100,15 @@ Guard checks (returns immediately if any fail):
 - Last message must be USER role
 
 Processing:
-1. Extract keywords from last user message
-2. Call `RAGManager::search_memory(keywords, config->rag_max_results, sess.user_id)`
-3. Filter results by `config->rag_relevance_threshold`
-4. Build pipe-separated context string from results
-5. Postfix onto message: `content + "\n\n[context: " + context + "]"`
-6. Log enriched message to stdout as `[prompt+context]`
-7. Recount tokens via `backend->count_message_tokens()`
-8. Update `sess.total_tokens` and `sess.last_user_message_tokens` with delta
+1. Get all facts for user via `RAGManager::get_all_facts(sess.user_id)` → format as `[facts: key=value, ...]`
+2. Extract keywords from last user message
+3. Call `RAGManager::search_memory(keywords, config->rag_max_results, sess.user_id)` (searches `context` table with time-based recency)
+4. Filter results by `config->rag_relevance_threshold`
+5. Build injection string: facts first, then pipe-separated context results
+6. Postfix onto message: `content + "\n\n[facts: ...]\n[context: ...]"`
+7. Log enriched message to stdout as `[prompt+context]`
+8. Recount tokens via `backend->count_message_tokens()`
+9. Update `sess.total_tokens` and `sess.last_user_message_tokens` with delta
 
 ### Insertion Points
 
@@ -177,9 +179,10 @@ the data enters the RAG backend and becomes available for future automatic injec
 
 When context is injected, the server log shows:
 ```
-[prompt+context] What temperature is the ecobee thermostat?
+[prompt+context] What is my name?
 
-[context: User: ecobee route\nAssistant: route:ecobee/get_temp ...]
+[facts: name=Steve, location=Texas]
+[context: User: What IDE does the user prefer?\nAssistant: VS Code with vim keybindings]
 ```
 
 Debug level 1 (`-d`) shows keyword extraction, search results, threshold
@@ -187,6 +190,38 @@ filtering, and token count changes.
 
 When no context is injected (no keywords, no results, below threshold),
 nothing is logged — no noise.
+
+## Injection Stripping (v2.31.0)
+
+RAG context is now stripped from previous user messages each turn. Only the
+current user message carries injected content. This prevents context bloat in
+long conversations — without stripping, 200 messages each carrying 500 tokens
+of injected context wastes 100K tokens.
+
+### How It Works
+
+1. Before injecting, `pre_injection_content` is saved on the Message
+2. After the API call, delta tracking corrects the message's `.tokens` to
+   the actual value (from `prompt_tokens - last_prompt_tokens`)
+3. Next turn, before enriching the new message:
+   - Previous messages with `pre_injection_content` set are restored
+   - Token count is recalculated using per-message correction:
+     `per_message_cpt = content.length() / tokens` (derived from delta-corrected actual)
+     `new_tokens = restored_content.length() / per_message_cpt`
+   - `session.total_tokens` is decremented by the freed tokens
+
+### Delta Tracking (v2.31.0)
+
+All API backends now use `ApiBackend::update_session_tokens()` for post-generation
+token accounting. This method:
+
+- Computes `delta = prompt_tokens - session.last_prompt_tokens` to derive actual
+  per-message token counts (replaces the EMA-only estimates)
+- Corrects `Message.tokens` for the most recently added user message
+- Refines the EMA `chars_per_token` ratio (alpha=0.2, clamped to [2.0, 5.0])
+  for better future estimates
+- Replaces the duplicated overwrite code that was copy-pasted across OpenAI,
+  Anthropic, and Gemini streaming paths
 
 ## Provider Memory Flag (v2.29.0)
 

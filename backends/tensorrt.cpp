@@ -1730,58 +1730,9 @@ void TensorRTBackend::handle_kv_cache_removed(const std::vector<uint64_t>& block
 
     dout(1) << "Identified messages 1-" + std::to_string(last_evicted_msg) + " as evicted" << std::endl;
 
-    // Handle open_user_question_ if it exists
-    if (open_user_question_.has_value()) {
-        for (int i = 1; i <= last_evicted_msg; ++i) {
-            if (messages[i].role == Message::ASSISTANT) {
-                dout(1) << "Found assistant response for orphaned user question, archiving to RAG" << std::endl;
-                ConversationTurn turn(open_user_question_->content, messages[i].content);
-                RAGManager::archive_turn(turn);
-                open_user_question_.reset();
-                break;
-            }
-        }
-    }
-
-    // Scan evicted messages for user→assistant pairs
-    for (int i = 1; i <= last_evicted_msg; ++i) {
-        if (messages[i].role != Message::USER) {
-            continue;
-        }
-
-        bool found_assistant = false;
-
-        // Check in evicted range
-        for (int j = i + 1; j <= last_evicted_msg; ++j) {
-            if (messages[j].role == Message::ASSISTANT) {
-                dout(1) << "Found complete turn in evicted range, archiving to RAG" << std::endl;
-                ConversationTurn turn(messages[i].content, messages[j].content);
-                RAGManager::archive_turn(turn);
-                found_assistant = true;
-                break;
-            }
-        }
-
-        if (found_assistant) {
-            continue;
-        }
-
-        // Check in remaining messages
-        for (size_t j = last_evicted_msg + 1; j < messages.size(); ++j) {
-            if (messages[j].role == Message::ASSISTANT) {
-                dout(1) << "Found complete turn spanning eviction boundary, archiving to RAG" << std::endl;
-                ConversationTurn turn(messages[i].content, messages[j].content);
-                RAGManager::archive_turn(turn);
-                found_assistant = true;
-                break;
-            }
-        }
-
-        if (!found_assistant) {
-            dout(1) << "User message has no assistant response yet, storing as orphaned" << std::endl;
-            open_user_question_ = messages[i];
-        }
-    }
+    // NOTE: archive_turn during eviction disabled (v2.32.0)
+    // Memory extraction thread already captures anything valuable from conversations.
+    open_user_question_.reset();
 
     // Remove evicted messages from backend_session
     for (int i = 0; i < last_evicted_msg; ++i) {

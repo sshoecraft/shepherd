@@ -45,8 +45,8 @@ The factory auto-detects backend type from connection string:
 ### SQLite
 
 ```sql
--- Main storage table
-CREATE TABLE conversations (
+-- Context storage table (Q/A pairs from extraction)
+CREATE TABLE context (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_message TEXT NOT NULL,
     assistant_response TEXT NOT NULL,
@@ -55,27 +55,29 @@ CREATE TABLE conversations (
     user_id TEXT NOT NULL DEFAULT 'local'
 );
 
--- FTS5 virtual table for full-text search
-CREATE VIRTUAL TABLE conversations_fts USING fts5(
+-- FTS5 virtual table for full-text search with time-based relevancy
+CREATE VIRTUAL TABLE context_fts USING fts5(
     user_message,
     assistant_response,
-    content='conversations',
+    content='context',
     content_rowid='id'
 );
 
--- Key-value fact storage
+-- Key-value fact storage (user-scoped, durable identity facts)
 CREATE TABLE facts (
-    key TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
     value TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, key)
 );
 ```
 
 ### PostgreSQL
 
 ```sql
-CREATE TABLE conversations (
+CREATE TABLE context (
     id BIGSERIAL PRIMARY KEY,
     user_message TEXT NOT NULL,
     assistant_response TEXT NOT NULL,
@@ -88,28 +90,32 @@ CREATE TABLE conversations (
     ) STORED
 );
 
-CREATE INDEX conversations_search_idx ON conversations USING GIN(search_vector);
-CREATE INDEX conversations_timestamp_idx ON conversations(timestamp);
-CREATE INDEX conversations_user_id_idx ON conversations(user_id);
+CREATE INDEX context_search_idx ON context USING GIN(search_vector);
+CREATE INDEX context_timestamp_idx ON context(timestamp);
+CREATE INDEX context_user_id_idx ON context(user_id);
 
 CREATE TABLE facts (
-    key TEXT PRIMARY KEY NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'local',
+    key TEXT NOT NULL,
     value TEXT NOT NULL,
     created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL
+    updated_at BIGINT NOT NULL,
+    PRIMARY KEY (user_id, key)
 );
 ```
 
 ## Search Implementation
 
 ### SQLite (FTS5)
-- Uses BM25 ranking algorithm
+- Uses BM25 ranking algorithm combined with time-based recency
+- Recency factor: `1.0 + age_days/30.0` -- older entries get penalized
 - Stop words filtered before query
 - Keywords joined with OR for broad matching
 - Score normalized to 0.0-1.0 range
 
 ### PostgreSQL (tsvector/tsquery)
-- Uses ts_rank with normalization
+- Uses ts_rank_cd combined with time-based recency
+- Recency factor: `1.0 / (1.0 + age_days/30.0)` -- older entries get penalized
 - Weighted search: user messages (A), assistant responses (B)
 - plainto_tsquery for natural language queries
 - GIN index for fast lookups
@@ -168,10 +174,10 @@ std::vector<SearchResult> RAGManager::search_memory(const std::string& query, in
 void RAGManager::store_memory(const std::string& question, const std::string& answer, const std::string& user_id);
 bool RAGManager::clear_memory(const std::string& question, const std::string& user_id);
 
-// Fact storage (not user-scoped)
-void RAGManager::set_fact(const std::string& key, const std::string& value);
-std::string RAGManager::get_fact(const std::string& key);
-bool RAGManager::clear_fact(const std::string& key);
+// Fact storage (user-scoped)
+void RAGManager::set_fact(const std::string& key, const std::string& value, const std::string& user_id);
+std::string RAGManager::get_fact(const std::string& key, const std::string& user_id);
+bool RAGManager::clear_fact(const std::string& key, const std::string& user_id);
 ```
 
 ## Multi-Tenant Isolation
@@ -186,6 +192,8 @@ See `memory_extraction.md` for the background extraction system.
 
 ## History
 
+- **v2.32.0**: Renamed `conversations` table to `context` (idempotent migration). Added time-based recency to search scoring. Added `get_all_facts()` to DatabaseBackend interface. Disabled `archive_turn` during eviction (extraction thread handles memory capture). Extraction now produces structured JSON with separate facts and context. Injection presents `[facts: ...]` and `[context: ...]` separately.
+- **v2.30.1**: Added user_id to facts table for multi-tenant isolation (composite PK on user_id, key)
 - **v2.30.0**: Replaced thread_local user_id with explicit parameter passing through entire call chain
 - **v2.28.0**: Added user_id column for multi-tenant isolation, WAL mode for SQLite concurrent access, idempotent schema migration
 - **v2.25.1**: Added `schema` parameter to PostgreSQL connection string for search_path

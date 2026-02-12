@@ -49,7 +49,7 @@ Frontend::~Frontend() {
     }
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider, bool no_rag) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider, bool no_rag, bool mem_tools) {
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -95,7 +95,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     dout(1) << "Frontend initialized in " + mode + " mode" << std::endl;
 
     // Initialize the frontend (RAG, tools, MCP)
-    frontend->init(no_mcp, no_tools, no_rag);
+    frontend->init(no_mcp, no_tools, no_rag, mem_tools);
 
     return frontend;
 }
@@ -175,7 +175,7 @@ bool Frontend::connect_provider(const std::string& name) {
     }
 }
 
-void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_rag) {
+void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_rag, bool mem_tools) {
     // Resolve user_id: config override > hostname:username auto-detect > "unknown"
     if (!config->user_id.empty()) {
         user_id = config->user_id;
@@ -262,7 +262,7 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_
     register_command_tools(tools);
     register_json_tools(tools);
     register_http_tools(tools);
-    register_memory_tools(tools);
+    register_memory_tools(tools, mem_tools);
     register_mcp_resource_tools(tools);
     register_core_tools(tools);
     register_scheduler_tools(tools);
@@ -465,13 +465,55 @@ void Frontend::enrich_with_rag_context(Session& sess) {
     if (sess.messages.empty()) return;
     if (sess.last_user_message_index < 0) return;
 
+    // Restore any previous messages that had injection applied
+    // This reclaims context space by removing stale RAG content from old turns
+    for (size_t i = 0; i < sess.messages.size(); i++) {
+        Message& msg = sess.messages[i];
+        if (msg.pre_injection_content.empty()) continue;
+        if (static_cast<int>(i) == sess.last_user_message_index) continue;  // Don't touch current message
+
+        // Derive per-message chars_per_token from the delta-corrected actual token count
+        int old_tokens = msg.tokens;
+        if (old_tokens > 0 && msg.content.length() > 0) {
+            float per_message_cpt = static_cast<float>(msg.content.length()) / old_tokens;
+            msg.content = msg.pre_injection_content;
+            msg.tokens = static_cast<int>(msg.content.length() / per_message_cpt);
+            if (msg.tokens < 1) msg.tokens = 1;
+        } else {
+            // Fallback: just restore content without recount
+            msg.content = msg.pre_injection_content;
+        }
+
+        int freed = old_tokens - msg.tokens;
+        sess.total_tokens -= freed;
+        msg.pre_injection_content.clear();
+
+        dout(1) << "Restored message " + std::to_string(i) + ": tokens " +
+                 std::to_string(old_tokens) + " -> " + std::to_string(msg.tokens) +
+                 ", freed " + std::to_string(freed) + " tokens" << std::endl;
+    }
+
     Message& last_msg = sess.messages[sess.last_user_message_index];
     if (last_msg.role != Message::USER) return;
 
+    // Two retrieval paths: facts (key-value) and context (FTS search)
+    std::string injection;
+
+    // 1. Get all facts for this user
+    auto facts = RAGManager::get_all_facts(sess.user_id);
+    if (!facts.empty()) {
+        std::string facts_str;
+        for (size_t i = 0; i < facts.size(); i++) {
+            if (i > 0) facts_str += ", ";
+            facts_str += facts[i].first + "=" + facts[i].second;
+        }
+        injection += "[facts: " + facts_str + "]";
+        dout(1) << "RAG injection: " + std::to_string(facts.size()) + " facts" << std::endl;
+    }
+
+    // 2. Search context table for relevant Q/A pairs
     std::string keywords = extract_keywords(last_msg.content);
     if (keywords.empty()) {
-        // Fall back to the raw message when all words are stop words
-        // (e.g., "who am i" — short but still worth searching)
         keywords = last_msg.content;
         dout(1) << "RAG context injection: no keywords extracted, using raw message" << std::endl;
     }
@@ -479,12 +521,6 @@ void Frontend::enrich_with_rag_context(Session& sess) {
     dout(1) << "RAG context injection: searching with keywords: " + keywords << std::endl;
 
     auto results = RAGManager::search_memory(keywords, config->rag_max_results, sess.user_id);
-    if (results.empty()) {
-        dout(1) << "RAG context injection: no results found" << std::endl;
-        return;
-    }
-
-    // Filter by relevance threshold
     std::vector<SearchResult> relevant;
     for (const auto& r : results) {
         if (r.relevance_score >= config->rag_relevance_threshold) {
@@ -492,26 +528,31 @@ void Frontend::enrich_with_rag_context(Session& sess) {
         }
     }
 
-    if (relevant.empty()) {
-        dout(1) << "RAG context injection: no results above threshold "
-                + std::to_string(config->rag_relevance_threshold) << std::endl;
+    if (!relevant.empty()) {
+        std::string context_str;
+        for (size_t i = 0; i < relevant.size(); i++) {
+            if (i > 0) context_str += " | ";
+            context_str += relevant[i].content;
+        }
+        if (!injection.empty()) injection += "\n";
+        injection += "[context: " + context_str + "]";
+        dout(1) << "RAG injection: " + std::to_string(relevant.size()) + " context result(s)" << std::endl;
+    }
+
+    if (injection.empty()) {
+        dout(1) << "RAG context injection: nothing to inject" << std::endl;
         return;
     }
 
-    // Build context string
-    std::string context;
-    for (size_t i = 0; i < relevant.size(); i++) {
-        if (i > 0) context += " | ";
-        context += relevant[i].content;
-    }
+    // Save original content before injection (for restoration next turn)
+    last_msg.pre_injection_content = last_msg.content;
 
     // Postfix onto user message
-    last_msg.content += "\n\n[context: " + context + "]";
+    last_msg.content += "\n\n" + injection;
 
     std::cout << "[prompt+context] " << last_msg.content << std::endl;
 
-    dout(1) << "RAG context injection: enriched message with "
-            + std::to_string(relevant.size()) + " result(s)" << std::endl;
+    dout(1) << "RAG context injection: enriched message" << std::endl;
 
     // Recount tokens and update session totals
     if (backend) {

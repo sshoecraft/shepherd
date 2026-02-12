@@ -1,7 +1,6 @@
 #include "session.h"
 #include "shepherd.h"
 #include "backend.h"
-#include "rag.h"
 #include <iostream>
 
 
@@ -170,55 +169,9 @@ bool Session::evict_messages(const std::vector<std::pair<int, int>>& ranges) {
 
     dout(1) << "Evicting " + std::to_string(ranges.size()) + " message range(s)" << std::endl;
 
-    // Archive complete turns to RAG before evicting
-    // Process all ranges to find USER → ASSISTANT pairs
-    for (const auto& [start_idx, end_idx] : ranges) {
-        for (int i = start_idx; i <= end_idx; ) {
-            // Find the start of a turn (a USER message)
-            if (messages[i].role != Message::USER) {
-                i++;
-                continue;
-            }
-
-            int turn_start_idx = i;
-            int final_assistant_idx = -1;
-            bool turn_contains_tool_call = false;
-
-            // Scan forward to find the end of this turn (within this range)
-            int j = i + 1;
-            for ( ; j <= end_idx; j++) {
-                if (messages[j].role == Message::TOOL_RESPONSE) {
-                    turn_contains_tool_call = true;
-                }
-                if (messages[j].role == Message::ASSISTANT) {
-                    final_assistant_idx = j; // Keep track of the latest assistant response
-                }
-                // The turn ends if we hit the next USER message
-                if (messages[j].role == Message::USER) {
-                    break;
-                }
-            }
-
-            // If we found a valid USER -> ASSISTANT pair within the turn...
-            if (final_assistant_idx != -1) {
-                // ...and it doesn't contain a tool call, archive it.
-                if (!turn_contains_tool_call) {
-                    const std::string& user_question = messages[turn_start_idx].content;
-                    const std::string& final_answer = messages[final_assistant_idx].content;
-                    ConversationTurn turn(user_question, final_answer);
-                    RAGManager::archive_turn(turn, user_id);
-                    dout(1) << "Archived USER question at index " + std::to_string(turn_start_idx) +
-                              " with final ASSISTANT answer at index " + std::to_string(final_assistant_idx) << std::endl;
-                } else {
-                    dout(1) << "Skipped RAG archival for turn starting at index " + std::to_string(turn_start_idx) +
-                              " because it contains a tool call." << std::endl;
-                }
-            }
-
-            // Continue scanning from where this turn ended
-            i = j;
-        }
-    }
+    // NOTE: archive_turn during eviction disabled (v2.32.0)
+    // Memory extraction thread already captures anything valuable from conversations.
+    // Raw archival during eviction was redundant and produced low-quality entries.
 
     // Calculate total evicted tokens and messages
     int total_evicted_tokens = 0;

@@ -113,12 +113,8 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
     // Parse response using backend-specific parser
     Response resp = parse_http_response(http_response);
 
-    // Update session token counts from API response (session is source of truth)
-    if (resp.prompt_tokens > 0 || resp.completion_tokens > 0) {
-        session.total_tokens = resp.prompt_tokens + resp.completion_tokens;
-        session.last_prompt_tokens = resp.prompt_tokens;
-        session.last_assistant_message_tokens = resp.completion_tokens;
-    }
+    // Update session token counts using delta tracking
+    update_session_tokens(session, resp.prompt_tokens, resp.completion_tokens);
 
     if (resp.success) {
         // If we have structured tool calls from API, use those exclusively
@@ -185,6 +181,67 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
 int ApiBackend::estimate_message_tokens(const std::string& content) const {
     // Estimate tokens using adaptive chars/token ratio
     return static_cast<int>(content.length() / chars_per_token);
+}
+
+void ApiBackend::update_session_tokens(Session& session, int prompt_tokens, int completion_tokens) {
+    // Guard: if API didn't report tokens, keep existing estimates
+    if (prompt_tokens <= 0 && completion_tokens <= 0) {
+        return;
+    }
+
+    // Delta tracking: derive actual per-message token counts from prompt_tokens
+    if (prompt_tokens > 0 && session.last_prompt_tokens > 0) {
+        int delta = prompt_tokens - session.last_prompt_tokens;
+
+        if (delta > 0) {
+            // Find the last user message that was added since the previous generation
+            // In a normal user turn: just the USER message was added
+            // In a tool turn: ASSISTANT + TOOL_RESPONSE were added
+            int last_user_idx = session.last_user_message_index;
+
+            if (last_user_idx >= 0 && last_user_idx < static_cast<int>(session.messages.size())) {
+                Message& user_msg = session.messages[last_user_idx];
+
+                if (user_msg.role == Message::USER) {
+                    // Simple case: user message was added
+                    int old_tokens = user_msg.tokens;
+                    user_msg.tokens = delta;
+                    session.last_user_message_tokens = delta;
+
+                    dout(1) << "update_session_tokens: delta=" + std::to_string(delta) +
+                             ", corrected user message from " + std::to_string(old_tokens) +
+                             " to " + std::to_string(delta) << std::endl;
+
+                    // Refine EMA ratio from this correction
+                    if (delta > 0 && user_msg.content.length() > 0) {
+                        float actual_ratio = static_cast<float>(user_msg.content.length()) / delta;
+                        float deviation = actual_ratio / chars_per_token;
+
+                        // Only update if the ratio is within reasonable bounds
+                        if (deviation >= 0.5f && deviation <= 2.0f) {
+                            float old_cpt = chars_per_token;
+                            const float alpha = 0.2f;
+                            chars_per_token = (1.0f - alpha) * chars_per_token + alpha * actual_ratio;
+                            if (chars_per_token < 2.0f) chars_per_token = 2.0f;
+                            if (chars_per_token > 5.0f) chars_per_token = 5.0f;
+
+                            dout(1) << "chars_per_token updated: " + std::to_string(old_cpt) +
+                                     " -> " + std::to_string(chars_per_token) << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Update session state
+    session.total_tokens = prompt_tokens + completion_tokens;
+    session.last_prompt_tokens = prompt_tokens;
+    session.last_assistant_message_tokens = completion_tokens;
+
+    dout(1) << "update_session_tokens: total=" + std::to_string(session.total_tokens) +
+             ", prompt=" + std::to_string(prompt_tokens) +
+             ", completion=" + std::to_string(completion_tokens) << std::endl;
 }
 
 int ApiBackend::count_message_tokens(Message::Role role,

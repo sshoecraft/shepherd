@@ -26,7 +26,7 @@ public:
     ~APIServer();
 
     /// @brief Initialize tools and RAG
-    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false) override;
+    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) override;
 
 protected:
     /// @brief Register OpenAI-compatible API endpoints

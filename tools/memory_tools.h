@@ -70,4 +70,4 @@ public:
 };
 
 class Tools;
-void register_memory_tools(Tools& tools);
+void register_memory_tools(Tools& tools, bool enable = false);

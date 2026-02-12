@@ -100,36 +100,64 @@ bool RAGManager::is_initialized() {
 }
 
 // Fact storage wrapper methods
-void RAGManager::set_fact(const std::string& key, const std::string& value) {
+void RAGManager::set_fact(const std::string& key, const std::string& value, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot set fact" << std::endl;
         return;
     }
-    instance_->set_fact(key, value);
+    if (user_id == "unknown") {
+        dout(1) << "RAGManager: skipping set_fact for unknown user" << std::endl;
+        return;
+    }
+    instance_->set_fact(key, value, user_id);
 }
 
-std::string RAGManager::get_fact(const std::string& key) {
+std::string RAGManager::get_fact(const std::string& key, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot get fact" << std::endl;
         return "";
     }
-    return instance_->get_fact(key);
+    if (user_id == "unknown") {
+        dout(1) << "RAGManager: skipping get_fact for unknown user" << std::endl;
+        return "";
+    }
+    return instance_->get_fact(key, user_id);
 }
 
-bool RAGManager::has_fact(const std::string& key) {
+bool RAGManager::has_fact(const std::string& key, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot check fact" << std::endl;
         return false;
     }
-    return instance_->has_fact(key);
+    if (user_id == "unknown") {
+        dout(1) << "RAGManager: skipping has_fact for unknown user" << std::endl;
+        return false;
+    }
+    return instance_->has_fact(key, user_id);
 }
 
-bool RAGManager::clear_fact(const std::string& key) {
+bool RAGManager::clear_fact(const std::string& key, const std::string& user_id) {
     if (!instance_) {
         std::cerr << "RAGManager not initialized - cannot clear fact" << std::endl;
         return false;
     }
-    return instance_->clear_fact(key);
+    if (user_id == "unknown") {
+        dout(1) << "RAGManager: skipping clear_fact for unknown user" << std::endl;
+        return false;
+    }
+    return instance_->clear_fact(key, user_id);
+}
+
+std::vector<std::pair<std::string, std::string>> RAGManager::get_all_facts(const std::string& user_id) {
+    if (!instance_) {
+        std::cerr << "RAGManager not initialized - cannot get all facts" << std::endl;
+        return {};
+    }
+    if (user_id == "unknown") {
+        dout(1) << "RAGManager: skipping get_all_facts for unknown user" << std::endl;
+        return {};
+    }
+    return instance_->get_all_facts(user_id);
 }
 
 // Core tool interface implementation
@@ -203,7 +231,7 @@ std::string RAGManager::get_set_fact_tool_parameters() {
     return "key=\"fact_identifier\", value=\"fact_content\"";
 }
 
-std::string RAGManager::execute_set_fact_tool(const std::string& key, const std::string& value) {
+std::string RAGManager::execute_set_fact_tool(const std::string& key, const std::string& value, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute set_fact tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -222,7 +250,7 @@ std::string RAGManager::execute_set_fact_tool(const std::string& key, const std:
     dout(1) << "SET_FACT tool called with key: '" + key + "', value: '" + value + "'" << std::endl;
 
     try {
-        set_fact(key, value);
+        set_fact(key, value, user_id);
         dout(1) << "SET_FACT: Stored fact '" + key + "'" << std::endl;
         return "Successfully stored fact: " + key;
     } catch (const std::exception& e) {
@@ -244,7 +272,7 @@ std::string RAGManager::get_get_fact_tool_parameters() {
     return "key=\"fact_identifier\"";
 }
 
-std::string RAGManager::execute_get_fact_tool(const std::string& key) {
+std::string RAGManager::execute_get_fact_tool(const std::string& key, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute get_fact tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -258,7 +286,7 @@ std::string RAGManager::execute_get_fact_tool(const std::string& key) {
     dout(1) << "GET_FACT tool called with key: '" + key + "'" << std::endl;
 
     try {
-        std::string value = get_fact(key);
+        std::string value = get_fact(key, user_id);
 
         if (value.empty()) {
             dout(1) << "GET_FACT: Fact '" + key + "' not found" << std::endl;
@@ -286,7 +314,7 @@ std::string RAGManager::get_clear_fact_tool_parameters() {
     return "key=\"fact_identifier\"";
 }
 
-std::string RAGManager::execute_clear_fact_tool(const std::string& key) {
+std::string RAGManager::execute_clear_fact_tool(const std::string& key, const std::string& user_id) {
     if (!is_initialized()) {
         std::cerr << "RAGManager not initialized - cannot execute clear_fact tool" << std::endl;
         return "Error: RAG system not initialized";
@@ -300,7 +328,7 @@ std::string RAGManager::execute_clear_fact_tool(const std::string& key) {
     dout(1) << "CLEAR_FACT tool called with key: '" + key + "'" << std::endl;
 
     try {
-        bool deleted = clear_fact(key);
+        bool deleted = clear_fact(key, user_id);
 
         if (deleted) {
             dout(1) << "CLEAR_FACT: Deleted fact '" + key + "'" << std::endl;

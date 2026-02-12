@@ -171,6 +171,7 @@ static void print_usage(int, char** argv) {
 	printf("	--nostream		   Disable streaming (wait for complete response)\n");
 	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
+	printf("	--memtools		   Enable memory tools (search, set_fact, store_memory, etc.)\n");
 	printf("	--norag			   Disable RAG and memory extraction\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--system-prompt-file   Read system prompt from file\n");
@@ -777,6 +778,7 @@ int main(int argc, char** argv) {
 	bool no_rag = false;
 	bool no_stream = false;
 	bool no_tools = false;
+	bool mem_tools = false;
 	bool server_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
@@ -852,6 +854,7 @@ int main(int argc, char** argv) {
 		{"raw", no_argument, 0, 1043},
 		{"norag", no_argument, 0, 1061},
 		{"notools", no_argument, 0, 1027},
+		{"memtools", no_argument, 0, 1062},
 		{"system-prompt", required_argument, 0, 1028},
 		{"system-prompt-file", required_argument, 0, 1057},
 		{"prompt", required_argument, 0, 'e'},
@@ -969,6 +972,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1027: // --notools
 				no_tools = true;
+				break;
+			case 1062: // --memtools
+				mem_tools = true;
 				break;
 			case 1028: // --system-prompt
 				override.system_prompt = optarg;
@@ -1460,7 +1466,7 @@ int main(int argc, char** argv) {
 		// Session is owned by frontend
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, no_mcp, no_tools,
-		                                 override.provider, no_rag);
+		                                 override.provider, no_rag, mem_tools);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

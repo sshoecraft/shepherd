@@ -14,23 +14,29 @@
 
 extern std::unique_ptr<Config> config;
 
-static const char* EXTRACTION_SYSTEM_PROMPT = R"(You are a memory extraction system. Your job is to read conversation segments and extract useful facts, decisions, preferences, and technical details that would be valuable to recall in future conversations.
+static const char* EXTRACTION_SYSTEM_PROMPT = R"(You are a memory extraction system. Your job is to read conversation segments and extract two types of information:
+
+1. **Facts**: Durable key-value pairs about the user that will still be true weeks or months from now. Examples: name, location, preferences, job title, project names, technical choices.
+2. **Context**: Question/answer pairs capturing useful conversation details that don't fit as simple facts. Examples: decisions made, procedures discussed, problems solved.
 
 Rules:
-- Extract only concrete, factual information that was explicitly stated or confirmed
-- NEVER output a fact where the answer is that information was not provided, not mentioned, or is unknown -- the absence of information is NOT a fact
-- Only store DURABLE facts that will still be true weeks or months from now: identities, preferences, decisions, relationships, configurations, project details, technical choices
-- Do NOT store transient or volatile data: current readings, temperatures, prices, statuses, sensor values, timestamps, counts, or anything that changes frequently -- these must be queried live each time
-- Do NOT store the results of tool calls or API responses -- these are ephemeral data, not lasting facts
-- Ignore small talk, greetings, thank-yous, and filler
-- Ignore dead ends, corrections, and wrong answers -- only keep final conclusions
-- Each extracted fact should be a self-contained question/answer pair
-- Keep facts concise -- one concept per entry
-- If the conversation contains no useful extractable information, respond with exactly: NONE
+- Extract only concrete information explicitly stated or confirmed BY THE USER
+- Do NOT extract facts about the assistant itself -- its name, identity, capabilities, or behavior are not user-provided information
+- NEVER extract something where the value is unknown, not provided, or not mentioned -- the absence of information is not worth storing
+- Only store DURABLE information -- not transient data like current readings, prices, or timestamps
+- Do NOT store the results of tool calls or API responses
+- Ignore small talk, greetings, and filler
+- Ignore dead ends and corrections -- only keep final conclusions
+- Keep everything concise
 
-Output format (one per line):
-Q: <natural language question that this fact answers>
-A: <concise factual answer>)";
+Output format: JSON object with two fields:
+- "facts": object of key-value pairs (use lowercase_snake_case keys)
+- "context": array of {"q": "...", "a": "..."} objects
+
+Example:
+{"facts": {"name": "Steve", "location": "Texas"}, "context": [{"q": "What IDE does the user prefer?", "a": "VS Code with vim keybindings"}]}
+
+If nothing to extract: {"facts": {}, "context": []})";
 
 MemoryExtractionThread::MemoryExtractionThread() {
 }
@@ -141,11 +147,20 @@ std::string MemoryExtractionThread::build_conversation_text(const std::vector<Me
 
         std::string content = msg.content;
 
-        // Strip [context: ...] postfix from user messages
+        // Strip injected [facts: ...] and [context: ...] postfix from user messages
         if (msg.role == Message::USER) {
+            size_t facts_pos = content.find("\n\n[facts: ");
             size_t ctx_pos = content.find("\n\n[context: ");
-            if (ctx_pos != std::string::npos) {
-                content = content.substr(0, ctx_pos);
+            size_t strip_pos = std::string::npos;
+            if (facts_pos != std::string::npos && ctx_pos != std::string::npos) {
+                strip_pos = std::min(facts_pos, ctx_pos);
+            } else if (facts_pos != std::string::npos) {
+                strip_pos = facts_pos;
+            } else if (ctx_pos != std::string::npos) {
+                strip_pos = ctx_pos;
+            }
+            if (strip_pos != std::string::npos) {
+                content = content.substr(0, strip_pos);
             }
         }
 
@@ -228,47 +243,70 @@ std::string MemoryExtractionThread::call_extraction_api(const std::string& conve
 }
 
 void MemoryExtractionThread::parse_and_store_facts(const std::string& response, const std::string& user_id) {
-    // Check for NONE response
-    std::string trimmed = response;
     // Trim whitespace
+    std::string trimmed = response;
     size_t start = trimmed.find_first_not_of(" \t\n\r");
     if (start == std::string::npos) return;
     trimmed = trimmed.substr(start);
-
-    if (trimmed == "NONE" || trimmed == "NONE\n") {
-        dout(1) << "MemoryExtraction: no facts to extract (NONE)" << std::endl;
-        return;
-    }
 
     if (!RAGManager::is_initialized()) {
         dout(1) << "MemoryExtraction: RAGManager not initialized, skipping storage" << std::endl;
         return;
     }
 
-    // Parse Q/A pairs line by line
-    std::istringstream iss(response);
-    std::string line;
-    std::string current_question;
-    int stored_count = 0;
-
-    while (std::getline(iss, line)) {
-        // Trim leading whitespace
-        size_t line_start = line.find_first_not_of(" \t");
-        if (line_start == std::string::npos) continue;
-        line = line.substr(line_start);
-
-        if (line.substr(0, 3) == "Q: ") {
-            current_question = line.substr(3);
-        } else if (line.substr(0, 3) == "A: " && !current_question.empty()) {
-            std::string answer = line.substr(3);
-            if (!answer.empty()) {
-                RAGManager::store_memory(current_question, answer, user_id);
-                stored_count++;
-                dout(1) << "MemoryExtraction: stored fact: Q=" << current_question.substr(0, 50) << std::endl;
-            }
-            current_question.clear();
+    // Extract JSON from response (handle markdown code blocks)
+    std::string json_str = trimmed;
+    if (json_str.find("```") != std::string::npos) {
+        size_t json_start = json_str.find('{');
+        size_t json_end = json_str.rfind('}');
+        if (json_start != std::string::npos && json_end != std::string::npos && json_end > json_start) {
+            json_str = json_str.substr(json_start, json_end - json_start + 1);
         }
     }
 
-    dout(1) << "MemoryExtraction: stored " << stored_count << " facts" << std::endl;
+    // Parse JSON response
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(json_str);
+    } catch (const std::exception& e) {
+        dout(1) << "MemoryExtraction: failed to parse JSON response: " << e.what() << std::endl;
+        dout(1) << "MemoryExtraction: raw response: " << response.substr(0, 200) << std::endl;
+        return;
+    }
+
+    int fact_count = 0;
+    int context_count = 0;
+
+    // Process facts: key-value pairs → set_fact (INSERT OR REPLACE)
+    if (parsed.contains("facts") && parsed["facts"].is_object()) {
+        for (auto& [key, value] : parsed["facts"].items()) {
+            if (value.is_string()) {
+                std::string val = value.get<std::string>();
+                if (!val.empty()) {
+                    RAGManager::set_fact(key, val, user_id);
+                    fact_count++;
+                    dout(1) << "MemoryExtraction: stored fact: " << key << " = " << val << std::endl;
+                }
+            }
+        }
+    }
+
+    // Process context: Q/A pairs → store_memory (into context table)
+    if (parsed.contains("context") && parsed["context"].is_array()) {
+        for (const auto& item : parsed["context"]) {
+            if (item.contains("q") && item.contains("a") &&
+                item["q"].is_string() && item["a"].is_string()) {
+                std::string q = item["q"].get<std::string>();
+                std::string a = item["a"].get<std::string>();
+                if (!q.empty() && !a.empty()) {
+                    RAGManager::store_memory(q, a, user_id);
+                    context_count++;
+                    dout(1) << "MemoryExtraction: stored context: Q=" << q.substr(0, 50) << std::endl;
+                }
+            }
+        }
+    }
+
+    dout(1) << "MemoryExtraction: stored " << fact_count << " facts, "
+            << context_count << " context entries" << std::endl;
 }

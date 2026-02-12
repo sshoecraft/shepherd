@@ -28,6 +28,10 @@ struct Message {
 	// Or for storing structured content (Gemini parts array, etc.)
 	std::string tool_calls_json;
 
+	// Original content before RAG injection (empty = no injection applied)
+	// Used to restore message content when stripping injection from previous turns
+	std::string pre_injection_content;
+
 	Message(Role r, const std::string& c, int tokens = 0) : role(r), content(c), tokens(tokens) {}
 
 	// Helper: is this a tool call response (result of executing a tool)?

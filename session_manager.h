@@ -33,7 +33,7 @@ public:
     /// @param config Configuration for session initialization (not owned)
     /// @param no_mcp If true, skip MCP tool initialization
     /// @param no_tools If true, skip all tool initialization
-    SessionManager(Backend* backend, Config* config, bool no_mcp, bool no_tools);
+    SessionManager(Backend* backend, Config* config, bool no_mcp, bool no_tools, bool mem_tools = false);
     ~SessionManager();
 
     /// @brief Get or create session for an API key
@@ -64,6 +64,7 @@ private:
     Config* config;    // Configuration (not owned)
     bool no_mcp;
     bool no_tools;
+    bool mem_tools;
     std::unordered_map<std::string, std::unique_ptr<ManagedSession>> sessions;
     mutable std::mutex manager_mutex;
 };

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <utility>
 
 // Forward declaration
 class DatabaseBackend;
@@ -64,22 +65,31 @@ public:
     /// @brief Store a specific fact for later retrieval
     /// @param key Unique identifier for the fact
     /// @param value The fact to store
-    static void set_fact(const std::string& key, const std::string& value);
+    /// @param user_id User identifier for multi-tenant isolation
+    static void set_fact(const std::string& key, const std::string& value, const std::string& user_id);
 
     /// @brief Retrieve a specific fact by key
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return The stored fact, or empty string if not found
-    static std::string get_fact(const std::string& key);
+    static std::string get_fact(const std::string& key, const std::string& user_id);
 
     /// @brief Check if a fact exists
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if fact exists
-    static bool has_fact(const std::string& key);
+    static bool has_fact(const std::string& key, const std::string& user_id);
 
     /// @brief Delete a fact by key
     /// @param key Unique identifier for the fact
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return True if fact was deleted, false if it didn't exist
-    static bool clear_fact(const std::string& key);
+    static bool clear_fact(const std::string& key, const std::string& user_id);
+
+    /// @brief Get all facts for a user
+    /// @param user_id User identifier for multi-tenant isolation
+    /// @return Vector of (key, value) pairs
+    static std::vector<std::pair<std::string, std::string>> get_all_facts(const std::string& user_id);
 
     // Core tool interfaces
     /// @brief Get search memory tool name
@@ -110,8 +120,9 @@ public:
     /// @brief Execute set_fact as a tool
     /// @param key Fact identifier
     /// @param value Fact value
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Success message
-    static std::string execute_set_fact_tool(const std::string& key, const std::string& value);
+    static std::string execute_set_fact_tool(const std::string& key, const std::string& value, const std::string& user_id);
 
     /// @brief Get get_fact tool name
     static std::string get_get_fact_tool_name();
@@ -124,8 +135,9 @@ public:
 
     /// @brief Execute get_fact as a tool
     /// @param key Fact identifier
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return The fact value or error message
-    static std::string execute_get_fact_tool(const std::string& key);
+    static std::string execute_get_fact_tool(const std::string& key, const std::string& user_id);
 
     /// @brief Get the name of the clear_fact tool
     static std::string get_clear_fact_tool_name();
@@ -138,8 +150,9 @@ public:
 
     /// @brief Execute clear_fact as a tool
     /// @param key Fact identifier to delete
+    /// @param user_id User identifier for multi-tenant isolation
     /// @return Success/error message
-    static std::string execute_clear_fact_tool(const std::string& key);
+    static std::string execute_clear_fact_tool(const std::string& key, const std::string& user_id);
 
     // Memory management
     /// @brief Store a question/answer pair directly to memory

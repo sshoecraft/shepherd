@@ -79,9 +79,9 @@ bool SQLiteBackend::initialize() {
     }
 
     // Migration: add user_id column to existing databases (idempotent)
-    sqlite3_exec(db, "ALTER TABLE conversations ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'",
+    sqlite3_exec(db, "ALTER TABLE context ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'",
                  nullptr, nullptr, nullptr);  // Silently fails if column already exists
-    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id)",
+    sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS idx_context_user_id ON context(user_id)",
                  nullptr, nullptr, nullptr);
 
     dout(1) << "SQLite RAG database initialized successfully" << std::endl;
@@ -92,9 +92,9 @@ bool SQLiteBackend::create_tables() {
     sqlite3* db = static_cast<sqlite3*>(db_);
     char* err_msg = nullptr;
 
-    // Create conversations table
+    // Create context table (formerly conversations)
     const char* create_table_sql = R"(
-        CREATE TABLE IF NOT EXISTS conversations (
+        CREATE TABLE IF NOT EXISTS context (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_message TEXT NOT NULL,
             assistant_response TEXT NOT NULL,
@@ -106,17 +106,17 @@ bool SQLiteBackend::create_tables() {
 
     int rc = sqlite3_exec(db, create_table_sql, nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
-        std::cerr << "Failed to create conversations table: " + std::string(err_msg) << std::endl;
+        std::cerr << "Failed to create context table: " + std::string(err_msg) << std::endl;
         sqlite3_free(err_msg);
         return false;
     }
 
     // Create FTS5 virtual table for full-text search
     const char* create_fts_sql = R"(
-        CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+        CREATE VIRTUAL TABLE IF NOT EXISTS context_fts USING fts5(
             user_message,
             assistant_response,
-            content='conversations',
+            content='context',
             content_rowid='id'
         );
     )";
@@ -130,20 +130,20 @@ bool SQLiteBackend::create_tables() {
 
     // Create triggers to keep FTS index in sync
     const char* create_triggers_sql = R"(
-        CREATE TRIGGER IF NOT EXISTS conversations_ai AFTER INSERT ON conversations BEGIN
-            INSERT INTO conversations_fts(rowid, user_message, assistant_response)
+        CREATE TRIGGER IF NOT EXISTS context_ai AFTER INSERT ON context BEGIN
+            INSERT INTO context_fts(rowid, user_message, assistant_response)
             VALUES (new.id, new.user_message, new.assistant_response);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations BEGIN
-            INSERT INTO conversations_fts(conversations_fts, rowid, user_message, assistant_response)
+        CREATE TRIGGER IF NOT EXISTS context_ad AFTER DELETE ON context BEGIN
+            INSERT INTO context_fts(context_fts, rowid, user_message, assistant_response)
             VALUES('delete', old.id, old.user_message, old.assistant_response);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS conversations_au AFTER UPDATE ON conversations BEGIN
-            INSERT INTO conversations_fts(conversations_fts, rowid, user_message, assistant_response)
+        CREATE TRIGGER IF NOT EXISTS context_au AFTER UPDATE ON context BEGIN
+            INSERT INTO context_fts(context_fts, rowid, user_message, assistant_response)
             VALUES('delete', old.id, old.user_message, old.assistant_response);
-            INSERT INTO conversations_fts(rowid, user_message, assistant_response)
+            INSERT INTO context_fts(rowid, user_message, assistant_response)
             VALUES (new.id, new.user_message, new.assistant_response);
         END;
     )";
@@ -158,10 +158,12 @@ bool SQLiteBackend::create_tables() {
     // Create facts table
     const char* create_facts_sql = R"(
         CREATE TABLE IF NOT EXISTS facts (
-            key TEXT PRIMARY KEY NOT NULL,
+            user_id TEXT NOT NULL DEFAULT 'local',
+            key TEXT NOT NULL,
             value TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, key)
         );
     )";
 
@@ -194,7 +196,7 @@ void SQLiteBackend::archive_turn(const ConversationTurn& turn, const std::string
     dout(1) << "Content hash: " + content_hash << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "INSERT OR IGNORE INTO conversations (user_message, assistant_response, timestamp, content_hash, user_id) VALUES (?, ?, ?, ?, ?)";
+    const char* sql = "INSERT OR IGNORE INTO context (user_message, assistant_response, timestamp, content_hash, user_id) VALUES (?, ?, ?, ?, ?)";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -273,18 +275,25 @@ std::vector<SearchResult> SQLiteBackend::search(const std::string& query, int ma
 
     dout(1) << "FTS5 query: " + fts_query << std::endl;
 
-    const char* sql = R"(
+    // Combined BM25 + recency scoring:
+    // BM25 returns negative scores (more negative = better match)
+    // Recency boost: 1.0 / (1.0 + age_days/30.0) -- halves weight every 30 days
+    // Combined: bm25_score * recency_boost (both negative-is-better, so multiply works)
+    int64_t now = ConversationTurn::get_current_timestamp();
+    std::string now_str = std::to_string(now);
+
+    std::string sql_str = R"(
         SELECT c.user_message, c.assistant_response, c.timestamp,
-               bm25(conversations_fts) as score
-        FROM conversations_fts
-        JOIN conversations c ON conversations_fts.rowid = c.id
-        WHERE conversations_fts MATCH ? AND c.user_id = ?
+               bm25(context_fts) * (1.0 + ()" + now_str + R"( - c.timestamp) / 2592000.0) as score
+        FROM context_fts
+        JOIN context c ON context_fts.rowid = c.id
+        WHERE context_fts MATCH ? AND c.user_id = ?
         ORDER BY score
         LIMIT ?
     )";
 
     sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(db, sql_str.c_str(), -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK) {
         std::cerr << "Failed to prepare search statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
@@ -323,7 +332,7 @@ size_t SQLiteBackend::get_archived_turn_count() const {
     }
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "SELECT COUNT(*) FROM conversations";
+    const char* sql = "SELECT COUNT(*) FROM context";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -357,7 +366,7 @@ bool SQLiteBackend::clear_memory(const std::string& question, const std::string&
     dout(1) << "Clearing memory by question: " + question << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "DELETE FROM conversations WHERE id = (SELECT id FROM conversations WHERE user_message = ? AND user_id = ? LIMIT 1)";
+    const char* sql = "DELETE FROM context WHERE id = (SELECT id FROM context WHERE user_message = ? AND user_id = ? LIMIT 1)";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -409,7 +418,7 @@ void SQLiteBackend::check_and_prune_if_needed() {
 
         sqlite3* db = static_cast<sqlite3*>(db_);
 
-        const char* count_sql = "SELECT COUNT(*) FROM conversations";
+        const char* count_sql = "SELECT COUNT(*) FROM context";
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db, count_sql, -1, &stmt, nullptr);
         int total_entries = 0;
@@ -422,8 +431,8 @@ void SQLiteBackend::check_and_prune_if_needed() {
         int deleted_total = 0;
 
         while (current_size > max_db_size_ && total_entries > 0) {
-            std::string delete_sql = "DELETE FROM conversations WHERE id IN "
-                                    "(SELECT id FROM conversations ORDER BY timestamp ASC LIMIT " +
+            std::string delete_sql = "DELETE FROM context WHERE id IN "
+                                    "(SELECT id FROM context ORDER BY timestamp ASC LIMIT " +
                                     std::to_string(batch_size) + ")";
 
             char* err_msg = nullptr;
@@ -474,16 +483,16 @@ void SQLiteBackend::shutdown() {
     }
 }
 
-void SQLiteBackend::set_fact(const std::string& key, const std::string& value) {
-    dout(1) << "Setting fact: " + key << std::endl;
+void SQLiteBackend::set_fact(const std::string& key, const std::string& value, const std::string& user_id) {
+    dout(1) << "Setting fact: " + key + " for user " + user_id << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
     int64_t now = ConversationTurn::get_current_timestamp();
 
     const char* sql = R"(
-        INSERT OR REPLACE INTO facts (key, value, created_at, updated_at)
-        VALUES (?, ?,
-            COALESCE((SELECT created_at FROM facts WHERE key = ?), ?),
+        INSERT OR REPLACE INTO facts (user_id, key, value, created_at, updated_at)
+        VALUES (?, ?, ?,
+            COALESCE((SELECT created_at FROM facts WHERE user_id = ? AND key = ?), ?),
             ?
         )
     )";
@@ -496,11 +505,13 @@ void SQLiteBackend::set_fact(const std::string& key, const std::string& value) {
         return;
     }
 
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, key.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 4, now);
-    sqlite3_bind_int64(stmt, 5, now);
+    sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, value.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 6, now);
+    sqlite3_bind_int64(stmt, 7, now);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -512,16 +523,16 @@ void SQLiteBackend::set_fact(const std::string& key, const std::string& value) {
     sqlite3_finalize(stmt);
 }
 
-std::string SQLiteBackend::get_fact(const std::string& key) const {
+std::string SQLiteBackend::get_fact(const std::string& key, const std::string& user_id) const {
     if (!db_) {
         return "";
     }
 
-    dout(1) << "Getting fact: " + key << std::endl;
+    dout(1) << "Getting fact: " + key + " for user " + user_id << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
 
-    const char* sql = "SELECT value FROM facts WHERE key = ?";
+    const char* sql = "SELECT value FROM facts WHERE user_id = ? AND key = ?";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
 
@@ -530,7 +541,8 @@ std::string SQLiteBackend::get_fact(const std::string& key) const {
         return "";
     }
 
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_TRANSIENT);
 
     std::string value;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -565,7 +577,8 @@ std::string SQLiteBackend::get_fact(const std::string& key) const {
         rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
         if (rc != SQLITE_OK) continue;
 
-        sqlite3_bind_text(stmt, 1, variant.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, variant.c_str(), -1, SQLITE_TRANSIENT);
 
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
@@ -580,13 +593,13 @@ std::string SQLiteBackend::get_fact(const std::string& key) const {
     return "";
 }
 
-bool SQLiteBackend::has_fact(const std::string& key) const {
+bool SQLiteBackend::has_fact(const std::string& key, const std::string& user_id) const {
     if (!db_) {
         return false;
     }
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "SELECT 1 FROM facts WHERE key = ? LIMIT 1";
+    const char* sql = "SELECT 1 FROM facts WHERE user_id = ? AND key = ? LIMIT 1";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -596,22 +609,50 @@ bool SQLiteBackend::has_fact(const std::string& key) const {
         return false;
     }
 
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_TRANSIENT);
 
     bool exists = (sqlite3_step(stmt) == SQLITE_ROW);
     sqlite3_finalize(stmt);
     return exists;
 }
 
-bool SQLiteBackend::clear_fact(const std::string& key) {
+std::vector<std::pair<std::string, std::string>> SQLiteBackend::get_all_facts(const std::string& user_id) const {
+    std::vector<std::pair<std::string, std::string>> results;
+    if (!db_) return results;
+
+    sqlite3* db = static_cast<sqlite3*>(db_);
+    const char* sql = "SELECT key, value FROM facts WHERE user_id = ? ORDER BY key";
+
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Failed to prepare get_all_facts statement: " + std::string(sqlite3_errmsg(db)) << std::endl;
+        return results;
+    }
+
+    sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        std::string key = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        std::string value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        results.emplace_back(std::move(key), std::move(value));
+    }
+
+    sqlite3_finalize(stmt);
+    dout(1) << "get_all_facts: returned " + std::to_string(results.size()) + " facts for user " + user_id << std::endl;
+    return results;
+}
+
+bool SQLiteBackend::clear_fact(const std::string& key, const std::string& user_id) {
     if (!db_) {
         return false;
     }
 
-    dout(1) << "Clearing fact: " + key << std::endl;
+    dout(1) << "Clearing fact: " + key + " for user " + user_id << std::endl;
 
     sqlite3* db = static_cast<sqlite3*>(db_);
-    const char* sql = "DELETE FROM facts WHERE key = ?";
+    const char* sql = "DELETE FROM facts WHERE user_id = ? AND key = ?";
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
@@ -621,7 +662,8 @@ bool SQLiteBackend::clear_fact(const std::string& key) {
         return false;
     }
 
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 1, user_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, key.c_str(), -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);

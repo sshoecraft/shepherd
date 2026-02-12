@@ -180,8 +180,9 @@ std::map<std::string, std::any> SetFactTool::execute(const std::map<std::string,
 
     std::string key = tool_utils::get_string(args, "key");
     std::string value = tool_utils::get_string(args, "value");
+    std::string user_id = tool_utils::get_string(args, "_user_id");
 
-    std::string response = RAGManager::execute_set_fact_tool(key, value);
+    std::string response = RAGManager::execute_set_fact_tool(key, value, user_id);
 
     if (response.find("Error:") == 0) {
         result["error"] = response;
@@ -219,8 +220,9 @@ std::map<std::string, std::any> GetFactTool::execute(const std::map<std::string,
     std::map<std::string, std::any> result;
 
     std::string key = tool_utils::get_string(args, "key");
+    std::string user_id = tool_utils::get_string(args, "_user_id");
 
-    std::string response = RAGManager::execute_get_fact_tool(key);
+    std::string response = RAGManager::execute_get_fact_tool(key, user_id);
 
     // "Fact not found" is a successful tool execution, just with no result
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
@@ -264,8 +266,9 @@ std::map<std::string, std::any> ClearFactTool::execute(const std::map<std::strin
     std::map<std::string, std::any> result;
 
     std::string key = tool_utils::get_string(args, "key");
+    std::string user_id = tool_utils::get_string(args, "_user_id");
 
-    std::string response = RAGManager::execute_clear_fact_tool(key);
+    std::string response = RAGManager::execute_clear_fact_tool(key, user_id);
 
     // "Fact not found" is a successful tool execution, just with no deletion
     if (response.find("Error:") == 0 && response.find("Fact not found:") != 0) {
@@ -372,8 +375,12 @@ std::map<std::string, std::any> ClearMemoryTool::execute(const std::map<std::str
     return result;
 }
 
-void register_memory_tools(Tools& tools) {
-    // Register memory tools FIRST so they appear at top of tool list
+void register_memory_tools(Tools& tools, bool enable) {
+    if (!enable) {
+        dout(1) << "Memory tools disabled (use --memtools to enable)" << std::endl;
+        return;
+    }
+
     tools.register_tool(std::make_unique<SearchMemoryTool>());
     tools.register_tool(std::make_unique<StoreMemoryTool>());
     tools.register_tool(std::make_unique<ClearMemoryTool>());

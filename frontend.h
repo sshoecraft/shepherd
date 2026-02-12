@@ -95,10 +95,11 @@ public:
                                             Provider* cmdline_provider = nullptr,
                                             bool no_mcp = false, bool no_tools = false,
                                             const std::string& target_provider = "",
-                                            bool no_rag = false);
+                                            bool no_rag = false,
+                                            bool mem_tools = false);
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
-    virtual void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false) {}
+    virtual void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) {}
 
 protected:
     /// @brief Common tool initialization - initializes RAG and registers all tools
@@ -106,7 +107,7 @@ protected:
     /// @param no_tools If true, skip all tool initialization
     /// @param force_local If true, force local tool init even if server_tools is set (for fallback)
     /// @param no_rag If true, skip RAG initialization and memory extraction
-    void init_tools(bool no_mcp, bool no_tools, bool force_local = false, bool no_rag = false);
+    void init_tools(bool no_mcp, bool no_tools, bool force_local = false, bool no_rag = false, bool mem_tools = false);
 
     /// @brief Initialize tools from remote server (when --server-tools and API provider)
     /// Called after provider connection when config->server_tools is true

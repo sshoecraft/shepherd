@@ -45,7 +45,18 @@ Non-streaming POST to `{memory_extraction_endpoint}/v1/chat/completions` with:
 
 ### Response Parsing
 
-Lines starting with `Q: ` begin a question, lines starting with `A: ` provide the answer. Pairs are stored via `RAGManager::store_memory()`. Response of "NONE" means no extractable facts -- skipped.
+The extraction model returns JSON with two sections:
+```json
+{
+    "facts": {"name": "Steve", "location": "Texas"},
+    "context": [{"q": "What IDE does the user prefer?", "a": "VS Code with vim keybindings"}]
+}
+```
+
+- **Facts**: Key-value pairs stored via `RAGManager::set_fact()` (INSERT OR REPLACE -- newer value always wins, no duplicates)
+- **Context**: Q/A pairs stored via `RAGManager::store_memory()` into the `context` table
+
+Empty response: `{"facts": {}, "context": []}` -- nothing stored. Markdown code blocks around JSON are stripped automatically.
 
 ## Multi-Tenant Isolation (user_id)
 
@@ -136,6 +147,8 @@ When the extraction API endpoint is unreachable (connection refused, timeout, HT
 
 ## History
 
+- **v2.32.0**: Reworked extraction to produce structured JSON with separate `facts` (key-value pairs → `set_fact`) and `context` (Q/A pairs → `store_memory`). Archive_turn during eviction disabled (extraction thread handles it). Table renamed `conversations` → `context`. Injection now presents `[facts: ...]` and `[context: ...]` separately. Time-based relevancy added to context search.
+- **v2.31.1**: Fixed extraction prompt to only extract facts stated by the user, not facts about the assistant itself (e.g., assistant self-identifying as "Shepherd" was being stored as a fact)
 - **v2.30.0**: Replaced thread_local user_id with explicit parameter passing through entire call chain
 - **v2.29.0**: Added retry with configurable interval (`memory_extraction_retry_interval`), provider `memory` flag controls injection + extraction, thread starts based on endpoint+model presence (not `memory_extraction` bool)
 - **v2.28.0**: Initial implementation with background extraction thread, multi-tenant user_id isolation

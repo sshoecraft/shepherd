@@ -46,7 +46,7 @@ Abstract base class all tools must implement:
 **Filesystem Tools** (`filesystem_tools.cpp`):
 - ReadFileTool, WriteFileTool, ListDirectoryTool
 
-**Memory Tools** (`memory_tools.cpp`):
+**Memory Tools** (`memory_tools.cpp`, `--memtools` required):
 - SearchMemoryTool, StoreMemoryTool, ClearMemoryTool
 - SetFactTool, GetFactTool, ClearFactTool
 

@@ -14,7 +14,7 @@
 extern std::unique_ptr<Config> config;
 
 SessionManager::SessionManager(Backend* backend, Config* cfg, bool no_mcp, bool no_tools, bool mem_tools)
-    : backend(backend), config(cfg), no_mcp(no_mcp), no_tools(no_tools), mem_tools(mem_tools) {
+    : backend(backend), config(cfg), no_tools(no_tools), mem_tools(mem_tools) {
 }
 
 SessionManager::~SessionManager() {

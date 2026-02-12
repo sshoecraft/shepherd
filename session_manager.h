@@ -62,7 +62,6 @@ private:
 
     Backend* backend;  // Shared backend (not owned)
     Config* config;    // Configuration (not owned)
-    bool no_mcp;
     bool no_tools;
     bool mem_tools;
     std::unordered_map<std::string, std::unique_ptr<ManagedSession>> sessions;

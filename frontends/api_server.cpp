@@ -537,7 +537,7 @@ void APIServer::register_endpoints() {
                 // Phase 1: Prefill BEFORE committing to streaming
                 // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
                 // Set up handler to capture prefill stats
-                request_handler = [this](CallbackEvent type, const std::string& content,
+                request_handler = [](CallbackEvent type, const std::string& content,
                                          const std::string&, const std::string&) -> bool {
                     if (type == CallbackEvent::STATS && config->stats) {
                         std::cout << "\033[90m" << content << "\033[0m" << std::flush;

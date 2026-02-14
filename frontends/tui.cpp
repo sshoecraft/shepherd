@@ -1310,7 +1310,7 @@ int TUI::run(Provider* cmdline_provider) {
         session.desired_completion_tokens = calculate_desired_completion_tokens(
             backend->context_size, backend->max_output_tokens);
     }
-    session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
+    session.auto_evict = (config->context_size > 0 && !backend->is_gpu);
 
     Scheduler scheduler(config->scheduler_name);
     if (!g_disable_scheduler) {

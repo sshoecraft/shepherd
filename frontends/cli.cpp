@@ -274,7 +274,7 @@ int CLI::run(Provider* cmdline_provider) {
         session.desired_completion_tokens = calculate_desired_completion_tokens(
             backend->context_size, backend->max_output_tokens);
     }
-    session.auto_evict = (backend->context_size > 0 && !backend->is_gpu);
+    session.auto_evict = (config->context_size > 0 && !backend->is_gpu);
 
     // Initialize scheduler (unless disabled)
     Scheduler scheduler(config->scheduler_name);

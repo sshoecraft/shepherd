@@ -38,10 +38,11 @@ Configurable via `memory_extraction_queue_limit`:
 ### Extraction API Call
 
 Non-streaming POST to `{memory_extraction_endpoint}/v1/chat/completions` with:
-- System prompt requesting Q/A fact extraction
-- Conversation text formatted as `User: ...\nAssistant: ...\n`
+- System prompt requesting fact extraction from user statements only
+- Conversation text formatted as `User: ...\n` (USER messages only, v2.33.2)
+- Assistant messages are excluded to prevent extraction model from storing assistant-generated content as user facts
 - Tool/function/system messages are filtered out
-- `[context: ...]` postfix stripped from user messages
+- `[facts: ...]` and `[context: ...]` postfix stripped from user messages
 
 ### Response Parsing
 
@@ -148,6 +149,7 @@ When the extraction API endpoint is unreachable (connection refused, timeout, HT
 ## History
 
 - **v2.32.0**: Reworked extraction to produce structured JSON with separate `facts` (key-value pairs → `set_fact`) and `context` (Q/A pairs → `store_memory`). Archive_turn during eviction disabled (extraction thread handles it). Table renamed `conversations` → `context`. Injection now presents `[facts: ...]` and `[context: ...]` separately. Time-based relevancy added to context search.
+- **v2.33.2**: Extraction input now contains only USER messages (assistant messages excluded). Prevents extraction model from storing assistant-generated content as user facts. Extraction prompt strengthened to reject transient data, operational state, and discussed content.
 - **v2.31.1**: Fixed extraction prompt to only extract facts stated by the user, not facts about the assistant itself (e.g., assistant self-identifying as "Shepherd" was being stored as a fact)
 - **v2.30.0**: Replaced thread_local user_id with explicit parameter passing through entire call chain
 - **v2.29.0**: Added retry with configurable interval (`memory_extraction_retry_interval`), provider `memory` flag controls injection + extraction, thread starts based on endpoint+model presence (not `memory_extraction` bool)

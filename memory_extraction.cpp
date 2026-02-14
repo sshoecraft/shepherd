@@ -14,20 +14,22 @@
 
 extern std::unique_ptr<Config> config;
 
-static const char* EXTRACTION_SYSTEM_PROMPT = R"(You are a memory extraction system. Your job is to read conversation segments and extract two types of information:
+static const char* EXTRACTION_SYSTEM_PROMPT = R"(You are a memory extraction system. You will receive only the USER side of conversations. Extract two types of information:
 
 1. **Facts**: Durable key-value pairs about the user that will still be true weeks or months from now. Examples: name, location, preferences, job title, project names, technical choices.
-2. **Context**: Question/answer pairs capturing useful conversation details that don't fit as simple facts. Examples: decisions made, procedures discussed, problems solved.
+2. **Context**: Question/answer pairs capturing useful details that don't fit as simple facts. Examples: decisions made, procedures discussed, problems solved.
 
 Rules:
-- Extract only concrete information explicitly stated or confirmed BY THE USER
-- Do NOT extract facts about the assistant itself -- its name, identity, capabilities, or behavior are not user-provided information
-- NEVER extract something where the value is unknown, not provided, or not mentioned -- the absence of information is not worth storing
-- Only store DURABLE information -- not transient data like current readings, prices, or timestamps
-- Do NOT store the results of tool calls or API responses
-- Ignore small talk, greetings, and filler
+- Extract ONLY information the user explicitly states about themselves
+- Only store DURABLE information -- things that will still be true weeks from now
+- Do NOT extract transient data: current readings, prices, timestamps, status updates, counts
+- Do NOT extract operational state: API responses, tool results, schedule run outcomes
+- Do NOT extract content the user is discussing or asking about -- only facts ABOUT the user
+- Do NOT invent or infer information not explicitly stated
+- NEVER extract something where the value is unknown or not provided
+- Ignore small talk, greetings, commands, and filler
 - Ignore dead ends and corrections -- only keep final conclusions
-- Keep everything concise
+- Keep values concise -- no full sentences or paragraphs
 
 Output format: JSON object with two fields:
 - "facts": object of key-value pairs (use lowercase_snake_case keys)
@@ -140,37 +142,32 @@ std::string MemoryExtractionThread::build_conversation_text(const std::vector<Me
     for (size_t i = static_cast<size_t>(std::max(0, start_index)); i < messages.size(); i++) {
         const Message& msg = messages[i];
 
-        // Only include USER and ASSISTANT messages
-        if (msg.role != Message::USER && msg.role != Message::ASSISTANT) {
+        // Only include USER messages -- assistant responses are excluded to prevent
+        // the extraction model from storing assistant-generated content as user facts
+        if (msg.role != Message::USER) {
             continue;
         }
 
         std::string content = msg.content;
 
-        // Strip injected [facts: ...] and [context: ...] postfix from user messages
-        if (msg.role == Message::USER) {
-            size_t facts_pos = content.find("\n\n[facts: ");
-            size_t ctx_pos = content.find("\n\n[context: ");
-            size_t strip_pos = std::string::npos;
-            if (facts_pos != std::string::npos && ctx_pos != std::string::npos) {
-                strip_pos = std::min(facts_pos, ctx_pos);
-            } else if (facts_pos != std::string::npos) {
-                strip_pos = facts_pos;
-            } else if (ctx_pos != std::string::npos) {
-                strip_pos = ctx_pos;
-            }
-            if (strip_pos != std::string::npos) {
-                content = content.substr(0, strip_pos);
-            }
+        // Strip injected [facts: ...] and [context: ...] postfix
+        size_t facts_pos = content.find("\n\n[facts: ");
+        size_t ctx_pos = content.find("\n\n[context: ");
+        size_t strip_pos = std::string::npos;
+        if (facts_pos != std::string::npos && ctx_pos != std::string::npos) {
+            strip_pos = std::min(facts_pos, ctx_pos);
+        } else if (facts_pos != std::string::npos) {
+            strip_pos = facts_pos;
+        } else if (ctx_pos != std::string::npos) {
+            strip_pos = ctx_pos;
+        }
+        if (strip_pos != std::string::npos) {
+            content = content.substr(0, strip_pos);
         }
 
         if (content.empty()) continue;
 
-        if (msg.role == Message::USER) {
-            oss << "User: " << content << "\n";
-        } else {
-            oss << "Assistant: " << content << "\n";
-        }
+        oss << "User: " << content << "\n";
 
         turn_count++;
         if (turn_count >= max_turns) break;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.33.1
+    VERSION 2.33.2
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/bigattichouse/shepherd"
     LANGUAGES CXX
@@ -487,6 +487,15 @@ message(STATUS "Shepherd configuration:")
 message(STATUS "  TensorRT backend: ${ENABLE_TENSORRT}")
 message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
+
+# Set capabilities for chroot support (best-effort, non-interactive)
+set(SETCAP_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/setcap.sh")
+file(WRITE ${SETCAP_SCRIPT}
+"#!/bin/sh\nsudo -n setcap cap_sys_chroot,cap_setuid,cap_setgid+ep \"$1\" 2>/dev/null || echo \"Note: run 'sudo setcap cap_sys_chroot,cap_setuid,cap_setgid+ep $1' to enable chroot\"\n")
+add_custom_command(TARGET shepherd POST_BUILD
+    COMMAND sh ${SETCAP_SCRIPT} ${CMAKE_CURRENT_BINARY_DIR}/shepherd
+    COMMENT "Setting chroot capabilities on shepherd binary"
+)
 
 # =============================================================================
 # Installation (FHS-compliant)

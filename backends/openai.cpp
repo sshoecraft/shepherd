@@ -1073,6 +1073,13 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
             error_msg = "HTTP error " + std::to_string(http_response.status_code);
         }
 
+        // Check if this is a context-full error - throw ContextFullException
+        // so the frontend (session owner) can handle eviction
+        int tokens_to_evict = extract_tokens_to_evict(http_response);
+        if (tokens_to_evict > 0) {
+            throw ContextFullException(error_msg);
+        }
+
         callback(CallbackEvent::ERROR, error_msg, "api_error", "");
         callback(CallbackEvent::STOP, "error", "", "");
         return;

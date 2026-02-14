@@ -173,6 +173,13 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
     } else {
+        // Check if this is a context-full error - throw ContextFullException
+        // so the frontend (session owner) can handle eviction
+        int tokens_to_evict = extract_tokens_to_evict(http_response);
+        if (tokens_to_evict > 0) {
+            throw ContextFullException(resp.error);
+        }
+
         callback(CallbackEvent::ERROR, resp.error, "api_error", "");
         callback(CallbackEvent::STOP, "error", "", "");
     }

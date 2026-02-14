@@ -712,6 +712,14 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
     // Check for HTTP errors
     if (!http_response.is_success() && !stream_complete) {
         std::string error_msg = http_response.error_message.empty() ? "API request failed" : http_response.error_message;
+
+        // Check if this is a context-full error - throw ContextFullException
+        // so the frontend (session owner) can handle eviction
+        int tokens_to_evict = extract_tokens_to_evict(http_response);
+        if (tokens_to_evict > 0) {
+            throw ContextFullException(error_msg);
+        }
+
         callback(CallbackEvent::ERROR, error_msg, "error", "");
         callback(CallbackEvent::STOP, "error", "", "");
         return;

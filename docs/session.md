@@ -151,6 +151,15 @@ session.total_tokens += 15;
 
 ### Eviction Strategy
 
+**Only the session owner (frontend) performs evictions.** Backends detect context-full
+conditions and throw `ContextFullException`; the frontend catches it and runs eviction.
+This applies to all backends: local (llamacpp, tensorrt) and API (OpenAI, Anthropic,
+Gemini, Ollama).
+
+Two eviction triggers in `Frontend::generate_response()`:
+- **Proactive** (if `auto_evict` enabled): Before calling backend, check token counts
+- **Reactive**: Catch `ContextFullException` from backend, evict, retry
+
 Two-pass eviction when context fills:
 
 **Pass 1: Complete Turn Eviction**

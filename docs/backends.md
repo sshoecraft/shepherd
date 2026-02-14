@@ -379,16 +379,41 @@ if (!pending_tool_calls.empty()) {
 ## Error Handling
 
 Backends should:
-- Signal errors via callback: `callback(CallbackEvent::ERROR, message, type, "")`
-- Set appropriate response code
+- Signal non-context errors via callback: `callback(CallbackEvent::ERROR, message, type, "")`
+- Throw `ContextFullException` for context-full errors (see below)
 - Return partial content if available
 
+### Context Full: ContextFullException (v2.33.1)
+
+**Only the session owner (frontend) performs evictions.** Backends never evict.
+
+When a backend detects a context-full condition, it throws `ContextFullException`.
+The frontend catches it in `generate_response()` and handles reactive eviction:
+
 ```cpp
-if (http_error) {
-    callback(CallbackEvent::ERROR, "HTTP request failed: " + error_msg, "http_error", "");
-    callback(CallbackEvent::STOP, "error", "", "");
-    return;
+// Backend detects context full:
+int tokens_to_evict = extract_tokens_to_evict(http_response);
+if (tokens_to_evict > 0) {
+    throw ContextFullException(error_msg);
 }
+
+// Frontend catches and evicts (frontend.cpp):
+catch (const ContextFullException& e) {
+    auto ranges = session.calculate_messages_to_evict(tokens_over);
+    session.evict_messages(ranges);
+    // retry generation
+}
+```
+
+This pattern is used by all backends:
+- **Local backends** (llamacpp, tensorrt): Throw during prefill/decode when KV cache is full
+- **API backends** (OpenAI, Anthropic, Gemini, Ollama): Parse HTTP error response
+  via `extract_tokens_to_evict()`, throw if context-full detected
+
+For non-context errors:
+```cpp
+callback(CallbackEvent::ERROR, "HTTP request failed: " + error_msg, "http_error", "");
+callback(CallbackEvent::STOP, "error", "", "");
 ```
 
 ## Files

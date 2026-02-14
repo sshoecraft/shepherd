@@ -110,8 +110,8 @@ bool MCP::initialize(Tools& tools, const std::vector<ServerConfig>& server_confi
 
     if (any_success) {
         dout(1) << "MCP Manager initialized with " +
-                 std::to_string(clients_.size()) + " servers, " +
-                 std::to_string(total_tools_) + " tools" << std::endl;
+                 std::to_string(clients.size()) + " servers, " +
+                 std::to_string(total_tools) + " tools" << std::endl;
     } else {
         dout(1) << "No MCP servers could be initialized" << std::endl;
     }
@@ -172,19 +172,19 @@ void MCP::register_server(Tools& tools, ServerInitResult& result) {
 
         tools.register_tool(std::move(adapter), "mcp");
         dout(1) << "Registered MCP tool: " + tool_name + " (sanitized)" << std::endl;
-        total_tools_++;
+        total_tools++;
     }
 
     // Save client reference
-    clients_.push_back(result.client);
-    servers_by_name_[result.server_name] = result.client;
+    clients.push_back(result.client);
+    servers_by_name[result.server_name] = result.client;
 }
 
 void MCP::shutdown() {
     dout(1) << "Shutting down MCP Manager..." << std::endl;
 
     // Shutdown all clients
-    for (auto& client : clients_) {
+    for (auto& client : clients) {
         try {
             // MCPClient destructor will handle shutdown
         } catch (const std::exception& e) {
@@ -192,27 +192,31 @@ void MCP::shutdown() {
         }
     }
 
-    clients_.clear();
-    servers_by_name_.clear();
-    total_tools_ = 0;
+    clients.clear();
+    servers_by_name.clear();
+    total_tools = 0;
 
     dout(1) << "MCP Manager shutdown complete" << std::endl;
 }
 
-std::vector<std::string> MCP::get_server_names() const {
-    std::vector<std::string> names;
-    for (const auto& pair : servers_by_name_) {
-        names.push_back(pair.first);
+std::set<int> MCP::get_active_fds() const {
+    std::set<int> fds;
+    for (const auto& client : clients) {
+        if (client && client->server) {
+            if (client->server->stdin_fd >= 0) fds.insert(client->server->stdin_fd);
+            if (client->server->stdout_fd >= 0) fds.insert(client->server->stdout_fd);
+            if (client->server->stderr_fd >= 0) fds.insert(client->server->stderr_fd);
+        }
     }
-    return names;
+    return fds;
 }
 
 std::map<std::string, std::vector<MCPResource>> MCP::list_all_resources() const {
     std::map<std::string, std::vector<MCPResource>> all_resources;
 
-    for (const auto& client : clients_) {
+    for (const auto& client : clients) {
         try {
-            std::string server_name = client->get_server_name();
+            std::string server_name = client->server->server_config.name;
             auto resources = client->list_resources();
             if (!resources.empty()) {
                 all_resources[server_name] = resources;
@@ -221,7 +225,7 @@ std::map<std::string, std::vector<MCPResource>> MCP::list_all_resources() const 
             }
         } catch (const std::exception& e) {
             std::cerr << "Failed to list resources from server: " +
-                     client->get_server_name() + " - " + e.what() << std::endl;
+                     client->server->server_config.name + " - " + e.what() << std::endl;
         }
     }
 
@@ -229,8 +233,8 @@ std::map<std::string, std::vector<MCPResource>> MCP::list_all_resources() const 
 }
 
 std::vector<MCPResource> MCP::list_resources(const std::string& server_name) const {
-    auto it = servers_by_name_.find(server_name);
-    if (it == servers_by_name_.end()) {
+    auto it = servers_by_name.find(server_name);
+    if (it == servers_by_name.end()) {
         throw std::runtime_error("MCP server not found: " + server_name);
     }
 
@@ -243,8 +247,8 @@ std::vector<MCPResource> MCP::list_resources(const std::string& server_name) con
 }
 
 nlohmann::json MCP::read_resource(const std::string& server_name, const std::string& uri) const {
-    auto it = servers_by_name_.find(server_name);
-    if (it == servers_by_name_.end()) {
+    auto it = servers_by_name.find(server_name);
+    if (it == servers_by_name.end()) {
         throw std::runtime_error("MCP server not found: " + server_name);
     }
 

@@ -3,36 +3,36 @@
 #include <sstream>
 
 
-MCPToolAdapter::MCPToolAdapter(std::shared_ptr<MCPClient> client, const MCPTool& mcp_tool)
-    : client_(client), mcp_tool_(mcp_tool) {
+MCPToolAdapter::MCPToolAdapter(std::shared_ptr<MCPClient> cli, const MCPTool& tool)
+    : client(cli), mcp_tool(tool) {
 }
 
 std::string MCPToolAdapter::unsanitized_name() const {
     // Prefix with server name to avoid conflicts
-    return client_->get_server_name() + ":" + mcp_tool_.name;
+    return client->server->server_config.name + ":" + mcp_tool.name;
 }
 
 std::string MCPToolAdapter::description() const {
-    return mcp_tool_.description;
+    return mcp_tool.description;
 }
 
 std::string MCPToolAdapter::parameters() const {
     // Return the JSON schema directly for API backends
     // API backends need the actual JSON schema, not human-readable format
-    return mcp_tool_.input_schema.dump();
+    return mcp_tool.input_schema.dump();
 }
 
 std::vector<ParameterDef> MCPToolAdapter::get_parameters_schema() const {
     std::vector<ParameterDef> params;
 
-    if (!mcp_tool_.input_schema.contains("properties")) {
+    if (!mcp_tool.input_schema.contains("properties")) {
         return params;
     }
 
     // Parse required fields list
     std::vector<std::string> required_fields;
-    if (mcp_tool_.input_schema.contains("required") && mcp_tool_.input_schema["required"].is_array()) {
-        for (const auto& req : mcp_tool_.input_schema["required"]) {
+    if (mcp_tool.input_schema.contains("required") && mcp_tool.input_schema["required"].is_array()) {
+        for (const auto& req : mcp_tool.input_schema["required"]) {
             if (req.is_string()) {
                 required_fields.push_back(req.get<std::string>());
             }
@@ -40,8 +40,8 @@ std::vector<ParameterDef> MCPToolAdapter::get_parameters_schema() const {
     }
 
     // Convert each property to ParameterDef
-    for (auto it = mcp_tool_.input_schema["properties"].begin();
-         it != mcp_tool_.input_schema["properties"].end(); ++it) {
+    for (auto it = mcp_tool.input_schema["properties"].begin();
+         it != mcp_tool.input_schema["properties"].end(); ++it) {
 
         std::string param_name = it.key();
         auto param_schema = it.value();
@@ -76,10 +76,10 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
         // Convert Shepherd args to MCP JSON
         nlohmann::json mcp_args = args_to_json(args);
 
-        dout(1) << "Executing MCP tool: " + mcp_tool_.name << std::endl;
+        dout(1) << "Executing MCP tool: " + mcp_tool.name << std::endl;
 
         // Call MCP tool
-        nlohmann::json mcp_result = client_->call_tool(mcp_tool_.name, mcp_args);
+        nlohmann::json mcp_result = client->call_tool(mcp_tool.name, mcp_args);
 
         // Extract content from MCP result
         if (mcp_result.contains("content") && mcp_result["content"].is_array() &&
@@ -106,7 +106,7 @@ std::map<std::string, std::any> MCPToolAdapter::execute(const std::map<std::stri
                                    " characters (" + std::to_string(original_lines) + " lines)\n";
                     text_content += "Consider using pagination, filters, or reading specific sections.";
 
-                    dout(1) << "WARNING: Truncated MCP tool result from " + mcp_tool_.name +
+                    dout(1) << "WARNING: Truncated MCP tool result from " + mcp_tool.name +
                             " (" + std::to_string(original_length) + " chars -> " +
                             std::to_string(MAX_MCP_RESULT_CHARS) + " chars)" << std::endl;
 

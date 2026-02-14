@@ -274,7 +274,7 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_
     if (!no_mcp) {
         auto& mcp = MCP::instance();
         mcp.initialize(tools);
-        dout(1) << "MCP initialized with " + std::to_string(mcp.get_tool_count()) + " tools" << std::endl;
+        dout(1) << "MCP initialized with " + std::to_string(mcp.total_tools) + " tools" << std::endl;
     } else {
         dout(1) << "MCP system disabled" << std::endl;
     }

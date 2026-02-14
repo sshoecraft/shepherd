@@ -40,19 +40,14 @@ public:
     void write_line(const std::string& line);
     std::string read_line();
     bool has_output() const;
+    std::string read_stderr() const;
 
-    // Info
-    const std::string& get_name() const { return config_.name; }
-    pid_t get_pid() const { return pid_; }
-    std::string get_stderr() const;
-
-private:
-    Config config_;
-    pid_t pid_;
-    int stdin_fd_;
-    int stdout_fd_;
-    int stderr_fd_;
-    std::string stderr_buffer_;
+    Config server_config;
+    pid_t pid;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    std::string stderr_buffer;
 
     void close_fds();
 

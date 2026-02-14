@@ -12,7 +12,7 @@
 #include <chrono>
 
 MCPServer::MCPServer(const Config& config)
-    : config_(config), pid_(-1), stdin_fd_(-1), stdout_fd_(-1), stderr_fd_(-1) {
+    : server_config(config), pid(-1), stdin_fd(-1), stdout_fd(-1), stderr_fd(-1) {
 }
 
 MCPServer::~MCPServer() {
@@ -22,16 +22,16 @@ MCPServer::~MCPServer() {
 }
 
 MCPServer::MCPServer(MCPServer&& other) noexcept
-    : config_(std::move(other.config_)),
-      pid_(other.pid_),
-      stdin_fd_(other.stdin_fd_),
-      stdout_fd_(other.stdout_fd_),
-      stderr_fd_(other.stderr_fd_),
-      stderr_buffer_(std::move(other.stderr_buffer_)) {
-    other.pid_ = -1;
-    other.stdin_fd_ = -1;
-    other.stdout_fd_ = -1;
-    other.stderr_fd_ = -1;
+    : server_config(std::move(other.server_config)),
+      pid(other.pid),
+      stdin_fd(other.stdin_fd),
+      stdout_fd(other.stdout_fd),
+      stderr_fd(other.stderr_fd),
+      stderr_buffer(std::move(other.stderr_buffer)) {
+    other.pid = -1;
+    other.stdin_fd = -1;
+    other.stdout_fd = -1;
+    other.stderr_fd = -1;
 }
 
 MCPServer& MCPServer::operator=(MCPServer&& other) noexcept {
@@ -39,16 +39,16 @@ MCPServer& MCPServer::operator=(MCPServer&& other) noexcept {
         if (is_running()) {
             stop();
         }
-        config_ = std::move(other.config_);
-        pid_ = other.pid_;
-        stdin_fd_ = other.stdin_fd_;
-        stdout_fd_ = other.stdout_fd_;
-        stderr_fd_ = other.stderr_fd_;
-        stderr_buffer_ = std::move(other.stderr_buffer_);
-        other.pid_ = -1;
-        other.stdin_fd_ = -1;
-        other.stdout_fd_ = -1;
-        other.stderr_fd_ = -1;
+        server_config = std::move(other.server_config);
+        pid = other.pid;
+        stdin_fd = other.stdin_fd;
+        stdout_fd = other.stdout_fd;
+        stderr_fd = other.stderr_fd;
+        stderr_buffer = std::move(other.stderr_buffer);
+        other.pid = -1;
+        other.stdin_fd = -1;
+        other.stdout_fd = -1;
+        other.stderr_fd = -1;
     }
     return *this;
 }
@@ -65,12 +65,12 @@ void MCPServer::start() {
         throw MCPServerError("Failed to create pipes: " + std::string(strerror(errno)));
     }
 
-    pid_ = fork();
-    if (pid_ < 0) {
+    pid = fork();
+    if (pid < 0) {
         throw MCPServerError("Failed to fork: " + std::string(strerror(errno)));
     }
 
-    if (pid_ == 0) {
+    if (pid == 0) {
         // Child process
         // Redirect stdin from pipe
         dup2(stdin_pipe[0], STDIN_FILENO);
@@ -88,23 +88,23 @@ void MCPServer::start() {
         close(stderr_pipe[1]);
 
         // Set environment variables
-        for (const auto& [key, value] : config_.env) {
+        for (const auto& [key, value] : server_config.env) {
             setenv(key.c_str(), value.c_str(), 1);
         }
 
         // Build argument list
         std::vector<char*> argv;
-        argv.push_back(const_cast<char*>(config_.command.c_str()));
-        for (const auto& arg : config_.args) {
+        argv.push_back(const_cast<char*>(server_config.command.c_str()));
+        for (const auto& arg : server_config.args) {
             argv.push_back(const_cast<char*>(arg.c_str()));
         }
         argv.push_back(nullptr);
 
         // Execute command
-        execvp(config_.command.c_str(), argv.data());
+        execvp(server_config.command.c_str(), argv.data());
 
         // If we get here, exec failed
-        std::cerr << "Failed to execute " << config_.command << ": " << strerror(errno) << std::endl;
+        std::cerr << "Failed to execute " << server_config.command << ": " << strerror(errno) << std::endl;
         _exit(1);
     }
 
@@ -115,25 +115,25 @@ void MCPServer::start() {
     close(stderr_pipe[1]);
 
     // Store our ends
-    stdin_fd_ = stdin_pipe[1];
-    stdout_fd_ = stdout_pipe[0];
-    stderr_fd_ = stderr_pipe[0];
+    stdin_fd = stdin_pipe[1];
+    stdout_fd = stdout_pipe[0];
+    stderr_fd = stderr_pipe[0];
 
     // Perform SMCP handshake if credentials are configured
     // (must happen before making stdout non-blocking)
-    if (!config_.smcp_credentials.empty()) {
-        dout(1) << "Performing SMCP handshake for '" + config_.name + "'" << std::endl;
+    if (!server_config.smcp_credentials.empty()) {
+        dout(1) << "Performing SMCP handshake for '" + server_config.name + "'" << std::endl;
         if (!perform_smcp_handshake()) {
             stop();
-            throw MCPServerError("SMCP handshake failed for " + config_.name);
+            throw MCPServerError("SMCP handshake failed for " + server_config.name);
         }
     }
 
     // Make stdout and stderr non-blocking
-    fcntl(stdout_fd_, F_SETFL, fcntl(stdout_fd_, F_GETFL) | O_NONBLOCK);
-    fcntl(stderr_fd_, F_SETFL, fcntl(stderr_fd_, F_GETFL) | O_NONBLOCK);
+    fcntl(stdout_fd, F_SETFL, fcntl(stdout_fd, F_GETFL) | O_NONBLOCK);
+    fcntl(stderr_fd, F_SETFL, fcntl(stderr_fd, F_GETFL) | O_NONBLOCK);
 
-    dout(1) << "MCP server '" + config_.name + "' started with PID " + std::to_string(pid_) << std::endl;
+    dout(1) << "MCP server '" + server_config.name + "' started with PID " + std::to_string(pid) << std::endl;
 }
 
 void MCPServer::stop() {
@@ -141,40 +141,40 @@ void MCPServer::stop() {
         return;
     }
 
-    dout(1) << "Stopping MCP server '" + config_.name + "' (PID " + std::to_string(pid_) + ")" << std::endl;
+    dout(1) << "Stopping MCP server '" + server_config.name + "' (PID " + std::to_string(pid) + ")" << std::endl;
 
     // Close stdin to signal EOF
-    if (stdin_fd_ >= 0) {
-        close(stdin_fd_);
-        stdin_fd_ = -1;
+    if (stdin_fd >= 0) {
+        close(stdin_fd);
+        stdin_fd = -1;
     }
 
     // Send SIGTERM and wait briefly
-    kill(pid_, SIGTERM);
+    kill(pid, SIGTERM);
 
     int status;
     // Quick non-blocking check first
-    if (waitpid(pid_, &status, WNOHANG) == 0) {
+    if (waitpid(pid, &status, WNOHANG) == 0) {
         // Still running, wait up to 100ms
         usleep(100000);
-        if (waitpid(pid_, &status, WNOHANG) == 0) {
+        if (waitpid(pid, &status, WNOHANG) == 0) {
             // Force kill
-            kill(pid_, SIGKILL);
-            waitpid(pid_, &status, 0);
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
         }
     }
 
     close_fds();
-    pid_ = -1;
+    pid = -1;
 }
 
 bool MCPServer::is_running() const {
-    if (pid_ <= 0) {
+    if (pid <= 0) {
         return false;
     }
 
     int status;
-    pid_t result = waitpid(pid_, &status, WNOHANG);
+    pid_t result = waitpid(pid, &status, WNOHANG);
     return result == 0;
 }
 
@@ -184,7 +184,7 @@ void MCPServer::write_line(const std::string& line) {
     }
 
     std::string data = line + "\n";
-    ssize_t written = write(stdin_fd_, data.c_str(), data.size());
+    ssize_t written = write(stdin_fd, data.c_str(), data.size());
 
     if (written < 0) {
         throw MCPServerError("Failed to write to server: " + std::string(strerror(errno)));
@@ -203,7 +203,7 @@ std::string MCPServer::read_line() {
     char buffer[4096];
 
     while (true) {
-        ssize_t n = read(stdout_fd_, buffer, sizeof(buffer) - 1);
+        ssize_t n = read(stdout_fd, buffer, sizeof(buffer) - 1);
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -231,29 +231,29 @@ std::string MCPServer::read_line() {
 }
 
 bool MCPServer::has_output() const {
-    if (!is_running() || stdout_fd_ < 0) {
+    if (!is_running() || stdout_fd < 0) {
         return false;
     }
 
     fd_set fds;
     FD_ZERO(&fds);
-    FD_SET(stdout_fd_, &fds);
+    FD_SET(stdout_fd, &fds);
 
     struct timeval timeout = {0, 0}; // Non-blocking
-    return select(stdout_fd_ + 1, &fds, nullptr, nullptr, &timeout) > 0;
+    return select(stdout_fd + 1, &fds, nullptr, nullptr, &timeout) > 0;
 }
 
-std::string MCPServer::get_stderr() const {
-    if (stderr_fd_ < 0) {
-        return stderr_buffer_;
+std::string MCPServer::read_stderr() const {
+    if (stderr_fd < 0) {
+        return stderr_buffer;
     }
 
     // Read any available stderr
     char buffer[4096];
-    std::string result = stderr_buffer_;
+    std::string result = stderr_buffer;
 
     while (true) {
-        ssize_t n = read(stderr_fd_, buffer, sizeof(buffer) - 1);
+        ssize_t n = read(stderr_fd, buffer, sizeof(buffer) - 1);
         if (n <= 0) break;
         buffer[n] = '\0';
         result += buffer;
@@ -263,17 +263,17 @@ std::string MCPServer::get_stderr() const {
 }
 
 void MCPServer::close_fds() {
-    if (stdin_fd_ >= 0) {
-        close(stdin_fd_);
-        stdin_fd_ = -1;
+    if (stdin_fd >= 0) {
+        close(stdin_fd);
+        stdin_fd = -1;
     }
-    if (stdout_fd_ >= 0) {
-        close(stdout_fd_);
-        stdout_fd_ = -1;
+    if (stdout_fd >= 0) {
+        close(stdout_fd);
+        stdout_fd = -1;
     }
-    if (stderr_fd_ >= 0) {
-        close(stderr_fd_);
-        stderr_fd_ = -1;
+    if (stderr_fd >= 0) {
+        close(stderr_fd);
+        stderr_fd = -1;
     }
 }
 
@@ -287,20 +287,20 @@ std::string MCPServer::read_line_timeout(int timeout_ms) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
         if (elapsed >= timeout_ms) {
-            throw MCPServerError("Timeout waiting for response from " + config_.name);
+            throw MCPServerError("Timeout waiting for response from " + server_config.name);
         }
 
         // Use select to wait for data with remaining timeout
         fd_set fds;
         FD_ZERO(&fds);
-        FD_SET(stdout_fd_, &fds);
+        FD_SET(stdout_fd, &fds);
 
         int remaining_ms = timeout_ms - elapsed;
         struct timeval tv;
         tv.tv_sec = remaining_ms / 1000;
         tv.tv_usec = (remaining_ms % 1000) * 1000;
 
-        int ret = select(stdout_fd_ + 1, &fds, nullptr, nullptr, &tv);
+        int ret = select(stdout_fd + 1, &fds, nullptr, nullptr, &tv);
         if (ret < 0) {
             throw MCPServerError("select() failed: " + std::string(strerror(errno)));
         }
@@ -309,7 +309,7 @@ std::string MCPServer::read_line_timeout(int timeout_ms) {
         }
 
         // Data available
-        ssize_t n = read(stdout_fd_, buffer, sizeof(buffer) - 1);
+        ssize_t n = read(stdout_fd, buffer, sizeof(buffer) - 1);
         if (n < 0) {
             throw MCPServerError("Failed to read from server: " + std::string(strerror(errno)));
         }
@@ -333,33 +333,33 @@ bool MCPServer::perform_smcp_handshake() {
         // Wait for +READY (10s timeout)
         std::string line = read_line_timeout(10000);
         if (line != "+READY") {
-            std::cerr << "SMCP: Expected +READY from " << config_.name
+            std::cerr << "SMCP: Expected +READY from " << server_config.name
                       << ", got: " << line << std::endl;
             return false;
         }
 
-        dout(1) << "SMCP: Received +READY from " << config_.name << std::endl;
+        dout(1) << "SMCP: Received +READY from " << server_config.name << std::endl;
 
         // Send credentials as JSON object
-        nlohmann::json creds_json(config_.smcp_credentials);
+        nlohmann::json creds_json(server_config.smcp_credentials);
         write_line(creds_json.dump());
 
-        dout(1) << "SMCP: Sent " << config_.smcp_credentials.size()
-                << " credentials to " << config_.name << std::endl;
+        dout(1) << "SMCP: Sent " << server_config.smcp_credentials.size()
+                << " credentials to " << server_config.name << std::endl;
 
         // Wait for +OK (5s timeout)
         line = read_line_timeout(5000);
         if (line != "+OK") {
-            std::cerr << "SMCP: Expected +OK from " << config_.name
+            std::cerr << "SMCP: Expected +OK from " << server_config.name
                       << ", got: " << line << std::endl;
             return false;
         }
 
-        dout(1) << "SMCP: Handshake complete for " << config_.name << std::endl;
+        dout(1) << "SMCP: Handshake complete for " << server_config.name << std::endl;
         return true;
 
     } catch (const MCPServerError& e) {
-        std::cerr << "SMCP handshake error for " << config_.name
+        std::cerr << "SMCP handshake error for " << server_config.name
                   << ": " << e.what() << std::endl;
         return false;
     }

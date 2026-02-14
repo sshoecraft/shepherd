@@ -13,72 +13,34 @@
 #include <string>
 #include <thread>
 #include <algorithm>
+#include <set>
 
 // Forward declaration
 class Tools;
 
-/// @brief Manages multiple MCP servers and their tools
-/// Loads MCP servers from config and registers their tools with Tools instance
 class MCP {
 public:
-    /// @brief Server configuration structure
     struct ServerConfig {
         std::string name;
         std::string command;
         std::vector<std::string> args;
         std::map<std::string, std::string> env;
-        std::map<std::string, std::string> smcp_credentials;  // For SMCP servers
+        std::map<std::string, std::string> smcp_credentials;
     };
 
     static MCP& instance();
 
-    /// @brief Initialize MCP servers from config
-    /// @param tools Tools instance to register MCP tools with
-    /// @return True if at least one server initialized successfully
     bool initialize(Tools& tools);
-
-    /// @brief Initialize from explicit server configs (for testing)
-    /// @param tools Tools instance to register MCP tools with
-    /// @param server_configs List of server configurations
-    /// @return True if at least one server initialized successfully
     bool initialize(Tools& tools, const std::vector<ServerConfig>& server_configs);
-
-    /// @brief Shutdown all MCP servers
     void shutdown();
 
-    /// @brief Get number of active MCP servers
-    size_t get_server_count() const { return clients_.size(); }
+    // Collect all active pipe FDs from running MCP/SMCP servers
+    std::set<int> get_active_fds() const;
 
-    /// @brief Get total number of MCP tools registered
-    size_t get_tool_count() const { return total_tools_; }
+    std::vector<std::shared_ptr<MCPClient>> clients;
+    std::map<std::string, std::shared_ptr<MCPClient>> servers_by_name;
+    size_t total_tools = 0;
 
-    /// @brief Get list of server names
-    std::vector<std::string> get_server_names() const;
-
-    /// @brief List all resources from all connected MCP servers
-    /// @return Map of server name to list of resources
-    std::map<std::string, std::vector<MCPResource>> list_all_resources() const;
-
-    /// @brief List resources from a specific MCP server
-    /// @param server_name Name of the server
-    /// @return List of resources from that server
-    std::vector<MCPResource> list_resources(const std::string& server_name) const;
-
-    /// @brief Read a resource from a specific MCP server
-    /// @param server_name Name of the server
-    /// @param uri Resource URI
-    /// @return Resource content as JSON
-    nlohmann::json read_resource(const std::string& server_name, const std::string& uri) const;
-
-private:
-    MCP() = default;
-    ~MCP() { shutdown(); }
-
-    // Disable copy
-    MCP(const MCP&) = delete;
-    MCP& operator=(const MCP&) = delete;
-
-    /// @brief Result of parallel server initialization
     struct ServerInitResult {
         std::shared_ptr<MCPClient> client;
         std::string server_name;
@@ -86,17 +48,17 @@ private:
         bool success = false;
     };
 
-    /// @brief Initialize a single server (thread-safe, no shared state access)
-    /// @param config Server configuration
-    /// @return Initialization result with client and discovered tools
     ServerInitResult init_server(const ServerConfig& config);
-
-    /// @brief Register an initialized server's tools (single-threaded)
-    /// @param tools Tools instance to register MCP tools with
-    /// @param result Initialization result from init_server
     void register_server(Tools& tools, ServerInitResult& result);
 
-    std::vector<std::shared_ptr<MCPClient>> clients_;
-    std::map<std::string, std::shared_ptr<MCPClient>> servers_by_name_;
-    size_t total_tools_ = 0;
+    std::map<std::string, std::vector<MCPResource>> list_all_resources() const;
+    std::vector<MCPResource> list_resources(const std::string& server_name) const;
+    nlohmann::json read_resource(const std::string& server_name, const std::string& uri) const;
+
+private:
+    MCP() = default;
+    ~MCP() { shutdown(); }
+
+    MCP(const MCP&) = delete;
+    MCP& operator=(const MCP&) = delete;
 };

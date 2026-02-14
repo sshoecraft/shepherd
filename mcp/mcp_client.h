@@ -60,16 +60,10 @@ public:
     std::vector<MCPPrompt> list_prompts();
     nlohmann::json get_prompt(const std::string& name, const nlohmann::json& arguments = nlohmann::json::object());
 
-    // Server info
-    const std::string& get_server_name() const { return server_->get_name(); }
-    const MCPCapabilities& get_capabilities() const { return capabilities_; }
-    bool is_initialized() const { return initialized_; }
-
-private:
-    std::unique_ptr<MCPServer> server_;
-    MCPCapabilities capabilities_;
-    bool initialized_;
-    int next_request_id_;
+    std::unique_ptr<MCPServer> server;
+    MCPCapabilities capabilities;
+    bool initialized;
+    int next_request_id;
 
     // JSON-RPC helpers
     nlohmann::json create_request(const std::string& method, const nlohmann::json& params = nlohmann::json::object());

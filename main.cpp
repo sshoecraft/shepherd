@@ -457,18 +457,43 @@ static int handle_smcp_subcommand(int argc, char** argv) {
 static void apply_chroot(const std::string& chroot_path, const std::string& run_as_user) {
 	if (chroot_path.empty()) return;
 
-	// Resolve uid/gid BEFORE chroot while we still have access to /etc/passwd and NSS
+	// Resolve uid/gid from the chroot's /etc/passwd (not the host's)
+	// since the target user identity belongs to the chroot environment
 	uid_t target_uid = 0;
 	gid_t target_gid = 0;
 	bool drop_privs = false;
 	if (!run_as_user.empty()) {
-		struct passwd* pw = getpwnam(run_as_user.c_str());
-		if (!pw) {
-			fprintf(stderr, "Unknown user: %s\n", run_as_user.c_str());
+		std::string passwd_path = chroot_path + "/etc/passwd";
+		std::ifstream passwd_file(passwd_path);
+		if (!passwd_file.is_open()) {
+			fprintf(stderr, "Cannot open %s\n", passwd_path.c_str());
 			exit(1);
 		}
-		target_uid = pw->pw_uid;
-		target_gid = pw->pw_gid;
+		bool found = false;
+		std::string line;
+		while (std::getline(passwd_file, line)) {
+			// Format: name:password:uid:gid:gecos:home:shell
+			size_t first_colon = line.find(':');
+			if (first_colon == std::string::npos) continue;
+			std::string name = line.substr(0, first_colon);
+			if (name != run_as_user) continue;
+
+			size_t second_colon = line.find(':', first_colon + 1);
+			if (second_colon == std::string::npos) continue;
+			size_t third_colon = line.find(':', second_colon + 1);
+			if (third_colon == std::string::npos) continue;
+			size_t fourth_colon = line.find(':', third_colon + 1);
+			if (fourth_colon == std::string::npos) continue;
+
+			target_uid = std::stoul(line.substr(second_colon + 1, third_colon - second_colon - 1));
+			target_gid = std::stoul(line.substr(third_colon + 1, fourth_colon - third_colon - 1));
+			found = true;
+			break;
+		}
+		if (!found) {
+			fprintf(stderr, "Unknown user '%s' in %s\n", run_as_user.c_str(), passwd_path.c_str());
+			exit(1);
+		}
 		drop_privs = true;
 	}
 
@@ -482,10 +507,14 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 	}
 
 	// Close inherited file descriptors to prevent jail bypass via leaked FDs
+	// but preserve MCP/SMCP server pipe FDs
+	auto protected_fds = MCP::instance().get_active_fds();
 	long max_fd = sysconf(_SC_OPEN_MAX);
 	if (max_fd < 0) max_fd = 1024;
 	for (int fd = 3; fd < max_fd; fd++) {
-		close(fd);
+		if (protected_fds.count(fd) == 0) {
+			close(fd);
+		}
 	}
 
 	if (drop_privs) {

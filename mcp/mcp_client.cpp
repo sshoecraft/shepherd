@@ -2,26 +2,26 @@
 #include "mcp_client.h"
 
 
-MCPClient::MCPClient(std::unique_ptr<MCPServer> server)
-    : server_(std::move(server)), initialized_(false), next_request_id_(1) {
+MCPClient::MCPClient(std::unique_ptr<MCPServer> srv)
+    : server(std::move(srv)), initialized(false), next_request_id(1) {
 }
 
 MCPClient::~MCPClient() {
-    if (server_ && server_->is_running()) {
-        server_->stop();
+    if (server && server->is_running()) {
+        server->stop();
     }
 }
 
 void MCPClient::initialize() {
-    if (initialized_) {
+    if (initialized) {
         return;
     }
 
-    dout(1) << "Initializing MCP client for server: " + server_->get_name() << std::endl;
+    dout(1) << "Initializing MCP client for server: " + server->server_config.name << std::endl;
 
     // Start server if not running
-    if (!server_->is_running()) {
-        server_->start();
+    if (!server->is_running()) {
+        server->start();
     }
 
     // Send initialize request
@@ -43,10 +43,10 @@ void MCPClient::initialize() {
 
         if (result.contains("capabilities")) {
             auto caps = result["capabilities"];
-            capabilities_.supports_tools = caps.value("tools", nlohmann::json::object()).value("listChanged", false) ||
+            capabilities.supports_tools = caps.value("tools", nlohmann::json::object()).value("listChanged", false) ||
                                            caps.contains("tools");
-            capabilities_.supports_resources = caps.contains("resources");
-            capabilities_.supports_prompts = caps.contains("prompts");
+            capabilities.supports_resources = caps.contains("resources");
+            capabilities.supports_prompts = caps.contains("prompts");
         }
 
         if (result.contains("serverInfo")) {
@@ -57,20 +57,20 @@ void MCPClient::initialize() {
     // Send initialized notification
     send_notification("notifications/initialized");
 
-    initialized_ = true;
-    dout(1) << "MCP client initialized for: " + server_->get_name() << std::endl;
+    initialized = true;
+    dout(1) << "MCP client initialized for: " + server->server_config.name << std::endl;
 }
 
 std::vector<MCPTool> MCPClient::list_tools() {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    if (!capabilities_.supports_tools) {
+    if (!capabilities.supports_tools) {
         return {};
     }
 
-    dout(1) << "Listing tools from MCP server: " + server_->get_name() << std::endl;
+    dout(1) << "Listing tools from MCP server: " + server->server_config.name << std::endl;
 
     nlohmann::json request = create_request("tools/list");
     nlohmann::json response = send_request(request);
@@ -90,16 +90,16 @@ std::vector<MCPTool> MCPClient::list_tools() {
         }
     }
 
-    dout(1) << "Found " + std::to_string(tools.size()) + " tools from: " + server_->get_name() << std::endl;
+    dout(1) << "Found " + std::to_string(tools.size()) + " tools from: " + server->server_config.name << std::endl;
     return tools;
 }
 
 nlohmann::json MCPClient::call_tool(const std::string& name, const nlohmann::json& arguments) {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    dout(1) << "Calling MCP tool '" + name + "' on server: " + server_->get_name() << std::endl;
+    dout(1) << "Calling MCP tool '" + name + "' on server: " + server->server_config.name << std::endl;
 
     nlohmann::json params = {
         {"name", name},
@@ -117,15 +117,15 @@ nlohmann::json MCPClient::call_tool(const std::string& name, const nlohmann::jso
 }
 
 std::vector<MCPResource> MCPClient::list_resources() {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    if (!capabilities_.supports_resources) {
+    if (!capabilities.supports_resources) {
         return {};
     }
 
-    dout(1) << "Listing resources from MCP server: " + server_->get_name() << std::endl;
+    dout(1) << "Listing resources from MCP server: " + server->server_config.name << std::endl;
 
     nlohmann::json request = create_request("resources/list");
     nlohmann::json response = send_request(request);
@@ -146,16 +146,16 @@ std::vector<MCPResource> MCPClient::list_resources() {
         }
     }
 
-    dout(1) << "Found " + std::to_string(resources.size()) + " resources from: " + server_->get_name() << std::endl;
+    dout(1) << "Found " + std::to_string(resources.size()) + " resources from: " + server->server_config.name << std::endl;
     return resources;
 }
 
 nlohmann::json MCPClient::read_resource(const std::string& uri) {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    dout(1) << "Reading resource '" + uri + "' from server: " + server_->get_name() << std::endl;
+    dout(1) << "Reading resource '" + uri + "' from server: " + server->server_config.name << std::endl;
 
     nlohmann::json params = {{"uri", uri}};
     nlohmann::json request = create_request("resources/read", params);
@@ -169,15 +169,15 @@ nlohmann::json MCPClient::read_resource(const std::string& uri) {
 }
 
 std::vector<MCPPrompt> MCPClient::list_prompts() {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    if (!capabilities_.supports_prompts) {
+    if (!capabilities.supports_prompts) {
         return {};
     }
 
-    dout(1) << "Listing prompts from MCP server: " + server_->get_name() << std::endl;
+    dout(1) << "Listing prompts from MCP server: " + server->server_config.name << std::endl;
 
     nlohmann::json request = create_request("prompts/list");
     nlohmann::json response = send_request(request);
@@ -197,16 +197,16 @@ std::vector<MCPPrompt> MCPClient::list_prompts() {
         }
     }
 
-    dout(1) << "Found " + std::to_string(prompts.size()) + " prompts from: " + server_->get_name() << std::endl;
+    dout(1) << "Found " + std::to_string(prompts.size()) + " prompts from: " + server->server_config.name << std::endl;
     return prompts;
 }
 
 nlohmann::json MCPClient::get_prompt(const std::string& name, const nlohmann::json& arguments) {
-    if (!initialized_) {
+    if (!initialized) {
         throw MCPClientError("Client not initialized");
     }
 
-    dout(1) << "Getting prompt '" + name + "' from server: " + server_->get_name() << std::endl;
+    dout(1) << "Getting prompt '" + name + "' from server: " + server->server_config.name << std::endl;
 
     nlohmann::json params = {
         {"name", name},
@@ -226,7 +226,7 @@ nlohmann::json MCPClient::get_prompt(const std::string& name, const nlohmann::js
 nlohmann::json MCPClient::create_request(const std::string& method, const nlohmann::json& params) {
     nlohmann::json request = {
         {"jsonrpc", "2.0"},
-        {"id", next_request_id_++},
+        {"id", next_request_id++},
         {"method", method}
     };
 
@@ -243,8 +243,8 @@ nlohmann::json MCPClient::send_request(const nlohmann::json& request) {
 
     dout(1) << "MCP request: " + request_str << std::endl;
 
-    server_->write_line(request_str);
-    std::string response_line = server_->read_line();
+    server->write_line(request_str);
+    std::string response_line = server->read_line();
 
     // Truncate long responses in debug output
     std::string debug_response = response_line;
@@ -273,7 +273,7 @@ void MCPClient::send_notification(const std::string& method, const nlohmann::jso
     std::string notification_str = notification.dump();
     dout(1) << "MCP notification: " + notification_str << std::endl;
 
-    server_->write_line(notification_str);
+    server->write_line(notification_str);
 }
 
 nlohmann::json MCPClient::parse_response(const std::string& line) {

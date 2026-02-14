@@ -15,9 +15,8 @@ public:
     std::vector<ParameterDef> get_parameters_schema() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 
-private:
-    std::shared_ptr<MCPClient> client_;
-    MCPTool mcp_tool_;
+    std::shared_ptr<MCPClient> client;
+    MCPTool mcp_tool;
 
     // Convert MCP JSON schema to Shepherd parameter string
     std::string schema_to_parameters(const nlohmann::json& schema) const;

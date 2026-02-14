@@ -462,6 +462,7 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 	// since the target user identity belongs to the chroot environment
 	uid_t target_uid = 0;
 	gid_t target_gid = 0;
+	std::string target_home;
 	bool drop_privs = false;
 	if (!run_as_user.empty()) {
 		std::string passwd_path = chroot_path + "/etc/passwd";
@@ -485,9 +486,18 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 			if (third_colon == std::string::npos) continue;
 			size_t fourth_colon = line.find(':', third_colon + 1);
 			if (fourth_colon == std::string::npos) continue;
+			size_t fifth_colon = line.find(':', fourth_colon + 1);
+			if (fifth_colon == std::string::npos) continue;
 
 			target_uid = std::stoul(line.substr(second_colon + 1, third_colon - second_colon - 1));
 			target_gid = std::stoul(line.substr(third_colon + 1, fourth_colon - third_colon - 1));
+			// Extract home directory (field 5, between 5th and 6th colons)
+			size_t sixth_colon = line.find(':', fifth_colon + 1);
+			if (sixth_colon != std::string::npos) {
+				target_home = line.substr(fifth_colon + 1, sixth_colon - fifth_colon - 1);
+			} else {
+				target_home = line.substr(fifth_colon + 1);
+			}
 			found = true;
 			break;
 		}
@@ -532,6 +542,13 @@ static void apply_chroot(const std::string& chroot_path, const std::string& run_
 			perror("setuid failed");
 			exit(1);
 		}
+		// Set HOME from chroot's /etc/passwd so config/credential lookups work
+		if (!target_home.empty()) {
+			setenv("HOME", target_home.c_str(), 1);
+			chdir(target_home.c_str());
+			dout(1) << "HOME set to: " + target_home << std::endl;
+		}
+
 		dout(1) << "Dropped privileges to user: " + run_as_user << std::endl;
 	}
 

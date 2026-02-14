@@ -316,6 +316,9 @@ Response CLIClientBackend::send_request(const std::string& prompt, int max_token
     if (max_tokens != 0) {
         request["max_tokens"] = max_tokens;
     }
+    if (send_no_memory) {
+        request["memory"] = false;
+    }
     // Don't set stream - let server use its default (streaming broadcasts to SSE observers)
 
     std::map<std::string, std::string> headers;

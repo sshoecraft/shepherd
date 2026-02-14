@@ -9,6 +9,7 @@
 #include "tools/utf8_sanitizer.h"
 #include "tools/scheduler_tools.h"
 #include "rag.h"
+#include "backends/cli_client.h"
 #include "mcp/mcp.h"
 #include "mcp/mcp_config.h"
 #include "scheduler.h"
@@ -52,7 +53,9 @@ Frontend::~Frontend() {
     }
 }
 
-std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, bool no_mcp, bool no_tools, const std::string& target_provider, bool no_rag, bool mem_tools) {
+std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::string& host, int port, Provider* cmdline_provider, const std::string& target_provider, const FrontendFlags& flags) {
+    // Make a mutable copy — target_provider check may modify no_tools
+    FrontendFlags f = flags;
     std::unique_ptr<Frontend> frontend;
 
     if (mode == "cli") {
@@ -62,7 +65,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
         frontend = std::make_unique<TUI>();
     }
     else if (mode == "api-server") {
-        frontend = std::make_unique<APIServer>(host, port, no_mcp, no_tools);
+        frontend = std::make_unique<APIServer>(host, port, f.no_mcp, f.no_tools);
     }
     else if (mode == "cli-server") {
         frontend = std::make_unique<CLIServer>(host, port);
@@ -86,7 +89,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     if (!target_provider.empty()) {
         for (const auto& p : frontend->providers) {
             if (p.name == target_provider && p.type == "cli") {
-                no_tools = true;
+                f.no_tools = true;
                 dout(1) << "CLI backend provider '" + target_provider + "': disabling local tools" << std::endl;
                 break;
             }
@@ -98,7 +101,7 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     dout(1) << "Frontend initialized in " + mode + " mode" << std::endl;
 
     // Initialize the frontend (RAG, tools, MCP)
-    frontend->init(no_mcp, no_tools, no_rag, mem_tools);
+    frontend->init(f);
 
     return frontend;
 }
@@ -169,6 +172,56 @@ bool Frontend::connect_provider(const std::string& name) {
         if (backend) {
             current_provider = name;
             session.backend = backend.get();
+
+            // --nomemory overrides provider memory setting
+            if (flags.no_memory) {
+                config->rag_context_injection = false;
+                config->memory_extraction = false;
+                dout(1) << "Memory disabled by --nomemory flag (provider memory overridden)" << std::endl;
+
+                // For CLI client backends, tell the server not to use memory either
+                auto* cli_backend = dynamic_cast<CLIClientBackend*>(backend.get());
+                if (cli_backend) {
+                    cli_backend->send_no_memory = true;
+                }
+            }
+
+            // Initialize RAG if this provider has memory enabled and RAG isn't already initialized
+            if (!flags.no_rag && (config->rag_context_injection || config->memory_extraction)) {
+                if (!RAGManager::is_initialized()) {
+                    std::string db_path = config->memory_database;
+                    if (db_path.empty()) {
+                        try {
+                            db_path = Config::get_default_memory_db_path();
+                        } catch (const ConfigError& e) {
+                            std::cerr << "Failed to determine memory database path: " + std::string(e.what()) << std::endl;
+                            throw;
+                        }
+                    } else if (db_path[0] == '~') {
+                        db_path = Config::get_home_directory() + db_path.substr(1);
+                    }
+
+                    if (!RAGManager::initialize(db_path, config->max_db_size)) {
+                        throw std::runtime_error("Failed to initialize RAG system");
+                    }
+
+                    if (user_id == "unknown") {
+                        dout(1) << "WARNING: user_id is 'unknown' - RAG storage and injection disabled" << std::endl;
+                    }
+                    dout(1) << "RAG initialized with database: " + db_path << std::endl;
+                }
+
+                // Start memory extraction thread if not already running
+                if (!extraction_thread &&
+                    !config->memory_extraction_endpoint.empty() &&
+                    !config->memory_extraction_model.empty()) {
+                    extraction_thread = std::make_unique<MemoryExtractionThread>();
+                    extraction_thread->start();
+                    dout(1) << "Memory extraction thread started (model=" + config->memory_extraction_model
+                             + ", endpoint=" + config->memory_extraction_endpoint + ")" << std::endl;
+                }
+            }
+
             return true;
         }
         return false;
@@ -178,7 +231,7 @@ bool Frontend::connect_provider(const std::string& name) {
     }
 }
 
-void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_rag, bool mem_tools) {
+void Frontend::init_tools(const FrontendFlags& f, bool force_local) {
     // Resolve user_id: config override > hostname:username auto-detect > "unknown"
     if (!config->user_id.empty()) {
         user_id = config->user_id;
@@ -205,42 +258,16 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_
     dout(1) << "Frontend user_id: " << user_id << std::endl;
     session.user_id = user_id;
 
-    // Initialize RAG system using global config
-    if (!no_rag) {
-        std::string db_path = config->memory_database;
-        if (db_path.empty()) {
-            try {
-                db_path = Config::get_default_memory_db_path();
-            } catch (const ConfigError& e) {
-                std::cerr << "Failed to determine memory database path: " + std::string(e.what()) << std::endl;
-                throw;
-            }
-        } else if (db_path[0] == '~') {
-            // Expand ~ if present
-            db_path = Config::get_home_directory() + db_path.substr(1);
-        }
-
-        if (!RAGManager::initialize(db_path, config->max_db_size)) {
-            throw std::runtime_error("Failed to initialize RAG system");
-        }
-
-        if (user_id == "unknown") {
-            dout(1) << "WARNING: user_id is 'unknown' - RAG storage and injection disabled" << std::endl;
-        }
-        dout(1) << "RAG initialized with database: " + db_path << std::endl;
-
-        // Start memory extraction thread if endpoint and model are configured
-        // Thread always runs; provider's "memory" flag gates whether items get queued
-        if (!config->memory_extraction_endpoint.empty() && !config->memory_extraction_model.empty()) {
-            extraction_thread = std::make_unique<MemoryExtractionThread>();
-            extraction_thread->start();
-            dout(1) << "Memory extraction thread started (model=" + config->memory_extraction_model + ", endpoint=" + config->memory_extraction_endpoint + ")" << std::endl;
-        }
-    } else {
+    // Store flags for deferred use in connect_provider() and fallback init
+    flags = f;
+    if (f.no_rag) {
         dout(1) << "RAG disabled (--norag)" << std::endl;
     }
+    if (f.no_memory) {
+        dout(1) << "Memory disabled (--nomemory)" << std::endl;
+    }
 
-    if (no_tools) {
+    if (f.no_tools) {
         dout(1) << "Tools disabled" << std::endl;
         return;
     }
@@ -265,13 +292,13 @@ void Frontend::init_tools(bool no_mcp, bool no_tools, bool force_local, bool no_
     register_command_tools(tools);
     register_json_tools(tools);
     register_http_tools(tools);
-    register_memory_tools(tools, mem_tools);
+    register_memory_tools(tools, f.mem_tools);
     register_mcp_resource_tools(tools);
     register_core_tools(tools);
     register_scheduler_tools(tools);
 
     // Initialize MCP servers (registers additional tools)
-    if (!no_mcp) {
+    if (!f.no_mcp) {
         auto& mcp = MCP::instance();
         mcp.initialize(tools);
         dout(1) << "MCP initialized with " + std::to_string(mcp.total_tools) + " tools" << std::endl;

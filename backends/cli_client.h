@@ -27,6 +27,9 @@ public:
 
     void parse_backend_config() override;
 
+    // Per-session flag: when true, send "memory": false in requests to server
+    bool send_no_memory = false;
+
 private:
     std::string base_url;
     std::string api_key;  // API key for server authentication

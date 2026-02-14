@@ -231,6 +231,18 @@ controls both RAG context injection and memory extraction. When a provider conne
 from the provider's `memory` field.
 
 This means injection is only active when the current provider has `memory: true`.
+The RAG database is only initialized when a provider with `memory: true` connects
+(v2.33.2) — providers with `memory: false` never open the database. If you switch
+from a `memory: false` provider to a `memory: true` provider, RAG is initialized
+at that point (fail-fast on connection errors).
+
+The `--nomemory` command-line flag (v2.34.0) overrides the provider's memory setting,
+disabling both injection and extraction regardless of the provider config. For CLI
+client backends, this also sends `"memory": false` in requests to the server.
+
+The API server and CLI server also support per-request `"memory": false` in the
+request JSON, allowing clients to opt out of memory for individual requests.
+
 For providers connecting to a remote Shepherd server (type `cli`), set `memory: false`
 (the default) since the server handles its own RAG. For local models or raw inference
 endpoints (vLLM), set `memory: true` to enable local RAG.

@@ -82,15 +82,12 @@ CLIServer::CLIServer(const std::string& host, int port)
 CLIServer::~CLIServer() {
 }
 
-void CLIServer::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag, bool mem_tools_flag) {
+void CLIServer::init(const FrontendFlags& flags) {
     // Store flags for later use (e.g., fallback to local tools in register_endpoints)
-    no_mcp = no_mcp_flag;
-    no_tools = no_tools_flag;
-    no_rag = no_rag_flag;
-    mem_tools = mem_tools_flag;
+    init_flags = flags;
 
     // Use common tool initialization from Frontend base class
-    init_tools(no_mcp, no_tools, false, no_rag, mem_tools);
+    init_tools(init_flags);
 }
 
 
@@ -98,7 +95,8 @@ void CLIServer::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag, boo
 static void do_generation(CliServerState& state,
                           ClientOutputs::ClientOutput* requester,
                           const std::string& prompt,
-                          int max_tokens = 0) {
+                          int max_tokens = 0,
+                          bool request_memory = true) {
     std::string accumulated_response;
 
     // Send user prompt to requester and observers
@@ -227,8 +225,10 @@ static void do_generation(CliServerState& state,
                 state.server->generate_response(max_tokens);
             }
 
-            // Queue memory extraction after tool-response generation
-            state.server->queue_memory_extraction();
+            // Queue memory extraction after tool-response generation (unless client opted out)
+            if (request_memory) {
+                state.server->queue_memory_extraction();
+            }
 
             return true;
         }
@@ -289,12 +289,16 @@ static void do_generation(CliServerState& state,
     {
         auto lock = state.backend->acquire_lock();
         state.server->add_message_to_session(Message::USER, prompt);
-        state.server->enrich_with_rag_context(state.server->session);
+        if (request_memory) {
+            state.server->enrich_with_rag_context(state.server->session);
+        }
         state.server->generate_response(max_tokens);
     }
 
-    // Queue memory extraction after generation
-    state.server->queue_memory_extraction();
+    // Queue memory extraction after generation (unless client opted out)
+    if (request_memory) {
+        state.server->queue_memory_extraction();
+    }
 
     // Build Response from session's last message
     Response resp;
@@ -457,13 +461,13 @@ void CLIServer::on_server_stop() {
 
 void CLIServer::register_endpoints() {
     // If server_tools mode, fetch tools from server or fall back to local
-    if (config->server_tools && !no_tools) {
+    if (config->server_tools && !init_flags.no_tools) {
         Provider* p = get_provider(current_provider);
         if (p && !p->base_url.empty()) {
             init_remote_tools(p->base_url, p->api_key);
         } else {
             std::cerr << "Warning: --server-tools requires an API provider with base_url, falling back to local tools" << std::endl;
-            init_tools(no_mcp, no_tools, true, no_rag, mem_tools);  // force_local = true
+            init_tools(init_flags, true);  // force_local = true
         }
     }
 
@@ -486,6 +490,7 @@ void CLIServer::register_endpoints() {
         std::string prompt;
         bool stream = false;
         bool async_mode = false;
+        bool request_memory = true;
         int max_tokens = 0;
 
         if (!req.body.empty()) {
@@ -498,6 +503,7 @@ void CLIServer::register_endpoints() {
                 stream = request_json.value("stream", false);
                 async_mode = request_json.value("async", false);
                 max_tokens = request_json.value("max_tokens", 0);
+                request_memory = request_json.value("memory", true);
             } catch (const json::exception&) {
                 // Not JSON, treat body as raw prompt
                 prompt = req.body;
@@ -564,12 +570,12 @@ void CLIServer::register_endpoints() {
 
                 res.set_content_provider(
                     "text/event-stream",
-                    [state_ptr, prompt, client_info, max_tokens](size_t offset, httplib::DataSink& sink) mutable {
+                    [state_ptr, prompt, client_info, max_tokens, request_memory](size_t offset, httplib::DataSink& sink) mutable {
                         // Create streaming output for this request
                         ClientOutputs::StreamingOutput requester(&sink, client_info);
 
                         // Run unified generation
-                        do_generation(*state_ptr, &requester, prompt, max_tokens);
+                        do_generation(*state_ptr, &requester, prompt, max_tokens, request_memory);
 
                         // Flush (sends done marker) and close
                         requester.flush();
@@ -580,7 +586,7 @@ void CLIServer::register_endpoints() {
             } else {
                 // Non-streaming response using BatchedOutput
                 ClientOutputs::BatchedOutput requester(&res);
-                do_generation(state, &requester, prompt, max_tokens);
+                do_generation(state, &requester, prompt, max_tokens, request_memory);
                 requester.flush();
             }
 

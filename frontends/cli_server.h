@@ -66,7 +66,7 @@ public:
     ~CLIServer();
 
     /// @brief Initialize tools and RAG
-    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) override;
+    void init(const FrontendFlags& flags) override;
 
 protected:
     /// @brief Register CLI server endpoints
@@ -95,8 +95,5 @@ private:
     Scheduler scheduler;
 
     // Flags for fallback to local tools
-    bool no_tools = false;
-    bool no_mcp = false;
-    bool no_rag = false;
-    bool mem_tools = false;
+    FrontendFlags init_flags;  // Stored for fallback to local tools
 };

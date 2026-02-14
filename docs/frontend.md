@@ -25,6 +25,15 @@ Frontend (abstract base)
 ## Frontend Base Class
 
 ```cpp
+/// Flags passed from command line to frontend initialization
+struct FrontendFlags {
+    bool no_mcp = false;       // --nomcp
+    bool no_tools = false;     // --notools
+    bool no_rag = false;       // --norag
+    bool mem_tools = false;    // --memtools
+    bool no_memory = false;    // --nomemory
+};
+
 class Frontend {
 public:
     // Factory method
@@ -33,12 +42,12 @@ public:
         const std::string& host,
         int port,
         Provider* cmdline_provider = nullptr,
-        bool no_mcp = false,
-        bool no_tools = false
+        const std::string& target_provider = "",
+        const FrontendFlags& flags = {}
     );
 
     // Initialization
-    virtual void init(bool no_mcp, bool no_tools) {}
+    virtual void init(const FrontendFlags& flags) {}
 
     // Main loop - subclasses implement
     virtual int run(Provider* cmdline_provider = nullptr) = 0;
@@ -85,32 +94,33 @@ public:
 4. Calls `init()` for tool setup
 
 ```cpp
-auto frontend = Frontend::create("cli", "", 0, nullptr, false, false);
+auto frontend = Frontend::create("cli", "", 0, nullptr, "", FrontendFlags{});
 frontend->run(cmdline_provider);
 ```
 
 ## Common Tool Initialization
 
-`init_tools()` is shared by CLI and CLIServer:
+`init_tools()` is shared by all frontends:
 
 ```cpp
-void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_tools) {
-    // 1. Initialize RAG system
-    RAGManager::initialize(db_path, config->max_db_size);
+void Frontend::init_tools(const FrontendFlags& f, bool force_local = false) {
+    // 1. Store flags for deferred use (connect_provider, fallback init)
+    flags = f;
 
-    if (no_tools) return;
+    if (f.no_tools) return;
 
     // 2. Register native tools
     register_filesystem_tools(tools);
     register_command_tools(tools);
     register_json_tools(tools);
     register_http_tools(tools);
-    register_memory_tools(tools);
+    register_memory_tools(tools, f.mem_tools);
     register_mcp_resource_tools(tools);
     register_core_tools(tools);
+    register_scheduler_tools(tools);
 
     // 3. Initialize MCP servers
-    if (!no_mcp) {
+    if (!f.no_mcp) {
         MCP::instance().initialize(tools);
     }
 
@@ -121,6 +131,9 @@ void Frontend::init_tools(Session& session, Tools& tools, bool no_mcp, bool no_t
     tools.populate_session_tools(session);
 }
 ```
+
+RAG initialization is deferred to `connect_provider()` — only initialized when the
+provider has `memory: true` and `--norag` / `--nomemory` are not set.
 
 ## Provider System
 
@@ -323,6 +336,8 @@ generate_response() returns
 
 ## Version History
 
+- **2.34.0** - `FrontendFlags` struct replaces individual bool parameters in `create()`, `init()`, `init_tools()`. `--nomemory` flag overrides provider memory setting. Per-request `"memory": false` in API/CLI server requests.
+- **2.33.2** - RAG initialization deferred to `connect_provider()` — only opens database when provider has `memory: true`
 - **2.22.2** - Skip local tool init for CLI backend (tools provided by remote server)
 - **2.14.0** - Added unified `add_message_to_session()` and `generate_response()` methods; assistant messages now added in STOP callback to handle recursive tool call scenarios
 - **2.13.0** - Added init_tools() to eliminate CLI/CLIServer duplication

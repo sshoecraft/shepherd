@@ -14,6 +14,15 @@
 // Forward declaration
 class Tools;
 
+/// @brief Flags passed from command line to frontend initialization
+struct FrontendFlags {
+    bool no_mcp = false;       // --nomcp: skip MCP initialization
+    bool no_tools = false;     // --notools: skip all tool initialization
+    bool no_rag = false;       // --norag: disable RAG entirely
+    bool mem_tools = false;    // --memtools: enable memory tools
+    bool no_memory = false;    // --nomemory: disable injection and extraction
+};
+
 /// @brief Logical colors for frontend output
 /// Maps to ANSI codes (CLI) or ncurses pairs (TUI)
 enum class FrontendColor {
@@ -93,13 +102,11 @@ public:
     /// @param no_tools If true, skip all tool initialization
     static std::unique_ptr<Frontend> create(const std::string& mode, const std::string& host, int port,
                                             Provider* cmdline_provider = nullptr,
-                                            bool no_mcp = false, bool no_tools = false,
                                             const std::string& target_provider = "",
-                                            bool no_rag = false,
-                                            bool mem_tools = false);
+                                            const FrontendFlags& flags = {});
 
     /// @brief Initialize the frontend (register tools, etc) - called by create()
-    virtual void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) {}
+    virtual void init(const FrontendFlags& flags) {}
 
 protected:
     /// @brief Common tool initialization - initializes RAG and registers all tools
@@ -107,7 +114,7 @@ protected:
     /// @param no_tools If true, skip all tool initialization
     /// @param force_local If true, force local tool init even if server_tools is set (for fallback)
     /// @param no_rag If true, skip RAG initialization and memory extraction
-    void init_tools(bool no_mcp, bool no_tools, bool force_local = false, bool no_rag = false, bool mem_tools = false);
+    void init_tools(const FrontendFlags& flags, bool force_local = false);
 
     /// @brief Initialize tools from remote server (when --server-tools and API provider)
     /// Called after provider connection when config->server_tools is true
@@ -222,4 +229,7 @@ public:
     // User identifier for multi-tenant memory isolation
     // CLI/TUI/CLI-Server: hostname:username, API Server: from OpenAI "user" field
     std::string user_id;
+
+    // Command-line flags stored for deferred use (connect_provider, fallback init)
+    FrontendFlags flags;
 };

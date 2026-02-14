@@ -146,12 +146,9 @@ TUI::~TUI() {
 }
 
 // Frontend interface - initialize tools and ncurses
-void TUI::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag, bool mem_tools_flag) {
+void TUI::init(const FrontendFlags& flags) {
     // Store flags for later use (e.g., fallback to local tools)
-    no_mcp = no_mcp_flag;
-    no_tools = no_tools_flag;
-    no_rag = no_rag_flag;
-    mem_tools = mem_tools_flag;
+    init_flags = flags;
 
     // Set up the event callback for streaming output
     // This callback is called by the backend for all streaming events
@@ -160,7 +157,7 @@ void TUI::init(bool no_mcp_flag, bool no_tools_flag, bool no_rag_flag, bool mem_
         return output_callback(type, content, tool_name, tool_call_id);
     };
 
-    init_tools(no_mcp, no_tools, false, no_rag, mem_tools);
+    init_tools(init_flags);
     init_ncurses();
     tui_debug(1, "TUI initialized");
 }
@@ -1272,18 +1269,18 @@ int TUI::run(Provider* cmdline_provider) {
     }
 
     // If server_tools mode, fetch tools from server or fall back to local
-    if (config->server_tools && !no_tools) {
+    if (config->server_tools && !init_flags.no_tools) {
         Provider* p = get_provider(current_provider);
         if (p && !p->base_url.empty()) {
             init_remote_tools(p->base_url, p->api_key);
         } else {
             callback(CallbackEvent::SYSTEM, "Warning: --server-tools requires an API provider with base_url, falling back to local tools\n", "", "");
-            init_tools(no_mcp, no_tools, true, no_rag, mem_tools);  // force_local = true
+            init_tools(init_flags, true);  // force_local = true
         }
     }
 
     // Register other providers as tools (unless tools disabled)
-    if (!no_tools) {
+    if (!init_flags.no_tools) {
         register_provider_tools(tools, current_provider);
     }
 

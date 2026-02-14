@@ -36,10 +36,10 @@ APIServer::APIServer(const std::string& host, int port, bool, bool)
 APIServer::~APIServer() {
 }
 
-void APIServer::init(bool no_mcp, bool no_tools, bool no_rag, bool mem_tools) {
+void APIServer::init(const FrontendFlags& flags) {
     // API server always initializes local tools (force_local=true)
     // even when server_tools is set, because it SERVES tools, not fetches them
-    init_tools(no_mcp, no_tools, true, no_rag, mem_tools);
+    init_tools(flags, true);
 }
 
 std::string APIServer::extract_bearer_token(const httplib::Request& req) const {
@@ -353,6 +353,7 @@ void APIServer::register_endpoints() {
             request_session.user_id = req_user_id;
 
             bool stream = request.value("stream", false);
+            bool request_memory = request.value("memory", true);
 
             // Parse tools from request (if provided)
             request_session.tools.clear();
@@ -446,8 +447,10 @@ void APIServer::register_endpoints() {
                 }
             }
 
-            // Enrich last user message with RAG context
-            enrich_with_rag_context(request_session);
+            // Enrich last user message with RAG context (unless client opted out)
+            if (request_memory) {
+                enrich_with_rag_context(request_session);
+            }
 
             // Parse parameters
             int max_tokens = 0;
@@ -585,7 +588,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -877,8 +880,10 @@ void APIServer::register_endpoints() {
                         std::string done = "data: [DONE]\n\n";
                         sink.write(done.c_str(), done.size());
 
-                        // Queue memory extraction for this exchange
-                        queue_memory_extraction_last(request_session, req_user_id);
+                        // Queue memory extraction for this exchange (unless client opted out)
+                        if (request_memory) {
+                            queue_memory_extraction_last(request_session, req_user_id);
+                        }
 
                         sink.done();
                         return false;  // Done - no more data
@@ -1087,8 +1092,10 @@ void APIServer::register_endpoints() {
 
             res.set_content(response_body.dump(), "application/json");
 
-            // Queue memory extraction for this exchange
-            queue_memory_extraction_last(request_session, req_user_id);
+            // Queue memory extraction for this exchange (unless client opted out)
+            if (request_memory) {
+                queue_memory_extraction_last(request_session, req_user_id);
+            }
 
         } catch (const ContextFullException& ctx_e) {
             dout(1) << "[api] ERROR: Context overflow - " << ctx_e.what() << std::endl;

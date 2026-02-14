@@ -175,6 +175,7 @@ static void print_usage(int, char** argv) {
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
 	printf("	--memtools		   Enable memory tools (search, set_fact, store_memory, etc.)\n");
 	printf("	--norag			   Disable RAG and memory extraction\n");
+	printf("	--nomemory		   Disable memory injection and extraction (keeps RAG available)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--system-prompt-file   Read system prompt from file\n");
 	printf("	-e, --prompt TEXT  Initial user prompt (non-interactive single query)\n");
@@ -809,6 +810,7 @@ int main(int argc, char** argv) {
 	// Flags and settings that don't map directly to config
 	bool no_mcp = false;
 	bool no_rag = false;
+	bool no_memory = false;
 	bool no_stream = false;
 	bool no_tools = false;
 	bool mem_tools = false;
@@ -886,6 +888,7 @@ int main(int argc, char** argv) {
 		{"nostream", no_argument, 0, 1041},
 		{"raw", no_argument, 0, 1043},
 		{"norag", no_argument, 0, 1061},
+		{"nomemory", no_argument, 0, 1063},
 		{"notools", no_argument, 0, 1027},
 		{"memtools", no_argument, 0, 1062},
 		{"system-prompt", required_argument, 0, 1028},
@@ -1002,6 +1005,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1061: // --norag
 				no_rag = true;
+				break;
+			case 1063: // --nomemory
+				no_memory = true;
 				break;
 			case 1027: // --notools
 				no_tools = true;
@@ -1497,9 +1503,14 @@ int main(int argc, char** argv) {
 
 		// Create and initialize frontend (loads providers, registers tools)
 		// Session is owned by frontend
+		FrontendFlags frontend_flags;
+		frontend_flags.no_mcp = no_mcp;
+		frontend_flags.no_tools = no_tools;
+		frontend_flags.no_rag = no_rag;
+		frontend_flags.mem_tools = mem_tools;
+		frontend_flags.no_memory = no_memory;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
-		                                 cmdline_provider_ptr, no_mcp, no_tools,
-		                                 override.provider, no_rag, mem_tools);
+		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 
 		// Determine which provider to pass to run()
 		// Provider connection now happens inside run() for proper UI sequencing

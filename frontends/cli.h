@@ -26,7 +26,7 @@ public:
     ~CLI();
 
     // Frontend interface
-    void init(bool no_mcp = false, bool no_tools = false, bool no_rag = false, bool mem_tools = false) override;
+    void init(const FrontendFlags& flags) override;
     int run(Provider* cmdline_provider = nullptr) override;
 
     // Output functions (handle colors based on mode)
@@ -52,10 +52,7 @@ public:
     bool interactive_mode = false;
     bool colors_enabled = false;
     bool at_line_start = true;  // For indentation tracking
-    bool no_tools = false;   // --notools flag
-    bool no_mcp = false;     // --nomcp flag (for fallback to local tools)
-    bool no_rag = false;     // --norag flag
-    bool mem_tools = false;  // --memtools flag
+    FrontendFlags init_flags;  // Stored for fallback to local tools
 
     // Unified input queue (receives from: input thread, scheduler, remote clients)
     struct QueuedInput {

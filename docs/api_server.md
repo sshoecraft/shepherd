@@ -147,9 +147,13 @@ OpenAI-compatible chat completion endpoint.
   "tools": [...],
   "stream": false,
   "max_tokens": 4096,
-  "temperature": 0.7
+  "temperature": 0.7,
+  "memory": true
 }
 ```
+
+**Shepherd-specific parameters:**
+- `memory` (bool, default `true`): Enable/disable RAG context injection and memory extraction for this request. Set to `false` to skip both injection and extraction even when the server has memory enabled.
 
 **Response:**
 ```json

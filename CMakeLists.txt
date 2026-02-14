@@ -15,7 +15,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
-option(ENABLE_LLAMACPP "Enable llama.cpp backend" ON)
+option(ENABLE_LLAMACPP "Enable llama.cpp backend" OFF)
 option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
 option(ENABLE_POSTGRESQL "Enable PostgreSQL RAG backend" OFF)
 

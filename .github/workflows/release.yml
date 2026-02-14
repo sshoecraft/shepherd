@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v2.20.0)'
+        description: 'Version tag (e.g., v2.34.1)'
         required: true
 
 jobs:
@@ -15,8 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Init replxx submodule
+        run: git submodule update --init vendor/replxx
 
       - name: Install dependencies
         run: |
@@ -25,12 +26,6 @@ jobs:
             build-essential cmake \
             libcurl4-openssl-dev libsqlite3-dev libssl-dev libncursesw5-dev \
             rpm
-
-      - name: Build llama.cpp
-        run: |
-          cd llama.cpp
-          cmake -B build -DGGML_CUDA=OFF -DBUILD_SHARED_LIBS=ON
-          cmake --build build --config Release -j$(nproc)
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
@@ -58,18 +53,13 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Init replxx submodule
+        run: git submodule update --init vendor/replxx
 
       - name: Install dependencies
         run: |
           brew install cmake curl sqlite openssl@3 ncurses
-
-      - name: Build llama.cpp
-        run: |
-          cd llama.cpp
-          cmake -B build -DGGML_METAL=ON -DBUILD_SHARED_LIBS=ON
-          cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
       - name: Configure
         run: |

@@ -67,6 +67,7 @@ void ApiBackend::parse_backend_config() {
         if (config->json.contains("presence_penalty")) presence_penalty = config->json["presence_penalty"].get<float>();
         if (config->json.contains("repeat_penalty")) repeat_penalty = config->json["repeat_penalty"].get<float>();
         if (config->json.contains("sampling")) sampling = config->json["sampling"].get<bool>();
+        if (config->json.contains("reasoning")) reasoning = config->json["reasoning"].get<std::string>();
         if (config->json.contains("stop")) {
             stop_sequences.clear();  // Clear defaults when user explicitly sets stop
             if (config->json["stop"].is_array() && !config->json["stop"].empty()) {
@@ -94,6 +95,11 @@ void ApiBackend::parse_backend_config() {
                   ", stop_sequences=" + std::to_string(stop_sequences.size()) << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Failed to parse API backend config: " + std::string(e.what()) << std::endl;
+    }
+
+    // Fall back to global config reasoning if provider didn't set one
+    if (reasoning.empty() && config && !config->reasoning.empty()) {
+        reasoning = config->reasoning;
     }
 }
 
@@ -150,16 +156,22 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
 
         // Build tool_calls_json if we have tool calls
         if (!resp.tool_calls.empty()) {
-            nlohmann::json tool_calls_array = nlohmann::json::array();
-            for (const auto& tc : resp.tool_calls) {
-                nlohmann::json tc_json;
-                tc_json["id"] = tc.tool_call_id;
-                tc_json["type"] = "function";
-                tc_json["function"]["name"] = tc.name;
-                tc_json["function"]["arguments"] = tc.raw_json;
-                tool_calls_array.push_back(tc_json);
+            // Prefer backend-native format (e.g. Gemini stores parts with thoughtSignature)
+            if (!resp.tool_calls_json.empty()) {
+                assistant_msg.tool_calls_json = resp.tool_calls_json;
+            } else {
+                // Build OpenAI-format tool_calls_json
+                nlohmann::json tool_calls_array = nlohmann::json::array();
+                for (const auto& tc : resp.tool_calls) {
+                    nlohmann::json tc_json;
+                    tc_json["id"] = tc.tool_call_id;
+                    tc_json["type"] = "function";
+                    tc_json["function"]["name"] = tc.name;
+                    tc_json["function"]["arguments"] = tc.raw_json;
+                    tool_calls_array.push_back(tc_json);
+                }
+                assistant_msg.tool_calls_json = tool_calls_array.dump();
             }
-            assistant_msg.tool_calls_json = tool_calls_array.dump();
         }
 
         session.messages.push_back(assistant_msg);

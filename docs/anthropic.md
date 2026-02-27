@@ -63,6 +63,7 @@ Provider configuration options:
 - `model` - Model name (e.g., "claude-sonnet-4-5")
 - `api_base` - Custom API endpoint (optional)
 - `temperature`, `top_p`, `top_k` - Sampling parameters
+- `reasoning` - Reasoning level (off/low/medium/high). Maps to extended thinking with budget_tokens: low=1024, medium=8192, high=32000
 
 ## API Headers
 
@@ -78,3 +79,4 @@ Required headers for Anthropic API:
 - v2.5.0: Added streaming support in add_message()
 - v2.6.0: Added tool calling support
 - v2.15.0: Added streaming generate_from_session() for API server mode
+- v2.35.0: Added `--reasoning` support, maps to extended thinking with budget_tokens

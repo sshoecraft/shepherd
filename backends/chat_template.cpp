@@ -418,7 +418,8 @@ std::string MinjaTemplate::get_generation_prompt() const {
 
     // Thinking suppression: inject empty think block to skip thinking phase
     // Model sees <think>\n\n</think> and believes it already "thought", continues from there
-    if (config && !config->thinking && template_text.find("</think>") != std::string::npos) {
+    bool reasoning_off = !config || config->reasoning.empty() || config->reasoning == "off";
+    if (reasoning_off && template_text.find("</think>") != std::string::npos) {
         gen_prompt += "<think>\n\n</think>\n\n";
         dout(1) << "Injected empty <think> block into generation prompt to suppress thinking" << std::endl;
     }
@@ -590,21 +591,18 @@ std::string MinjaTemplate::render_via_minja(
     context->set("eos_token", minja::Value(eos_token));
     context->set("add_generation_prompt", minja::Value(add_generation_prompt));
 
-    // Pass thinking parameters to template - different models use different names
+    // Thinking template variables - controlled by reasoning level, not thinking display flag
     // Qwen3 uses "enable_thinking", DeepSeek uses "thinking"
-    bool thinking_enabled = config ? config->thinking : true;
-    context->set("enable_thinking", minja::Value(thinking_enabled));
-    context->set("thinking", minja::Value(thinking_enabled));
+    bool reasoning_enabled = config && !config->reasoning.empty() && config->reasoning != "off";
+    context->set("enable_thinking", minja::Value(reasoning_enabled));
+    context->set("thinking", minja::Value(reasoning_enabled));
 
-    // GPT-OSS reasoning_effort: high when thinking enabled, model default (medium) otherwise
-    // From: https://huggingface.co/blog/welcome-openai-gpt-oss#system-and-developer-messages
-    // Only set reasoning_effort when thinking is explicitly enabled
-    if (thinking_enabled) {
-        context->set("reasoning_effort", minja::Value("high"));
-        dout(1) << "GPT-OSS reasoning_effort set to: high" << std::endl;
+    // GPT-OSS reasoning_effort: use reasoning level directly
+    if (reasoning_enabled) {
+        context->set("reasoning_effort", minja::Value(config->reasoning));
+        dout(1) << "reasoning_effort set to: " << config->reasoning << std::endl;
     } else {
-        // Don't set reasoning_effort - let model use its default (medium)
-        dout(1) << "GPT-OSS reasoning_effort not set, using model default (medium)" << std::endl;
+        dout(1) << "reasoning_effort not set (reasoning off)" << std::endl;
     }
 
     // Add tools to context (always set, even if empty - some templates require it)
@@ -634,10 +632,11 @@ std::string MinjaTemplate::render_via_minja(
 
     // Thinking suppression: inject end marker to skip thinking phase
     // If template references </think>, this model supports thinking mode
+    bool reasoning_off2 = !config || config->reasoning.empty() || config->reasoning == "off";
     dout(1) << "Thinking check: add_gen=" << add_generation_prompt
             << ", config=" << (config ? "yes" : "null")
-            << ", thinking=" << (config ? (config->thinking ? "true" : "false") : "n/a") << std::endl;
-    if (add_generation_prompt && config && !config->thinking) {
+            << ", reasoning=" << (config ? config->reasoning : "n/a") << std::endl;
+    if (add_generation_prompt && reasoning_off2) {
         if (template_text.find("</think>") != std::string::npos) {
             // Append </think> to signal "thinking done, respond directly"
             rendered += "</think>";

@@ -55,12 +55,13 @@ public:
     std::string cache_type = "f16"; // KV cache type: f16, f32, q8_0, q4_0
 
     // Sampling parameters (shared by most backends)
-    float temperature = 0.7f;
-    float top_p = 1.0f;
-    int top_k = 40;
-    float repeat_penalty = 1.1f;
-    float frequency_penalty = 0.0f;
-    float presence_penalty = 0.0f;
+    // Defaults are -1 (not set) — let the API provider use its own defaults
+    float temperature = -1.0f;
+    float top_p = -1.0f;
+    int top_k = 0;
+    float repeat_penalty = -1.0f;
+    float frequency_penalty = -1.0f;
+    float presence_penalty = -1.0f;
     int max_tokens = 0;             // 0=auto
     std::vector<std::string> stop_sequences;
 
@@ -87,6 +88,9 @@ public:
 
     // Sampling mode: when false, don't send sampling parameters to backend
     bool sampling = true;
+
+    // Reasoning level: off, low, medium, high (empty = use global config)
+    std::string reasoning;
 
     // Memory features: when true, enables RAG context injection and memory extraction
     bool memory = false;

@@ -275,6 +275,7 @@ std::map<std::string, std::any> GrepTool::execute(const std::map<std::string, st
 
     std::string pattern = tool_utils::get_string(args, "pattern");
     std::string path = tool_utils::get_string(args, "path", ".");
+    if (path.empty()) path = ".";
     std::string output_mode = tool_utils::get_string(args, "output_mode", "files_with_matches");
     bool case_insensitive = tool_utils::get_bool(args, "case_insensitive", false);
     bool line_numbers = tool_utils::get_bool(args, "line_numbers", false);

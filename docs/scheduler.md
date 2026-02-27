@@ -167,3 +167,4 @@ The model can manage schedules using these tools:
 - **2.7.0** - Replaced worker thread with SIGALRM-based timer
 - **2.22.0** - Implemented prompt injection via callback, added scheduler management tools, CLI Server support
 - **2.26.0** - Named schedulers: schedules moved from standalone `schedule.json` into `config.json` under `schedulers[]` array. Added `--scheduler <name>` flag for per-instance schedule isolation. Auto-migration of legacy `schedule.json`. Read-only mode guards for Key Vault config.
+- **2.34.2** - Fixed schedule list truncation: replaced 256-byte snprintf buffer with std::string concatenation so long prompts display fully.

@@ -94,6 +94,7 @@ public:
     int max_tokens;       // Max generation tokens: -1=max, 0=auto, >0=explicit
     bool streaming;
     bool thinking;        // Show thinking/reasoning blocks in output
+    std::string reasoning;  // Reasoning level: off, low, medium, high (empty = off)
     bool stats;           // Show performance stats (prefill/decode speed, KV cache)
     bool auto_provider;   // Auto-switch to next provider on connection failure
     bool tui;             // Enable TUI mode (boxed input, status line)

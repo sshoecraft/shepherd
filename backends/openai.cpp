@@ -95,6 +95,12 @@ OpenAIBackend::OpenAIBackend(size_t context_size, Session& session, EventCallbac
         dout(1) << "Auto-enabled openai_strict for Azure endpoint" << std::endl;
     }
 
+    // Auto-detect OpenAI API and enable strict mode (rejects top_k, repetition_penalty)
+    if (!openai_strict && api_endpoint.find("openai.com") != std::string::npos) {
+        openai_strict = true;
+        dout(1) << "Auto-enabled openai_strict for OpenAI API endpoint" << std::endl;
+    }
+
     // Validate API key (only required for actual OpenAI API, not OAuth-based endpoints)
     bool requires_api_key = (api_endpoint.find("api.openai.com") != std::string::npos) ||
                             (api_endpoint.find("openai.azure.com") != std::string::npos);
@@ -676,31 +682,35 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
 
     // Add sampling parameters (only if sampling is enabled)
     if (sampling) {
-        // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
-        // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-        if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
-            request["temperature"] = temperature;
+        // Only send sampling parameters that were explicitly configured (>= 0)
+        if (temperature >= 0.0f) {
+            request["temperature"] = round2(temperature);
         }
-        if (!openai_strict || (top_p < 0.99f)) {
-            request["top_p"] = top_p;
+        if (top_p >= 0.0f) {
+            request["top_p"] = round2(top_p);
         }
-        if (!openai_strict || frequency_penalty != 0.0f) {
-            request["frequency_penalty"] = frequency_penalty;
+        if (frequency_penalty >= 0.0f) {
+            request["frequency_penalty"] = round2(frequency_penalty);
         }
-        if (!openai_strict || presence_penalty != 0.0f) {
-            request["presence_penalty"] = presence_penalty;
+        if (presence_penalty >= 0.0f) {
+            request["presence_penalty"] = round2(presence_penalty);
         }
 
         // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
-        // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
         if (!openai_strict) {
             if (top_k > 0) {
                 request["top_k"] = top_k;
             }
-            if (repeat_penalty != 0.0f) {
-                request["repetition_penalty"] = repeat_penalty;
+            if (repeat_penalty >= 0.0f) {
+                request["repetition_penalty"] = round2(repeat_penalty);
             }
         }
+    }
+
+    // Reasoning effort (OpenAI o1/o3/GPT-5: "low", "medium", "high")
+    if (!reasoning.empty() && reasoning != "off") {
+        request["reasoning_effort"] = reasoning;
+        dout(1) << "Added reasoning_effort: " + reasoning << std::endl;
     }
 
     // Add stop sequences if configured
@@ -822,31 +832,35 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
 
     // Add sampling parameters (only if sampling is enabled)
     if (sampling) {
-        // Only send sampling parameters if non-default (reasoning models like o1/gpt-5.x reject them)
-        // OpenAI defaults: temperature=1.0, top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0
-        if (!openai_strict || (temperature >= 0.01f && temperature <= 1.99f && temperature != 1.0f)) {
-            request["temperature"] = temperature;
+        // Only send sampling parameters that were explicitly configured (>= 0)
+        if (temperature >= 0.0f) {
+            request["temperature"] = round2(temperature);
         }
-        if (!openai_strict || (top_p < 0.99f)) {
-            request["top_p"] = top_p;
+        if (top_p >= 0.0f) {
+            request["top_p"] = round2(top_p);
         }
-        if (!openai_strict || frequency_penalty != 0.0f) {
-            request["frequency_penalty"] = frequency_penalty;
+        if (frequency_penalty >= 0.0f) {
+            request["frequency_penalty"] = round2(frequency_penalty);
         }
-        if (!openai_strict || presence_penalty != 0.0f) {
-            request["presence_penalty"] = presence_penalty;
+        if (presence_penalty >= 0.0f) {
+            request["presence_penalty"] = round2(presence_penalty);
         }
 
         // Only send non-standard parameters to non-strict endpoints (Shepherd servers, vLLM, etc.)
-        // OpenAI/Azure rejects unknown parameters like top_k and repetition_penalty
         if (!openai_strict) {
             if (top_k > 0) {
                 request["top_k"] = top_k;
             }
-            if (repeat_penalty != 0.0f) {
-                request["repetition_penalty"] = repeat_penalty;
+            if (repeat_penalty >= 0.0f) {
+                request["repetition_penalty"] = round2(repeat_penalty);
             }
         }
+    }
+
+    // Reasoning effort (OpenAI o1/o3/GPT-5: "low", "medium", "high")
+    if (!reasoning.empty() && reasoning != "off") {
+        request["reasoning_effort"] = reasoning;
+        dout(1) << "Added reasoning_effort: " + reasoning << std::endl;
     }
 
     // Add stop sequences if configured
@@ -1163,6 +1177,10 @@ size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {
                                 return context_size;
                             }
                         }
+
+                        // Model matched but no context size field detected
+                        dout(1) << "Model found but no context size field detected" << std::endl;
+                        return 0;
                     }
                 }
 

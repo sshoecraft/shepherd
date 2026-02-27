@@ -12,6 +12,10 @@
 #include <mutex>
 #include <thread>
 #include <memory>
+#include <cmath>
+
+// Round float to 2 decimal places for clean JSON serialization (avoids 0.699999988079071)
+inline double round2(float v) { return std::round(v * 100.0) / 100.0; }
 
 // Forward declaration
 class SharedOAuthCache;
@@ -24,16 +28,20 @@ public:
     long connect_timeout_seconds = 30;
 
     // Sampling parameters (common across API backends)
-    float temperature = 0.7f;
-    float top_p = 1.0f;
+    // Defaults are -1 (not set) — only sent in requests when explicitly configured
+    float temperature = -1.0f;
+    float top_p = -1.0f;
     int top_k = 0;  // 0 = disabled (backend default)
-    float frequency_penalty = 0.5f;  // OpenAI, TensorRT-LLM
-    float presence_penalty = 0.0f;   // OpenAI
-    float repeat_penalty = 1.2f;     // Ollama, TensorRT-LLM (as repetition_penalty)
+    float frequency_penalty = -1.0f;
+    float presence_penalty = -1.0f;
+    float repeat_penalty = -1.0f;
     std::vector<std::string> stop_sequences;  // Stop generation at these sequences
 
     // Sampling mode: when false, don't send sampling parameters in requests
     bool sampling = true;
+
+    // Reasoning level: off, low, medium, high (empty = off)
+    std::string reasoning;
 
     ApiBackend(size_t max_context_tokens, Session& session, EventCallback callback);
     virtual ~ApiBackend() = default;

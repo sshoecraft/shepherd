@@ -338,6 +338,236 @@ std::vector<ParameterDef> QueryJSONTool::get_parameters_schema() const {
     };
 }
 
+// Parse a filter expression like @.symbol == 'CTCLE' or @.price > 10
+// Returns true if the element matches the filter
+static bool evaluate_filter(const nlohmann::json& element, const std::string& filter_expr) {
+    // Parse: @.field op value
+    size_t pos = 0;
+
+    // Skip @
+    if (pos < filter_expr.size() && filter_expr[pos] == '@') pos++;
+    // Skip .
+    if (pos < filter_expr.size() && filter_expr[pos] == '.') pos++;
+
+    // Read field name
+    size_t field_start = pos;
+    while (pos < filter_expr.size() && filter_expr[pos] != ' ' &&
+           filter_expr[pos] != '=' && filter_expr[pos] != '!' &&
+           filter_expr[pos] != '<' && filter_expr[pos] != '>') {
+        pos++;
+    }
+    std::string field = filter_expr.substr(field_start, pos - field_start);
+
+    // Skip whitespace
+    while (pos < filter_expr.size() && filter_expr[pos] == ' ') pos++;
+
+    // Read operator
+    std::string op;
+    while (pos < filter_expr.size() && filter_expr[pos] != ' ' &&
+           filter_expr[pos] != '\'' && filter_expr[pos] != '"' &&
+           !(filter_expr[pos] >= '0' && filter_expr[pos] <= '9') &&
+           filter_expr[pos] != '-') {
+        op += filter_expr[pos++];
+    }
+
+    // Skip whitespace
+    while (pos < filter_expr.size() && filter_expr[pos] == ' ') pos++;
+
+    // Read value — string (quoted) or number
+    std::string value_str;
+    bool is_string_value = false;
+    if (pos < filter_expr.size() && (filter_expr[pos] == '\'' || filter_expr[pos] == '"')) {
+        char quote = filter_expr[pos++];
+        is_string_value = true;
+        while (pos < filter_expr.size() && filter_expr[pos] != quote) {
+            value_str += filter_expr[pos++];
+        }
+    } else {
+        while (pos < filter_expr.size() && filter_expr[pos] != ' ' && filter_expr[pos] != ')') {
+            value_str += filter_expr[pos++];
+        }
+    }
+
+    // Check if element has the field
+    if (!element.is_object() || !element.contains(field)) return false;
+
+    const auto& field_val = element[field];
+
+    if (is_string_value) {
+        if (!field_val.is_string()) return false;
+        std::string actual = field_val.get<std::string>();
+        if (op == "==" || op == "=") return actual == value_str;
+        if (op == "!=" || op == "!==") return actual != value_str;
+        return false;
+    }
+
+    // Numeric comparison
+    double cmp_val = 0;
+    try { cmp_val = std::stod(value_str); } catch (...) { return false; }
+
+    double actual_num = 0;
+    if (field_val.is_number()) {
+        actual_num = field_val.get<double>();
+    } else {
+        return false;
+    }
+
+    if (op == "==" || op == "=") return actual_num == cmp_val;
+    if (op == "!=" || op == "!==") return actual_num != cmp_val;
+    if (op == ">") return actual_num > cmp_val;
+    if (op == ">=") return actual_num >= cmp_val;
+    if (op == "<") return actual_num < cmp_val;
+    if (op == "<=") return actual_num <= cmp_val;
+    return false;
+}
+
+// Traverse JSON with a JSONPath expression
+// Supports: $, .key, [n], [*], [?(@.field op value)]
+static nlohmann::json jsonpath_query(const nlohmann::json& root, const std::string& path) {
+    // Collect results as an array (JSONPath always returns a node set)
+    std::vector<nlohmann::json> current = {root};
+
+    size_t pos = 0;
+    // Skip leading $
+    if (pos < path.size() && path[pos] == '$') pos++;
+
+    while (pos < path.size()) {
+        // Skip dot separator
+        if (path[pos] == '.') {
+            pos++;
+            if (pos >= path.size()) break;
+        }
+
+        if (path[pos] == '[') {
+            pos++; // skip [
+            // Filter expression?
+            if (pos < path.size() && path[pos] == '?') {
+                pos++; // skip ?
+                // Skip (
+                if (pos < path.size() && path[pos] == '(') pos++;
+
+                // Read until matching )
+                int depth = 1;
+                std::string filter_expr;
+                while (pos < path.size() && depth > 0) {
+                    if (path[pos] == '(') depth++;
+                    else if (path[pos] == ')') { depth--; if (depth == 0) { pos++; break; } }
+                    filter_expr += path[pos++];
+                }
+                // Skip ]
+                if (pos < path.size() && path[pos] == ']') pos++;
+
+                // Apply filter to all current array elements
+                std::vector<nlohmann::json> filtered;
+                for (const auto& node : current) {
+                    if (node.is_array()) {
+                        for (const auto& elem : node) {
+                            if (evaluate_filter(elem, filter_expr)) {
+                                filtered.push_back(elem);
+                            }
+                        }
+                    }
+                }
+                current = filtered;
+
+            } else if (pos < path.size() && path[pos] == '*') {
+                // [*] — all elements
+                pos++; // skip *
+                if (pos < path.size() && path[pos] == ']') pos++;
+
+                std::vector<nlohmann::json> expanded;
+                for (const auto& node : current) {
+                    if (node.is_array()) {
+                        for (const auto& elem : node) {
+                            expanded.push_back(elem);
+                        }
+                    } else if (node.is_object()) {
+                        for (auto& [k, v] : node.items()) {
+                            expanded.push_back(v);
+                        }
+                    }
+                }
+                current = expanded;
+
+            } else {
+                // Numeric index or quoted key
+                std::string index_str;
+                bool is_quoted = false;
+                if (pos < path.size() && (path[pos] == '\'' || path[pos] == '"')) {
+                    char quote = path[pos++];
+                    is_quoted = true;
+                    while (pos < path.size() && path[pos] != quote) {
+                        index_str += path[pos++];
+                    }
+                    if (pos < path.size()) pos++; // skip closing quote
+                } else {
+                    while (pos < path.size() && path[pos] != ']') {
+                        index_str += path[pos++];
+                    }
+                }
+                if (pos < path.size() && path[pos] == ']') pos++;
+
+                std::vector<nlohmann::json> next;
+                if (is_quoted) {
+                    // Object key access
+                    for (const auto& node : current) {
+                        if (node.is_object() && node.contains(index_str)) {
+                            next.push_back(node[index_str]);
+                        }
+                    }
+                } else {
+                    // Numeric index
+                    try {
+                        int idx = std::stoi(index_str);
+                        for (const auto& node : current) {
+                            if (node.is_array()) {
+                                if (idx < 0) idx = (int)node.size() + idx;
+                                if (idx >= 0 && idx < (int)node.size()) {
+                                    next.push_back(node[idx]);
+                                }
+                            }
+                        }
+                    } catch (...) {
+                        // Try as object key
+                        for (const auto& node : current) {
+                            if (node.is_object() && node.contains(index_str)) {
+                                next.push_back(node[index_str]);
+                            }
+                        }
+                    }
+                }
+                current = next;
+            }
+
+        } else {
+            // Dot notation: read key name
+            size_t key_start = pos;
+            while (pos < path.size() && path[pos] != '.' && path[pos] != '[') {
+                pos++;
+            }
+            std::string key = path.substr(key_start, pos - key_start);
+            if (key.empty()) continue;
+
+            std::vector<nlohmann::json> next;
+            for (const auto& node : current) {
+                if (node.is_object() && node.contains(key)) {
+                    next.push_back(node[key]);
+                }
+            }
+            current = next;
+        }
+    }
+
+    // Return single value or array of results
+    if (current.empty()) {
+        return nlohmann::json(nullptr);
+    } else if (current.size() == 1) {
+        return current[0];
+    } else {
+        return nlohmann::json(current);
+    }
+}
+
 std::map<std::string, std::any> QueryJSONTool::execute(const std::map<std::string, std::any>& args) {
     std::map<std::string, std::any> result;
 
@@ -357,18 +587,27 @@ std::map<std::string, std::any> QueryJSONTool::execute(const std::map<std::strin
     }
 
     try {
-        SimpleJsonParser parser;
-        JsonValue parsed = parser.parse(json_str);
+        auto parsed = nlohmann::json::parse(json_str);
+        auto query_result = jsonpath_query(parsed, path);
 
-        // Simple path querying (basic implementation)
-        // For now, just return that the query was processed
-        result["result"] = std::string("Query processed for path: ") + path;
-        result["content"] = std::string("Query processed for path: ") + path;
-        result["summary"] = std::string("Found value at path");
+        std::string output = query_result.dump(2);
+        result["content"] = output;
         result["success"] = true;
+
+        // Build summary
+        if (query_result.is_null()) {
+            result["summary"] = std::string("No matches found");
+        } else if (query_result.is_array()) {
+            result["summary"] = std::string("Found ") + std::to_string(query_result.size()) + " result(s)";
+        } else {
+            result["summary"] = std::string("Found value at path");
+        }
 
         dout(1) << "QueryJSON: Processed query for path: " << path << std::endl;
 
+    } catch (const nlohmann::json::exception& e) {
+        result["error"] = std::string("error querying JSON: ") + e.what();
+        result["success"] = false;
     } catch (const std::exception& e) {
         result["error"] = std::string("error querying JSON: ") + e.what();
         result["success"] = false;

@@ -22,7 +22,7 @@ using json = nlohmann::json;
 // ============================================================================
 
 bool Provider::is_api() const {
-    return type == "openai" || type == "anthropic" || type == "gemini" || type == "ollama";
+    return type == "openai" || type == "anthropic" || type == "gemini" || type == "ollama" || type == "grok";
 }
 
 std::string Provider::get_providers_dir() {
@@ -101,13 +101,13 @@ Provider Provider::from_json(const json& j) {
     p.n_threads = j.value("n_threads", 0);
     p.cache_type = j.value("cache_type", "f16");
 
-    // Sampling parameters
-    p.temperature = j.value("temperature", 0.7f);
-    p.top_p = j.value("top_p", 1.0f);
-    p.top_k = j.value("top_k", 40);
-    p.repeat_penalty = j.value("repeat_penalty", 1.1f);
-    p.frequency_penalty = j.value("frequency_penalty", 0.0f);
-    p.presence_penalty = j.value("presence_penalty", 0.0f);
+    // Sampling parameters (-1 = not set, let API use its own defaults)
+    p.temperature = j.value("temperature", -1.0f);
+    p.top_p = j.value("top_p", -1.0f);
+    p.top_k = j.value("top_k", 0);
+    p.repeat_penalty = j.value("repeat_penalty", -1.0f);
+    p.frequency_penalty = j.value("frequency_penalty", -1.0f);
+    p.presence_penalty = j.value("presence_penalty", -1.0f);
     p.max_tokens = j.value("max_tokens", 0);
 
     if (j.contains("stop_sequences")) {
@@ -135,6 +135,7 @@ Provider Provider::from_json(const json& j) {
     p.max_tokens_param_name = j.value("max_tokens_param_name", "");
     p.openai_strict = j.value("openai_strict", false);
     p.sampling = j.value("sampling", true);
+    p.reasoning = j.value("reasoning", "");
     p.memory = j.value("memory", false);
 
     // Ollama
@@ -221,15 +222,18 @@ json Provider::to_json() const {
         if (num_predict != -1) j["num_predict"] = num_predict;
     }
 
-    // Sampling (for backends that use it)
-    j["temperature"] = temperature;
-    j["top_p"] = top_p;
-    j["top_k"] = top_k;
-    j["repeat_penalty"] = repeat_penalty;
-    if (frequency_penalty != 0.0f) j["frequency_penalty"] = frequency_penalty;
-    if (presence_penalty != 0.0f) j["presence_penalty"] = presence_penalty;
+    // Sampling (only write explicitly configured values)
+    if (temperature >= 0.0f) j["temperature"] = temperature;
+    if (top_p >= 0.0f) j["top_p"] = top_p;
+    if (top_k > 0) j["top_k"] = top_k;
+    if (repeat_penalty >= 0.0f) j["repeat_penalty"] = repeat_penalty;
+    if (frequency_penalty >= 0.0f) j["frequency_penalty"] = frequency_penalty;
+    if (presence_penalty >= 0.0f) j["presence_penalty"] = presence_penalty;
     if (max_tokens > 0) j["max_tokens"] = max_tokens;
     if (!stop_sequences.empty()) j["stop_sequences"] = stop_sequences;
+
+    // Reasoning level
+    if (!reasoning.empty()) j["reasoning"] = reasoning;
 
     // Memory features
     if (memory) j["memory"] = memory;
@@ -334,13 +338,19 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
     if (is_api()) {
         config->key = api_key;
         config->api_base = base_url;
-        // Only set sampling params if not overridden from command line
-        if (config->temperature_override < 0) config->json["temperature"] = temperature;
-        if (config->top_p_override < 0) config->json["top_p"] = top_p;
-        if (config->top_k_override < 0 && top_k > 0) config->json["top_k"] = top_k;
-        if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
-        if (config->frequency_penalty_override < 0) config->json["frequency_penalty"] = frequency_penalty;
-        if (config->presence_penalty_override < 0) config->json["presence_penalty"] = presence_penalty;
+        // Only set sampling params if explicitly configured and not overridden from CLI
+        if (config->temperature_override >= 0) config->json["temperature"] = config->temperature_override;
+        else if (temperature >= 0.0f) config->json["temperature"] = temperature;
+        if (config->top_p_override >= 0) config->json["top_p"] = config->top_p_override;
+        else if (top_p >= 0.0f) config->json["top_p"] = top_p;
+        if (config->top_k_override >= 0) config->json["top_k"] = config->top_k_override;
+        else if (top_k > 0) config->json["top_k"] = top_k;
+        if (config->repeat_penalty_override >= 0) config->json["repeat_penalty"] = config->repeat_penalty_override;
+        else if (repeat_penalty >= 0.0f) config->json["repeat_penalty"] = repeat_penalty;
+        if (config->frequency_penalty_override >= 0) config->json["frequency_penalty"] = config->frequency_penalty_override;
+        else if (frequency_penalty >= 0.0f) config->json["frequency_penalty"] = frequency_penalty;
+        if (config->presence_penalty_override >= 0) config->json["presence_penalty"] = config->presence_penalty_override;
+        else if (presence_penalty >= 0.0f) config->json["presence_penalty"] = presence_penalty;
         if (max_tokens > 0) config->json["max_tokens"] = max_tokens;
         config->json["ssl_verify"] = ssl_verify;
         if (!ca_bundle_path.empty()) config->json["ca_bundle_path"] = ca_bundle_path;
@@ -353,15 +363,20 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         if (!max_tokens_param_name.empty()) config->json["max_tokens_param_name"] = max_tokens_param_name;
         if (openai_strict) config->json["openai_strict"] = openai_strict;
         config->json["sampling"] = sampling;
+        if (!reasoning.empty()) config->json["reasoning"] = reasoning;
     } else if (type == "llamacpp") {
         config->model_path = model_path;
         config->json["tp"] = tp;
         config->json["pp"] = pp;
         config->json["gpu_layers"] = gpu_layers;
-        if (config->temperature_override < 0) config->json["temperature"] = temperature;
-        if (config->top_p_override < 0) config->json["top_p"] = top_p;
-        if (config->top_k_override < 0) config->json["top_k"] = top_k;
-        if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
+        if (config->temperature_override >= 0) config->json["temperature"] = config->temperature_override;
+        else if (temperature >= 0.0f) config->json["temperature"] = temperature;
+        if (config->top_p_override >= 0) config->json["top_p"] = config->top_p_override;
+        else if (top_p >= 0.0f) config->json["top_p"] = top_p;
+        if (config->top_k_override >= 0) config->json["top_k"] = config->top_k_override;
+        else if (top_k > 0) config->json["top_k"] = top_k;
+        if (config->repeat_penalty_override >= 0) config->json["repeat_penalty"] = config->repeat_penalty_override;
+        else if (repeat_penalty >= 0.0f) config->json["repeat_penalty"] = repeat_penalty;
         config->json["n_batch"] = n_batch;
         config->json["ubatch"] = ubatch;
         config->json["cache_type"] = cache_type;
@@ -371,9 +386,12 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         config->json["tp"] = tp;
         config->json["pp"] = pp;
         config->json["gpu_id"] = gpu_id;
-        if (config->temperature_override < 0) config->json["temperature"] = temperature;
-        if (config->top_p_override < 0) config->json["top_p"] = top_p;
-        if (config->top_k_override < 0) config->json["top_k"] = top_k;
+        if (config->temperature_override >= 0) config->json["temperature"] = config->temperature_override;
+        else if (temperature >= 0.0f) config->json["temperature"] = temperature;
+        if (config->top_p_override >= 0) config->json["top_p"] = config->top_p_override;
+        else if (top_p >= 0.0f) config->json["top_p"] = top_p;
+        if (config->top_k_override >= 0) config->json["top_k"] = config->top_k_override;
+        else if (top_k > 0) config->json["top_k"] = top_k;
         if (config->repeat_penalty_override < 0) config->json["repeat_penalty"] = repeat_penalty;
         if (config->frequency_penalty_override < 0) config->json["frequency_penalty"] = frequency_penalty;
         if (config->presence_penalty_override < 0) config->json["presence_penalty"] = presence_penalty;
@@ -647,6 +665,7 @@ int handle_provider_args(const std::vector<std::string>& args,
 			callback("api_version = " + (prov->api_version.empty() ? "(not set)" : prov->api_version) + "\n");
 			callback("max_tokens_param_name = " + (prov->max_tokens_param_name.empty() ? "(auto)" : prov->max_tokens_param_name) + "\n");
 			callback("openai_strict = " + std::string(prov->openai_strict ? "true" : "false") + "\n");
+			callback("reasoning = " + (prov->reasoning.empty() ? "(not set)" : prov->reasoning) + "\n");
 			callback("ssl_verify = " + std::string(prov->ssl_verify ? "true" : "false") + "\n");
 			callback("ca_bundle_path = " + (prov->ca_bundle_path.empty() ? "(not set)" : prov->ca_bundle_path) + "\n");
 		}
@@ -921,6 +940,8 @@ int handle_provider_args(const std::vector<std::string>& args,
 				prov->ssl_verify = (value == "true" || value == "1" || value == "yes");
 			} else if (field == "ca_bundle_path") {
 				prov->ca_bundle_path = value;
+			} else if (field == "reasoning") {
+				prov->reasoning = value;
 			}
 			// Local backend fields
 			else if (field == "model_path") {

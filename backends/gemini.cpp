@@ -352,18 +352,17 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
                 content["parts"] = json::array({{{"text", msg.content}}});
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
-            // Tool results in Gemini format
+            // Tool results in Gemini format — response must be structured JSON
             content["role"] = "user";
-            content["parts"] = json::array({
-                {
-                    {"functionResponse", {
-                        {"name", msg.tool_name},
-                        {"response", {
-                            {"content", msg.content}
-                        }}
-                    }}
-                }
-            });
+            json func_response;
+            func_response["name"] = msg.tool_name;
+            // Try to parse tool output as JSON; fall back to {"result": "text"}
+            try {
+                func_response["response"] = json::parse(msg.content);
+            } catch (...) {
+                func_response["response"] = {{"result", msg.content}};
+            }
+            content["parts"] = json::array({{{"functionResponse", func_response}}});
         }
 
         if (!content.empty()) {
@@ -405,12 +404,33 @@ nlohmann::json GeminiBackend::build_request_from_session(const Session& session,
     if (sampling) {
         // Gemini uses generationConfig object
         json generation_config;
-        generation_config["temperature"] = temperature;
-        generation_config["topP"] = top_p;
+        generation_config["temperature"] = round2(temperature);
+        generation_config["topP"] = round2(top_p);
         if (top_k > 0) {
             generation_config["topK"] = top_k;
         }
         request["generationConfig"] = generation_config;
+    }
+
+    // Thinking config (Gemini: thinkingConfig inside generationConfig)
+    // Gemini 2.5 uses thinkingBudget (token count), Gemini 3.x uses thinkingLevel (string)
+    if (!reasoning.empty() && reasoning != "off") {
+        json thinking_config;
+        bool is_2_5 = (model_name.find("2.5") != std::string::npos);
+        if (is_2_5) {
+            int budget = 0;
+            if (reasoning == "low") budget = 4096;
+            else if (reasoning == "medium") budget = 12288;
+            else if (reasoning == "high") budget = 24576;
+            thinking_config["thinkingBudget"] = budget;
+        } else {
+            thinking_config["thinkingLevel"] = reasoning;
+        }
+        if (!request.contains("generationConfig")) {
+            request["generationConfig"] = json::object();
+        }
+        request["generationConfig"]["thinkingConfig"] = thinking_config;
+        dout(1) << "Added thinkingConfig: " + thinking_config.dump() << std::endl;
     }
 
     return request;
@@ -458,7 +478,33 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
             // Check if this message has functionCall parts (stored as JSON)
             if (!msg.tool_calls_json.empty()) {
                 try {
-                    jcontent["parts"] = json::parse(msg.tool_calls_json);
+                    json tool_calls = json::parse(msg.tool_calls_json);
+                    // Check if it's OpenAI format (array with "function" objects)
+                    // vs Gemini format (array with "functionCall" parts)
+                    if (tool_calls.is_array() && !tool_calls.empty() &&
+                        tool_calls[0].contains("function")) {
+                        // Convert OpenAI format to Gemini format
+                        json parts = json::array();
+                        for (const auto& tc : tool_calls) {
+                            if (tc.contains("function")) {
+                                json func_call;
+                                func_call["functionCall"]["name"] = tc["function"]["name"];
+                                if (tc["function"].contains("arguments")) {
+                                    std::string args_str = tc["function"]["arguments"].get<std::string>();
+                                    try {
+                                        func_call["functionCall"]["args"] = json::parse(args_str);
+                                    } catch (...) {
+                                        func_call["functionCall"]["args"] = json::object();
+                                    }
+                                }
+                                parts.push_back(func_call);
+                            }
+                        }
+                        jcontent["parts"] = parts;
+                    } else {
+                        // Already in Gemini format
+                        jcontent["parts"] = tool_calls;
+                    }
                 } catch (const std::exception& e) {
                     dout(1) << std::string("WARNING: ") +"Failed to parse stored parts: " + std::string(e.what()) << std::endl;
                     jcontent["parts"] = json::array({{{"text", msg.content}}});
@@ -468,16 +514,14 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
             }
         } else if (msg.role == Message::TOOL_RESPONSE) {
             jcontent["role"] = "user";
-            jcontent["parts"] = json::array({
-                {
-                    {"functionResponse", {
-                        {"name", msg.tool_name},
-                        {"response", {
-                            {"content", msg.content}
-                        }}
-                    }}
-                }
-            });
+            json func_response;
+            func_response["name"] = msg.tool_name;
+            try {
+                func_response["response"] = json::parse(msg.content);
+            } catch (...) {
+                func_response["response"] = {{"result", msg.content}};
+            }
+            jcontent["parts"] = json::array({{{"functionResponse", func_response}}});
         }
 
         if (!jcontent.empty()) {
@@ -492,16 +536,14 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
         new_content["parts"] = json::array({{{"text", content}}});
     } else if (role == Message::TOOL_RESPONSE) {
         new_content["role"] = "user";
-        new_content["parts"] = json::array({
-            {
-                {"functionResponse", {
-                    {"name", tool_name},
-                    {"response", {
-                        {"content", content}
-                    }}
-                }}
-            }
-        });
+        json func_response;
+        func_response["name"] = tool_name;
+        try {
+            func_response["response"] = json::parse(content);
+        } catch (...) {
+            func_response["response"] = {{"result", content}};
+        }
+        new_content["parts"] = json::array({{{"functionResponse", func_response}}});
     }
 
     if (!new_content.empty()) {
@@ -542,12 +584,33 @@ nlohmann::json GeminiBackend::build_request(const Session& session,
     if (sampling) {
         // Gemini uses generationConfig object
         json generation_config;
-        generation_config["temperature"] = temperature;
-        generation_config["topP"] = top_p;
+        generation_config["temperature"] = round2(temperature);
+        generation_config["topP"] = round2(top_p);
         if (top_k > 0) {
             generation_config["topK"] = top_k;
         }
         request["generationConfig"] = generation_config;
+    }
+
+    // Thinking config (Gemini: thinkingConfig inside generationConfig)
+    // Gemini 2.5 uses thinkingBudget (token count), Gemini 3.x uses thinkingLevel (string)
+    if (!reasoning.empty() && reasoning != "off") {
+        json thinking_config;
+        bool is_2_5 = (model_name.find("2.5") != std::string::npos);
+        if (is_2_5) {
+            int budget = 0;
+            if (reasoning == "low") budget = 4096;
+            else if (reasoning == "medium") budget = 12288;
+            else if (reasoning == "high") budget = 24576;
+            thinking_config["thinkingBudget"] = budget;
+        } else {
+            thinking_config["thinkingLevel"] = reasoning;
+        }
+        if (!request.contains("generationConfig")) {
+            request["generationConfig"] = json::object();
+        }
+        request["generationConfig"]["thinkingConfig"] = thinking_config;
+        dout(1) << "Added thinkingConfig: " + thinking_config.dump() << std::endl;
     }
 
     return request;
@@ -610,8 +673,12 @@ std::string GeminiBackend::get_streaming_endpoint() {
 
 
 void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
-    // Always use streaming for generate_from_session - the callback mechanism
-    // works the same whether the API server client requested stream or not
+    // If streaming disabled, use base class non-streaming implementation
+    if (!config->streaming) {
+        ApiBackend::generate_from_session(session, max_tokens);
+        return;
+    }
+
     reset_output_state();
     clear_tool_calls();  // Clear any previous tool calls
 
@@ -671,16 +738,13 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
                                 }
                             }
 
-                            // Handle function calls
+                            // Handle function calls — store raw Gemini parts to preserve thoughtSignature
                             if (!parts.empty() && parts[0].contains("functionCall")) {
                                 const auto& fc = parts[0]["functionCall"];
                                 std::string tool_name = fc.value("name", "");
-                                std::string params_json = fc.contains("args") ? fc["args"].dump() : "{}";
-                                static int gemini_tool_counter = 0;
-                                std::string tool_id = "gemini_" + std::to_string(++gemini_tool_counter);
 
-                                // Record for emission after STOP (don't emit here)
-                                record_tool_call(tool_name, params_json, tool_id);
+                                // Store the full Gemini part (with thoughtSignature if present)
+                                accumulated_tool_calls.push_back(parts[0]);
 
                                 dout(1) << "generate_from_session: got functionCall name=" + tool_name << std::endl;
                             }
@@ -739,10 +803,15 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
     callback(CallbackEvent::STOP, finish_reason, "", "");
 
     // Emit tool calls AFTER STOP - frontend handles immediately
-    for (const auto& tc : accumulated_tool_calls) {
-        std::string name = tc["function"]["name"];
-        std::string args = tc["function"]["arguments"];
-        std::string id = tc["id"];
-        callback(CallbackEvent::TOOL_CALL, args, name, id);
+    // accumulated_tool_calls stores Gemini-native parts (with thoughtSignature)
+    static int gemini_tool_counter = 0;
+    for (const auto& part : accumulated_tool_calls) {
+        if (part.contains("functionCall")) {
+            const auto& fc = part["functionCall"];
+            std::string name = fc.value("name", "");
+            std::string args = fc.contains("args") ? fc["args"].dump() : "{}";
+            std::string id = "gemini_" + std::to_string(++gemini_tool_counter);
+            callback(CallbackEvent::TOOL_CALL, args, name, id);
+        }
     }
 }

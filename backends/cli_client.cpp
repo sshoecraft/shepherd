@@ -28,8 +28,7 @@ CLIClientBackend::CLIClientBackend(const std::string& url, Session& session, Eve
     HttpResponse http_resp = http_client->get(endpoint, headers);
 
     if (!http_resp.is_success()) {
-        dout(1) << std::string("WARNING: ") + "Failed to fetch session from server: " + http_resp.error_message << std::endl;
-        return;
+        throw std::runtime_error("Cannot connect to CLI server at " + base_url + ": " + http_resp.error_message);
     }
 
     try {

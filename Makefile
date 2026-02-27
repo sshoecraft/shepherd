@@ -16,7 +16,7 @@ include ~/.shepherd_opts
 endif
 all:
 	@if [ ! -d build ]; then $(MAKE) config; fi
-	(cd build && make -j$(nproc))
+	(cd build && make -j$(shell nproc=$$(nproc); echo $$(( nproc > 8 ? 8 : nproc ))))
 
 # Build activation command if TensorRT is ON and VENV is set
 ifeq ($(TENSORRT),ON)

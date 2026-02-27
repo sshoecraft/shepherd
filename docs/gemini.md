@@ -111,12 +111,26 @@ The backend emits these callback events:
 - `STOP` - Generation complete
 - `ERROR` - Error occurred
 
+### Thought Signatures (Gemini 3.x)
+- Gemini 3.x models return `thoughtSignature` in functionCall parts when thinking is enabled
+- These must be preserved and sent back in subsequent requests
+- Streaming: raw Gemini parts stored in `accumulated_tool_calls` (not converted to OpenAI format)
+- Non-streaming: `resp.tool_calls_json` preserves native parts from `parse_http_response()`
+- `build_request_from_session()` handles both Gemini-native and OpenAI formats for tool_calls_json
+
+### Function Response Format
+- `functionResponse.response` must contain structured JSON (not a string wrapped in `{"content": "..."}`)
+- Tool output is parsed as JSON first; falls back to `{"result": "text"}` for plain text
+
 ## History
 
+- v2.35.1: Fixed multi-turn tool calling for Gemini 3.x
+  - Preserve `thoughtSignature` in functionCall parts (required by Gemini 3.x with thinking)
+  - `functionResponse.response` now sends structured JSON instead of `{"content": "string"}`
+  - `build_request()` now converts OpenAI-format tool_calls_json to Gemini format (was dumping raw)
+  - Respect `--nostream` flag (was always using streaming endpoint)
+  - thinkingConfig uses `thinkingLevel` inside `generationConfig` (not top-level thinkingBudget)
+- v2.35.0: Added `--reasoning` support, maps to thinkingConfig with thinkingBudget (low=4096, medium=16384, high=32768)
 - v2.7.0: Fixed TOOL_CALL callback emission in generate_from_session()
-  - Function calls now properly emit callback events
-  - Enables nested tool execution in APIToolAdapter
-
 - v2.6.1: Added streaming support via add_message_stream()
-
 - v2.5.0: Initial Gemini backend implementation

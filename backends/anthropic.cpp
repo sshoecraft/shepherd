@@ -378,13 +378,22 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
         bool top_p_is_default = (top_p >= 0.99f);
 
         if (temp_is_default && !top_p_is_default) {
-            request["top_p"] = top_p;
+            request["top_p"] = round2(top_p);
         } else {
-            request["temperature"] = temperature;
+            request["temperature"] = round2(temperature);
         }
         if (top_k > 0) {
             request["top_k"] = top_k;
         }
+    }
+
+    // Extended thinking (Anthropic: budget_tokens)
+    if (!reasoning.empty() && reasoning != "off") {
+        int budget = 8192;  // default medium
+        if (reasoning == "low") budget = 1024;
+        else if (reasoning == "high") budget = 32000;
+        request["thinking"] = {{"type", "enabled"}, {"budget_tokens", budget}};
+        dout(1) << "Added extended thinking with budget_tokens: " + std::to_string(budget) << std::endl;
     }
 
     return request;
@@ -591,13 +600,22 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
         bool top_p_is_default = (top_p >= 0.99f);
 
         if (temp_is_default && !top_p_is_default) {
-            request["top_p"] = top_p;
+            request["top_p"] = round2(top_p);
         } else {
-            request["temperature"] = temperature;
+            request["temperature"] = round2(temperature);
         }
         if (top_k > 0) {
             request["top_k"] = top_k;
         }
+    }
+
+    // Extended thinking (Anthropic: budget_tokens)
+    if (!reasoning.empty() && reasoning != "off") {
+        int budget = 8192;  // default medium
+        if (reasoning == "low") budget = 1024;
+        else if (reasoning == "high") budget = 32000;
+        request["thinking"] = {{"type", "enabled"}, {"budget_tokens", budget}};
+        dout(1) << "Added extended thinking with budget_tokens: " + std::to_string(budget) << std::endl;
     }
 
     return request;

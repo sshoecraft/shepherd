@@ -58,15 +58,16 @@ virtual ModelFamily get_family() const = 0;
 
 **Inherits from:** ChatMLTemplate
 
-**Purpose:** Handles thinking/reasoning models by injecting an empty `<think>` block in the generation prompt when thinking is disabled, preventing the model from entering thinking mode.
+**Purpose:** Handles thinking/reasoning models by injecting an empty `<think>` block in the generation prompt when reasoning is off, preventing the model from entering thinking mode.
 
 **Overridden Methods:**
-- `get_generation_prompt()`: Returns `<|im_start|>assistant\n<think>\n\n</think>\n\n` when `config->thinking` is false (disabled), or standard `<|im_start|>assistant\n` when thinking is enabled
+- `get_generation_prompt()`: Returns `<|im_start|>assistant\n<think>\n\n</think>\n\n` when `config->reasoning` is off/empty, or standard `<|im_start|>assistant\n` when reasoning is enabled
 - `get_family()`: Returns `ModelFamily::QWEN_3_X`
 
 **Behavior:**
-- When thinking is disabled (default): Pre-injects empty think block to tell the model "thinking is done, just respond"
-- When thinking is enabled (`--thinking` flag or `thinking=true` in config): Lets the model do its natural thinking
+- When reasoning is off (default): Pre-injects empty think block to tell the model "thinking is done, just respond"
+- When reasoning is enabled (`--reasoning low/medium/high`): Lets the model do its natural thinking
+- The `--thinking` flag only controls whether think blocks are displayed, not whether the model reasons
 
 **Returns:** `ModelFamily::QWEN_3_X`
 
@@ -476,6 +477,12 @@ This allows templates that use different access patterns:
   - Factory now prioritizes MinjaTemplate over hardcoded templates
   - Hardcoded templates kept as fallback for models without embedded templates
   - Based on llama.cpp server and vLLM approaches
+
+- **2.35.0** - Separated reasoning from thinking display
+  - `config->reasoning` (off/low/medium/high) now controls model reasoning behavior
+  - `config->thinking` (bool) now only controls display of think blocks
+  - `reasoning_effort` template variable uses reasoning level directly (not hardcoded "high")
+  - Think block suppression (empty `<think>` injection) tied to reasoning level, not thinking display
 
 - **2.4.0** - Thinking model support
   - Added Qwen3ThinkingTemplate for thinking/reasoning models

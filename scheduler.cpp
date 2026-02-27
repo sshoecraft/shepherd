@@ -587,10 +587,12 @@ int handle_sched_args(const std::vector<std::string>& args,
 	// Helper to format schedule entry
 	auto fmt_entry = [](const Scheduler::ScheduleEntry& entry) {
 		std::string status = entry.enabled ? "enabled " : "disabled";
-		char buf[256];
-		snprintf(buf, sizeof(buf), "  [%s]  %-20s  %-16s  %s\n",
-			status.c_str(), entry.name.c_str(), ("\"" + entry.cron + "\"").c_str(), entry.prompt.c_str());
-		return std::string(buf);
+		// Pad name and cron to fixed widths
+		std::string name_padded = entry.name;
+		if (name_padded.size() < 20) name_padded.resize(20, ' ');
+		std::string cron_str = "\"" + entry.cron + "\"";
+		if (cron_str.size() < 16) cron_str.resize(16, ' ');
+		return "  [" + status + "]  " + name_padded + "  " + cron_str + "  " + entry.prompt + "\n";
 	};
 
 	// No args shows list

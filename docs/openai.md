@@ -51,6 +51,14 @@ Azure deployments use: `{base_url}/openai/deployments/{deployment_name}/chat/com
 ### Parameter Differences
 Azure OpenAI does **not** support `repetition_penalty`. The backend automatically excludes this parameter. Use `frequency_penalty` and `presence_penalty` instead.
 
+## Strict Mode Auto-Detection
+
+The `openai_strict` flag controls whether non-standard parameters (`top_k`, `repetition_penalty`) are sent in requests. It is auto-enabled when:
+- The endpoint URL contains `openai.com`
+- Azure deployment is detected (deployment_name + api_version set)
+
+This can also be set explicitly per-provider: `shepherd provider set <name> openai_strict true`
+
 ## SSL Configuration
 
 For corporate proxies with self-signed certificates:
@@ -93,3 +101,5 @@ For context overflow errors, the backend parses various error message formats to
 - v2.5.1: Added support for TRT-LLM/vLLM error message format (root-level "message")
 - v2.5.2: Added OAuth 2.0 authentication, Azure OpenAI support (deployment-based URLs, api-version parameter), SSL configuration, removed repetition_penalty for Azure compatibility
 - v2.11.x: Fixed non-streaming mode accumulation bug with vLLM harmony models. Empty `tool_calls:[]` arrays were being persisted and resent, confusing vLLM's harmony parser and causing models to output accumulated responses across turns. Fix: Only store tool_calls_json when the array is non-empty.
+- v2.34.4: Auto-detect OpenAI API endpoints (openai.com in URL) and enable openai_strict mode automatically, preventing rejected parameters (top_k, repetition_penalty).
+- v2.35.0: Added `--reasoning` flag (off/low/medium/high) with per-backend translation: OpenAI sends `reasoning_effort`, Anthropic sends extended `thinking` with `budget_tokens`, Gemini sends `thinkingConfig` with `thinkingBudget`. Configurable per-provider via `shepherd provider set <name> reasoning <level>`.

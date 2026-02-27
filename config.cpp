@@ -85,6 +85,7 @@ void Config::set_defaults() {
 
 	// Thinking/reasoning blocks hidden by default
 	thinking = false;
+	reasoning = "";
 
 	// Performance stats hidden by default
 	stats = false;
@@ -371,6 +372,11 @@ void Config::load_from_json(const nlohmann::json& j) {
         thinking = j["thinking"].get<bool>();
     }
 
+    // Load reasoning level (off, low, medium, high)
+    if (j.contains("reasoning")) {
+        reasoning = j["reasoning"].get<std::string>();
+    }
+
     // Load auto_provider setting (auto-switch on connection failure)
     if (j.contains("auto_provider")) {
         auto_provider = j["auto_provider"].get<bool>();
@@ -503,6 +509,7 @@ void Config::save() const {
             {"calibration", calibration},
             {"streaming", streaming},
             {"thinking", thinking},
+            {"reasoning", reasoning},
             {"auto_provider", auto_provider},
             {"tui", tui},
             {"truncate_limit", truncate_limit},
@@ -633,6 +640,7 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "calibration") return cfg.calibration ? "true" : "false";
     if (key == "streaming") return cfg.streaming ? "true" : "false";
     if (key == "thinking") return cfg.thinking ? "true" : "false";
+    if (key == "reasoning") return cfg.reasoning;
     if (key == "tui") return cfg.tui ? "true" : "false";
     if (key == "truncate_limit") return std::to_string(cfg.truncate_limit);
     if (key == "max_db_size") return cfg.max_db_size_str;
@@ -672,6 +680,8 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.streaming = (value == "true" || value == "1" || value == "on");
     } else if (key == "thinking") {
         cfg.thinking = (value == "true" || value == "1" || value == "on");
+    } else if (key == "reasoning") {
+        cfg.reasoning = value;
     } else if (key == "tui") {
         cfg.tui = (value == "true" || value == "1" || value == "on");
     } else if (key == "truncate_limit") {
@@ -732,7 +742,7 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
 
 // Valid config keys
 static const std::vector<std::string> CONFIG_KEYS = {
-    "warmup", "calibration", "streaming", "thinking", "tui",
+    "warmup", "calibration", "streaming", "thinking", "reasoning", "tui",
     "truncate_limit", "max_db_size", "web_search_provider",
     "web_search_api_key", "web_search_instance_url", "memory_database",
     "system_prompt", "auto_provider", "auth_mode", "server_tools",

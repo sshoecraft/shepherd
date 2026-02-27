@@ -82,11 +82,38 @@ Tools are executed via `tools.execute(name, params)`:
 ## Enable/Disable
 
 Tools can be enabled/disabled via:
-- `/tools enable <name1> [name2] ...`
-- `/tools disable <name1> [name2] ...`
+- `/tools enable <name|pattern> [name2|pattern2] ...`
+- `/tools disable <name|pattern> [name2|pattern2] ...`
 - `shepherd tools enable/disable ...` (command line)
+- `--disable-tools PATTERN` / `--enable-tools PATTERN` (CLI flags)
+
+All enable/disable operations support glob patterns (`*`, `?`) via `fnmatch()`.
 
 Disabled tools are excluded from session.tools and will return an error if executed.
+
+### CLI Tool Filters (v2.36.0)
+
+The `--disable-tools` and `--enable-tools` flags allow selective tool filtering at startup:
+
+```
+# Disable all tools, then re-enable only web_search
+shepherd --disable-tools="*" --enable-tools=web_search
+
+# Disable all HTTP tools
+shepherd --disable-tools="http_*"
+
+# Multiple patterns (comma-separated or repeated flags)
+shepherd --disable-tools="http_*,bash" --enable-tools=http_get
+shepherd --disable-tools="*" --enable-tools=web_search --enable-tools=bash
+```
+
+Processing order:
+1. All tools register normally
+2. `--disable-tools` patterns applied (disables matching tools)
+3. `--enable-tools` patterns applied (re-enables matching tools)
+
+Patterns use `fnmatch()` glob syntax: `*` matches any sequence, `?` matches one character.
+Comma-separated patterns within a single flag value are split automatically.
 
 ## Provider-as-Tool (API Tools)
 
@@ -184,6 +211,14 @@ ask_openai(prompt=what time is it)
 ```
 
 ## History
+
+- v2.36.0: Glob-based tool filtering with --disable-tools / --enable-tools
+  - CLI flags: `--disable-tools PATTERN` and `--enable-tools PATTERN`
+  - Supports fnmatch() glob patterns (*, ?) for matching tool names
+  - Comma-separated patterns within a single flag value
+  - Repeatable flags (multiple --enable-tools allowed)
+  - `/tools enable/disable` slash commands also support glob patterns
+  - Processing order: disable first, then enable (allows "disable all, enable specific")
 
 - v2.7.0: Refactored APIToolAdapter to mirror CLI pattern
   - Uses Provider.connect() instead of global config swapping

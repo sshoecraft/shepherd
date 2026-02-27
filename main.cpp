@@ -113,6 +113,9 @@ std::unique_ptr<Config> config;
 // Global server mode flag
 bool g_server_mode = false;
 
+// List models and exit
+bool g_list_models = false;
+
 // Global generation cancellation flag (for llamacpp backend) - atomic for thread safety
 std::atomic<bool> g_generation_cancelled{false};
 
@@ -176,6 +179,8 @@ static void print_usage(int, char** argv) {
 	printf("	--nostream		   Disable streaming (wait for complete response)\n");
 	printf("	--raw			   Raw output mode (no channel parsing, like vLLM)\n");
 	printf("	--notools		   Disable all tools (no tool registration or use)\n");
+	printf("	--disable-tools PATTERN Disable tools matching glob pattern (e.g. \"*\", \"http_*\")\n");
+	printf("	--enable-tools PATTERN  Re-enable tools matching glob pattern (applied after disable)\n");
 	printf("	--memtools		   Enable memory tools (search, set_fact, store_memory, etc.)\n");
 	printf("	--norag			   Disable RAG and memory extraction\n");
 	printf("	--nomemory		   Disable memory injection and extraction (keeps RAG available)\n");
@@ -197,6 +202,8 @@ static void print_usage(int, char** argv) {
 	printf("	--no-colors		   Force disable colored output (overrides environment)\n");
 	printf("	--tui			   Force enable TUI mode (boxed input, status line)\n");
 	printf("	--no-tui		   Force disable TUI mode (classic scrolling terminal)\n");
+	printf("	--reasoning LEVEL   Set reasoning effort: off, low, medium, high\n");
+	printf("	--list-models	   List available models from provider and exit\n");
 	printf("	--stats			   Show performance stats (prefill/decode speed, KV cache)\n");
 	printf("	-v, --version	   Show version information\n");
 	printf("	-h, --help		   Show this help message\n");
@@ -835,6 +842,8 @@ int main(int argc, char** argv) {
 	bool no_stream = false;
 	bool no_tools = false;
 	bool mem_tools = false;
+	std::vector<std::string> disable_tools;
+	std::vector<std::string> enable_tools;
 	bool server_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
@@ -853,6 +862,7 @@ int main(int argc, char** argv) {
 		bool warmup = false;
 		bool calibration = false;
 		bool thinking = false;
+		std::string reasoning;
 		bool stats = false;
 		bool raw_output = false;
 		bool system_prompt_set = false;
@@ -912,6 +922,8 @@ int main(int argc, char** argv) {
 		{"nomemory", no_argument, 0, 1063},
 		{"notools", no_argument, 0, 1027},
 		{"memtools", no_argument, 0, 1062},
+		{"disable-tools", required_argument, 0, 1066},
+		{"enable-tools", required_argument, 0, 1067},
 		{"system-prompt", required_argument, 0, 1028},
 		{"system-prompt-file", required_argument, 0, 1057},
 		{"prompt", required_argument, 0, 'e'},
@@ -940,6 +952,7 @@ int main(int argc, char** argv) {
 		{"parallel", required_argument, 0, 1055},
 		{"max-tokens", required_argument, 0, 1056},
 		{"thinking", no_argument, 0, 1031},
+		{"reasoning", required_argument, 0, 1064},
 		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
@@ -951,6 +964,7 @@ int main(int argc, char** argv) {
 		{"chroot", required_argument, 0, 1059},
 		{"run-as", required_argument, 0, 1060},
 		{"user", required_argument, 0, 1060},  // Alias for --run-as
+		{"list-models", no_argument, 0, 1065},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -1039,6 +1053,12 @@ int main(int argc, char** argv) {
 				break;
 			case 1062: // --memtools
 				mem_tools = true;
+				break;
+			case 1066: // --disable-tools
+				disable_tools.push_back(optarg);
+				break;
+			case 1067: // --enable-tools
+				enable_tools.push_back(optarg);
 				break;
 			case 1028: // --system-prompt
 				override.system_prompt = optarg;
@@ -1172,6 +1192,12 @@ int main(int argc, char** argv) {
 				break;
 			case 1031: // --thinking
 				override.thinking = true;
+				break;
+			case 1064: // --reasoning
+				override.reasoning = optarg;
+				break;
+			case 1065: // --list-models
+				g_list_models = true;
 				break;
 			case 1042: // --stats
 				override.stats = true;
@@ -1366,6 +1392,9 @@ int main(int argc, char** argv) {
 	if (override.thinking) {
 		config->thinking = true;
 	}
+	if (!override.reasoning.empty()) {
+		config->reasoning = override.reasoning;
+	}
 
 	if (override.stats) {
 		config->stats = true;
@@ -1462,8 +1491,9 @@ int main(int argc, char** argv) {
 					config->backend.c_str(), available_str.c_str());
 			return 1;
 		}
-		// Validate model file exists (only for local backends)
-		if (config->backend == "llamacpp" || config->backend == "tensorrt") {
+		// Validate model file exists (only for GPU backends without a named provider)
+		bool is_gpu_backend = (config->backend == "llamacpp" || config->backend == "tensorrt");
+		if (override.provider.empty() && is_gpu_backend) {
 			// Construct the full path to validate (config already has overrides applied)
 			std::string model_file_to_check;
 
@@ -1534,6 +1564,8 @@ int main(int argc, char** argv) {
 		frontend_flags.no_rag = no_rag;
 		frontend_flags.mem_tools = mem_tools;
 		frontend_flags.no_memory = no_memory;
+		frontend_flags.disable_tools = disable_tools;
+		frontend_flags.enable_tools = enable_tools;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 
@@ -1546,6 +1578,10 @@ int main(int argc, char** argv) {
 			if (!provider_for_run) {
 				fprintf(stderr, "Provider '%s' not found. Use 'shepherd provider list' to see available providers.\n", override.provider.c_str());
 				return 1;
+			}
+			// Apply --model override to the provider (otherwise connect() overwrites it)
+			if (!override.model.empty()) {
+				provider_for_run->model = override.model;
 			}
 		} else if (has_cmdline_override) {
 			// Command-line overrides → use ephemeral cmdline provider

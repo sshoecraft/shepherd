@@ -170,6 +170,20 @@ bool Frontend::connect_provider(const std::string& name) {
     try {
         backend = p->connect(session, callback);
         if (backend) {
+            // --list-models: print models and exit
+            if (g_list_models) {
+                auto models = backend->get_models();
+                if (models.empty()) {
+                    printf("No models available (or provider does not support model listing)\n");
+                } else {
+                    printf("Available models for '%s':\n", name.c_str());
+                    for (const auto& m : models) {
+                        printf("  %s\n", m.c_str());
+                    }
+                }
+                exit(0);
+            }
+
             current_provider = name;
             session.backend = backend.get();
 
@@ -308,6 +322,9 @@ void Frontend::init_tools(const FrontendFlags& f, bool force_local) {
 
     // Build the combined tool list
     tools.build_all_tools();
+
+    // Apply --disable-tools / --enable-tools filters
+    tools.apply_tool_filters(f.disable_tools, f.enable_tools);
 
     dout(1) << "Tools initialized: " + std::to_string(tools.all_tools.size()) + " total" << std::endl;
 
@@ -736,6 +753,19 @@ bool Frontend::generate_response(int max_tokens) {
             if (max_tokens > session.desired_completion_tokens) {
                 max_tokens = session.desired_completion_tokens;
             }
+        }
+    }
+
+    // For CLI client backends (sse_handles_output), the SSE listener thread handles
+    // all display and the server owns the session — skip callback wrapping to avoid
+    // thread-unsafe callback swaps and duplicate output
+    if (backend->sse_handles_output) {
+        try {
+            backend->generate_from_session(session, max_tokens);
+            return true;
+        } catch (const std::exception& e) {
+            dout(1) << "Frontend::generate_response: SSE backend error: " + std::string(e.what()) << std::endl;
+            return false;
         }
     }
 

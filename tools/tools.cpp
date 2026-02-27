@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <fnmatch.h>
 
 // Helper: sanitize tool name to match API backend requirements: ^[a-zA-Z0-9_-]+$
 static std::string sanitize_tool_name(const std::string& name) {
@@ -171,16 +172,85 @@ bool Tools::is_enabled(const std::string& name) {
     return true;
 }
 
+// Split a comma-separated string into individual patterns, trimming whitespace
+static std::vector<std::string> split_patterns(const std::string& input) {
+    std::vector<std::string> patterns;
+    std::istringstream stream(input);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        // Trim whitespace
+        size_t start = token.find_first_not_of(" \t");
+        size_t end = token.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            patterns.push_back(token.substr(start, end - start + 1));
+        }
+    }
+    return patterns;
+}
+
+void Tools::apply_tool_filters(const std::vector<std::string>& disable_patterns,
+                                const std::vector<std::string>& enable_patterns) {
+    // Expand comma-separated patterns into flat lists
+    std::vector<std::string> disable_expanded;
+    for (const auto& pat : disable_patterns) {
+        auto parts = split_patterns(pat);
+        disable_expanded.insert(disable_expanded.end(), parts.begin(), parts.end());
+    }
+
+    std::vector<std::string> enable_expanded;
+    for (const auto& pat : enable_patterns) {
+        auto parts = split_patterns(pat);
+        enable_expanded.insert(enable_expanded.end(), parts.begin(), parts.end());
+    }
+
+    if (disable_expanded.empty() && enable_expanded.empty()) return;
+
+    // Phase 1: apply disable patterns
+    for (Tool* tool : all_tools) {
+        for (const auto& pattern : disable_expanded) {
+            if (fnmatch(pattern.c_str(), tool->name().c_str(), 0) == 0) {
+                disable(tool->name());
+                dout(1) << "Tool filter: disabled '" << tool->name() << "' (matched '" << pattern << "')" << std::endl;
+                break;
+            }
+        }
+    }
+
+    // Phase 2: apply enable patterns (re-enable previously disabled)
+    for (Tool* tool : all_tools) {
+        for (const auto& pattern : enable_expanded) {
+            if (fnmatch(pattern.c_str(), tool->name().c_str(), 0) == 0) {
+                enable(tool->name());
+                dout(1) << "Tool filter: enabled '" << tool->name() << "' (matched '" << pattern << "')" << std::endl;
+                break;
+            }
+        }
+    }
+
+    // Log summary
+    int enabled_count = 0, disabled_count = 0;
+    for (Tool* tool : all_tools) {
+        if (is_enabled(tool->name())) enabled_count++;
+        else disabled_count++;
+    }
+    dout(1) << "Tool filters applied: " << enabled_count << " enabled, " << disabled_count << " disabled" << std::endl;
+}
+
 int Tools::handle_tools_args(const std::vector<std::string>& args,
                               std::function<void(const std::string&)> callback) {
     // Help
     if (!args.empty() && (args[0] == "help" || args[0] == "--help" || args[0] == "-h")) {
         callback("Usage: /tools [subcommand]\n"
             "Subcommands:\n"
-            "  list              - List all tools with status\n"
-            "  enable <name...>  - Enable one or more tools\n"
-            "  disable <name...> - Disable one or more tools\n"
-            "  (no args)         - List all tools\n");
+            "  list                    - List all tools with status\n"
+            "  enable <name|pattern>   - Enable tools (supports glob: *, ?)\n"
+            "  disable <name|pattern>  - Disable tools (supports glob: *, ?)\n"
+            "  (no args)               - List all tools\n"
+            "\n"
+            "Examples:\n"
+            "  /tools disable *        - Disable all tools\n"
+            "  /tools enable web_*     - Enable web_fetch and web_search\n"
+            "  /tools disable http_*   - Disable all HTTP tools\n");
         return 0;
     }
 
@@ -212,92 +282,100 @@ int Tools::handle_tools_args(const std::vector<std::string>& args,
         return 0;
     }
 
-    // "enable <tool1> [tool2] ..." - enable one or more tools
+    // "enable <tool1|pattern> [tool2|pattern] ..." - enable tools by name or glob pattern
     if (args[0] == "enable") {
         if (args.size() < 2) {
-            callback("Usage: /tools enable <tool_name> [tool_name2] ...\n");
+            callback("Usage: /tools enable <name|pattern> [name2|pattern2] ...\n"
+                     "  Supports glob patterns: * matches any, ? matches one char\n");
             return 0;
         }
 
-        std::vector<std::string> not_found;
-        std::vector<std::string> enabled_tools;
+        std::vector<std::string> matched_tools;
 
         for (size_t i = 1; i < args.size(); i++) {
-            Tool* tool = get(args[i]);
-            if (!tool) {
-                not_found.push_back(args[i]);
+            bool has_glob = args[i].find('*') != std::string::npos ||
+                            args[i].find('?') != std::string::npos;
+
+            if (has_glob) {
+                // Glob pattern: match against all tool names
+                for (Tool* tool : all_tools) {
+                    if (fnmatch(args[i].c_str(), tool->name().c_str(), 0) == 0) {
+                        enable(tool->name());
+                        matched_tools.push_back(tool->name());
+                    }
+                }
             } else {
-                enable(args[i]);
-                enabled_tools.push_back(tool->name());
+                // Exact name lookup
+                Tool* tool = get(args[i]);
+                if (tool) {
+                    enable(args[i]);
+                    matched_tools.push_back(tool->name());
+                } else {
+                    callback("Not found: " + args[i] + "\n");
+                }
             }
         }
 
-        if (!enabled_tools.empty()) {
+        if (!matched_tools.empty()) {
             std::string msg = "Enabled: ";
-            for (size_t i = 0; i < enabled_tools.size(); i++) {
+            for (size_t i = 0; i < matched_tools.size(); i++) {
                 if (i > 0) msg += ", ";
-                msg += enabled_tools[i];
+                msg += matched_tools[i];
             }
             callback(msg + "\n");
-        }
-
-        if (!not_found.empty()) {
-            std::string msg = "Not found: ";
-            for (size_t i = 0; i < not_found.size(); i++) {
-                if (i > 0) msg += ", ";
-                msg += not_found[i];
-            }
-            callback(msg + "\n");
-            return 1;
         }
 
         return 0;
     }
 
-    // "disable <tool1> [tool2] ..." - disable one or more tools
+    // "disable <tool1|pattern> [tool2|pattern] ..." - disable tools by name or glob pattern
     if (args[0] == "disable") {
         if (args.size() < 2) {
-            callback("Usage: /tools disable <tool_name> [tool_name2] ...\n");
+            callback("Usage: /tools disable <name|pattern> [name2|pattern2] ...\n"
+                     "  Supports glob patterns: * matches any, ? matches one char\n");
             return 0;
         }
 
-        std::vector<std::string> not_found;
-        std::vector<std::string> disabled_tools;
+        std::vector<std::string> matched_tools;
 
         for (size_t i = 1; i < args.size(); i++) {
-            Tool* tool = get(args[i]);
-            if (!tool) {
-                not_found.push_back(args[i]);
+            bool has_glob = args[i].find('*') != std::string::npos ||
+                            args[i].find('?') != std::string::npos;
+
+            if (has_glob) {
+                // Glob pattern: match against all tool names
+                for (Tool* tool : all_tools) {
+                    if (fnmatch(args[i].c_str(), tool->name().c_str(), 0) == 0) {
+                        disable(tool->name());
+                        matched_tools.push_back(tool->name());
+                    }
+                }
             } else {
-                disable(args[i]);
-                disabled_tools.push_back(tool->name());
+                // Exact name lookup
+                Tool* tool = get(args[i]);
+                if (tool) {
+                    disable(args[i]);
+                    matched_tools.push_back(tool->name());
+                } else {
+                    callback("Not found: " + args[i] + "\n");
+                }
             }
         }
 
-        if (!disabled_tools.empty()) {
+        if (!matched_tools.empty()) {
             std::string msg = "Disabled: ";
-            for (size_t i = 0; i < disabled_tools.size(); i++) {
+            for (size_t i = 0; i < matched_tools.size(); i++) {
                 if (i > 0) msg += ", ";
-                msg += disabled_tools[i];
+                msg += matched_tools[i];
             }
             callback(msg + "\n");
-        }
-
-        if (!not_found.empty()) {
-            std::string msg = "Not found: ";
-            for (size_t i = 0; i < not_found.size(); i++) {
-                if (i > 0) msg += ", ";
-                msg += not_found[i];
-            }
-            callback(msg + "\n");
-            return 1;
         }
 
         return 0;
     }
 
     // Unknown subcommand
-    callback("Usage: /tools [list | enable <tool_name>... | disable <tool_name>...]\n");
+    callback("Usage: /tools [list | enable <name|pattern>... | disable <name|pattern>...]\n");
     return 1;
 }
 

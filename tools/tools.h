@@ -52,6 +52,13 @@ public:
     void disable(const std::string& name);
     bool is_enabled(const std::string& name);
 
+    // Apply glob-based tool filters (--disable-tools, --enable-tools)
+    // Processes disable patterns first, then enable patterns
+    // Patterns support fnmatch() glob syntax: * matches any sequence, ? matches one char
+    // Comma-separated patterns within a single string are split automatically
+    void apply_tool_filters(const std::vector<std::string>& disable_patterns,
+                            const std::vector<std::string>& enable_patterns);
+
     // Command-line and slash command handler
     // Returns 0 on success, non-zero on error
     // callback: function to emit output

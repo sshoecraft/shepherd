@@ -21,6 +21,8 @@ struct FrontendFlags {
     bool no_rag = false;       // --norag: disable RAG entirely
     bool mem_tools = false;    // --memtools: enable memory tools
     bool no_memory = false;    // --nomemory: disable injection and extraction
+    std::vector<std::string> disable_tools;  // --disable-tools: glob patterns to disable
+    std::vector<std::string> enable_tools;   // --enable-tools: glob patterns to re-enable
 };
 
 /// @brief Logical colors for frontend output

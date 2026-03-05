@@ -12,6 +12,7 @@
 #include <sstream>
 #include <algorithm>
 #include <utility>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -38,7 +39,7 @@ std::string Provider::get_providers_dir() {
 std::vector<Provider> Provider::load_providers() {
     std::vector<Provider> result;
 
-    // First, try to load from unified config (Key Vault or config.json)
+    // Load from unified config (Key Vault or config.json)
     if (config && !config->providers_json.empty()) {
         dout(1) << "Loading " << config->providers_json.size() << " providers from config" << std::endl;
         for (const auto& pj : config->providers_json) {
@@ -47,31 +48,6 @@ std::vector<Provider> Provider::load_providers() {
                 result.push_back(std::move(p));
             } catch (const std::exception& e) {
                 std::cerr << "Failed to load provider from config: " << e.what() << std::endl;
-            }
-        }
-    }
-
-    // Fallback: load from legacy provider files if no providers in config
-    if (result.empty()) {
-        std::string providers_dir = get_providers_dir();
-
-        if (fs::exists(providers_dir)) {
-            for (const auto& entry : fs::directory_iterator(providers_dir)) {
-                if (entry.path().extension() == ".json") {
-                    try {
-                        std::ifstream file(entry.path());
-                        json j;
-                        file >> j;
-
-                        Provider p = Provider::from_json(j);
-                        if (p.name.empty()) {
-                            p.name = entry.path().stem().string();
-                        }
-                        result.push_back(std::move(p));
-                    } catch (const std::exception& e) {
-                        std::cerr << "Failed to load provider " + entry.path().string() + ": " + e.what() << std::endl;
-                    }
-                }
             }
         }
     }
@@ -295,61 +271,46 @@ Provider Provider::from_config() {
 }
 
 void Provider::save() const {
-    // Save to unified config (providers in config.json) by default
-    // Only fall back to legacy files if no config object exists
-    if (config && !config->is_read_only()) {
-        // Find and update this provider in the config
-        bool found = false;
-        for (auto& pj : config->providers_json) {
-            if (pj.value("name", "") == name) {
-                pj = to_json();
-                found = true;
-                break;
-            }
-        }
-        // If not found, add it
-        if (!found) {
-            config->providers_json.push_back(to_json());
-        }
-        config->save();
-        return;
+    if (!config) {
+        throw std::runtime_error("No config available - cannot save provider");
+    }
+    if (config->is_read_only()) {
+        throw std::runtime_error("Config is read-only (Key Vault mode) - cannot save provider");
     }
 
-    // Legacy: save to individual provider files (only if no config or read-only mode)
-    std::string providers_dir = get_providers_dir();
-    fs::create_directories(providers_dir);
-
-    std::string filename = providers_dir + "/" + name + ".json";
-    std::ofstream file(filename);
-    if (!file) {
-        throw std::runtime_error("Failed to open provider file for writing: " + filename);
+    // Find and update this provider in the config
+    bool found = false;
+    for (auto& pj : config->providers_json) {
+        if (pj.value("name", "") == name) {
+            pj = to_json();
+            found = true;
+            break;
+        }
     }
-
-    file << to_json().dump(4) << std::endl;
+    // If not found, add it
+    if (!found) {
+        config->providers_json.push_back(to_json());
+    }
+    config->save();
 }
 
 void Provider::remove(const std::string& name) {
-    // Remove from unified config by default
-    if (config && !config->is_read_only()) {
-        auto& providers = config->providers_json;
-        providers.erase(
-            std::remove_if(providers.begin(), providers.end(),
-                [&name](const nlohmann::json& pj) {
-                    return pj.value("name", "") == name;
-                }),
-            providers.end()
-        );
-        config->save();
-        return;
+    if (!config) {
+        throw std::runtime_error("No config available - cannot remove provider");
+    }
+    if (config->is_read_only()) {
+        throw std::runtime_error("Config is read-only (Key Vault mode) - cannot remove provider");
     }
 
-    // Legacy: remove from provider files
-    std::string providers_dir = get_providers_dir();
-    std::string filename = providers_dir + "/" + name + ".json";
-
-    if (fs::exists(filename)) {
-        fs::remove(filename);
-    }
+    auto& providers = config->providers_json;
+    providers.erase(
+        std::remove_if(providers.begin(), providers.end(),
+            [&name](const nlohmann::json& pj) {
+                return pj.value("name", "") == name;
+            }),
+        providers.end()
+    );
+    config->save();
 }
 
 std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallback callback) {
@@ -431,14 +392,36 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
     // Create backend (constructor handles all initialization)
     // Command line --context-size takes precedence over provider config
     size_t ctx = (config->context_size > 0) ? config->context_size : context_size;
-    auto backend = BackendFactory::create_backend(type, ctx, session, callback);
 
-    // Set display name from provider config (for /v1/models API)
-    if (backend) {
-        backend->display_name = display_name;
+    while (true) {
+        try {
+            auto backend = BackendFactory::create_backend(type, ctx, session, callback);
+
+            // If --wait is set and this is an API backend, verify server is reachable
+            if (backend && g_wait_backend && is_api()) {
+                auto models = backend->get_models();
+                if (models.empty()) {
+                    fprintf(stderr, "Waiting for backend at %s...\n", config->api_base.c_str());
+                    sleep(1);
+                    continue;
+                }
+            }
+
+            // Set display name from provider config (for /v1/models API)
+            if (backend) {
+                backend->display_name = display_name;
+            }
+
+            return backend;
+        } catch (const std::exception& e) {
+            if (g_wait_backend) {
+                fprintf(stderr, "Waiting for backend: %s\n", e.what());
+                sleep(1);
+                continue;
+            }
+            throw;
+        }
     }
-
-    return backend;
 }
 
 // Common provider command implementation

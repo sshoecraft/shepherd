@@ -60,6 +60,9 @@ extern std::atomic<bool> g_generation_cancelled;
 // Scheduler disable flag (--nosched)
 extern bool g_disable_scheduler;
 
+// Wait for backend flag (--wait) - retry connection until backend is available
+extern bool g_wait_backend;
+
 // ============================================================================
 // Common Utilities
 // ============================================================================

@@ -113,8 +113,19 @@ API providers support SSL configuration for corporate proxies:
 
 Disabling SSL verification is not recommended for production but may be necessary for corporate proxies with self-signed certificates.
 
+## Wait for Backend (--wait)
+
+When `--wait` is passed on the command line, `Provider::connect()` will retry the backend connection in a loop, sleeping 1 second between attempts, until the backend becomes available. This is useful when starting shepherd before the backend API server is ready (e.g., waiting for a local inference server to boot).
+
+The retry handles both cases:
+- Backend constructor throws (e.g., connection refused) - caught and retried
+- API backend created but server unreachable (get_models returns empty) - detected and retried
+
+Controlled by the global `g_wait_backend` flag (declared in `shepherd.h`).
+
 ## History
 
+- v2.35.0: Added --wait flag for retry-until-connected behavior in Provider::connect()
 - v2.4.0: Added provider abstraction and server implementation
 - v2.4.1: Added auto_provider config, provider fallback on connection failure
 - v2.5.0: Moved context_size to base ProviderConfig class

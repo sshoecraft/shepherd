@@ -119,6 +119,9 @@ std::atomic<bool> g_generation_cancelled{false};
 // Scheduler disable flag (--nosched)
 bool g_disable_scheduler = false;
 
+// Wait for backend flag (--wait)
+bool g_wait_backend = false;
+
 
 static void print_usage(int, char** argv) {
 	printf("\n=== Shepherd - Advanced LLM Management System ===\n");
@@ -176,6 +179,7 @@ static void print_usage(int, char** argv) {
 	printf("	--memtools		   Enable memory tools (search, set_fact, store_memory, etc.)\n");
 	printf("	--norag			   Disable RAG and memory extraction\n");
 	printf("	--nomemory		   Disable memory injection and extraction (keeps RAG available)\n");
+	printf("	--wait			   Wait for backend to become available (retry connection every second)\n");
 	printf("	--system-prompt	   Override system prompt (useful with --notools)\n");
 	printf("	--system-prompt-file   Read system prompt from file\n");
 	printf("	-e, --prompt TEXT  Initial user prompt (non-interactive single query)\n");
@@ -943,6 +947,7 @@ int main(int argc, char** argv) {
 		{"no-tui", no_argument, 0, 1039},
 		{"calibration", no_argument, 0, 1034},
 		{"kv", required_argument, 0, 1046},
+		{"wait", no_argument, 0, 1064},
 		{"chroot", required_argument, 0, 1059},
 		{"run-as", required_argument, 0, 1060},
 		{"user", required_argument, 0, 1060},  // Alias for --run-as
@@ -1025,6 +1030,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1063: // --nomemory
 				no_memory = true;
+				break;
+			case 1064: // --wait
+				g_wait_backend = true;
 				break;
 			case 1027: // --notools
 				no_tools = true;

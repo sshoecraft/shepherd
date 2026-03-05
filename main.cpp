@@ -952,7 +952,7 @@ int main(int argc, char** argv) {
 		{"parallel", required_argument, 0, 1055},
 		{"max-tokens", required_argument, 0, 1056},
 		{"thinking", no_argument, 0, 1031},
-		{"reasoning", required_argument, 0, 1064},
+		{"reasoning", required_argument, 0, 1068},
 		{"stats", no_argument, 0, 1042},
 		{"colors", no_argument, 0, 1032},
 		{"no-colors", no_argument, 0, 1033},
@@ -1193,7 +1193,7 @@ int main(int argc, char** argv) {
 			case 1031: // --thinking
 				override.thinking = true;
 				break;
-			case 1064: // --reasoning
+			case 1068: // --reasoning
 				override.reasoning = optarg;
 				break;
 			case 1065: // --list-models

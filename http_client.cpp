@@ -80,6 +80,9 @@ void HttpClient::configure_curl() {
         curl_easy_setopt(curl_, CURLOPT_VERBOSE, 1L);
     }
 
+    // Default to HTTP when no scheme is specified in the URL
+    curl_easy_setopt(curl_, CURLOPT_DEFAULT_PROTOCOL, "http");
+
     // Follow redirects
     curl_easy_setopt(curl_, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl_, CURLOPT_MAXREDIRS, 5L);
@@ -221,6 +224,9 @@ HttpResponse HttpClient::get_stream(const std::string& url,
     dout(1) << "HTTP GET (streaming): " + url << std::endl;
 
     configure_curl();
+
+    // Force HTTP/1.1 for streaming - HTTP/2 proxies often buffer SSE responses
+    curl_easy_setopt(curl_, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
     // Set URL
     curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
@@ -375,6 +381,9 @@ HttpResponse HttpClient::post_stream(const std::string& url,
 
     configure_curl();
 
+    // Force HTTP/1.1 for streaming - HTTP/2 proxies often buffer SSE responses
+    curl_easy_setopt(curl_, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+
     // Set URL
     curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
 
@@ -449,6 +458,10 @@ HttpResponse HttpClient::post_stream_cancellable(const std::string& url,
 #endif
 
     configure_curl();
+
+    // Force HTTP/1.1 for streaming - HTTP/2 proxies often buffer the entire
+    // SSE response before forwarding, which defeats token-by-token streaming
+    curl_easy_setopt(curl_, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
     // Set URL
     curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());

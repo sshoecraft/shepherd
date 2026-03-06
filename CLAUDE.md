@@ -12,5 +12,6 @@
 
 ## Build
 ```bash
-cd build && cmake .. && make
+make            # build
+make config     # reconfigure cmake options (reads ~/.shepherd_opts)
 ```

@@ -770,6 +770,12 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
     auto headers = get_api_headers();
     std::string endpoint = get_api_endpoint();
 
+    // Add anti-buffering headers for streaming - tells proxies/gateways to
+    // forward SSE events immediately instead of accumulating the full response
+    headers["Accept"] = "text/event-stream";
+    headers["Cache-Control"] = "no-cache, no-store";
+    headers["X-Accel-Buffering"] = "no";
+
     // Streaming state
     std::string accumulated_content;
     SSEParser sse_parser;

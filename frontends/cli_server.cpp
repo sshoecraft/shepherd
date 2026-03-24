@@ -191,7 +191,7 @@ static void do_generation(CliServerState& state,
             return true;
         }
 
-        // Handle TOOL_CALL - fires after STOP, execute immediately
+        // Handle TOOL_CALL - execute and add response, but wait for TOOL_CALLS_COMPLETE to generate
         if (type == CallbackEvent::TOOL_CALL) {
             // Parse params for display
             json params_json;
@@ -217,11 +217,20 @@ static void do_generation(CliServerState& state,
                 obs.on_tool_result(tool_name_arg, tool_result.success, tool_result.error);
             });
 
-            // Add tool result to session and generate next response
+            // Add tool result to session (generate deferred to TOOL_CALLS_COMPLETE)
             {
                 auto lock = state.backend->acquire_lock();
                 state.server->add_message_to_session(
                     Message::TOOL_RESPONSE, tool_result.content, tool_name_arg, tool_call_id);
+            }
+
+            return true;
+        }
+
+        // Handle TOOL_CALLS_COMPLETE - all tool responses added, now generate next response
+        if (type == CallbackEvent::TOOL_CALLS_COMPLETE) {
+            {
+                auto lock = state.backend->acquire_lock();
                 state.server->generate_response(max_tokens);
             }
 

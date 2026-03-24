@@ -44,6 +44,9 @@ public:
     // Get default memory database path (XDG-compliant)
     static std::string get_default_memory_db_path();
 
+    // Expand ${VAR} patterns in a string with environment variable values
+    static std::string expand_env_vars(const std::string& input);
+
 
     // Set custom config file path (for command-line override)
     void set_config_path(const std::string& config_path) { custom_config_path_ = config_path; }

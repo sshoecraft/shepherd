@@ -127,7 +127,7 @@ void CLI::init(const FrontendFlags& flags) {
                 write_colored(content, type);
                 break;
             case CallbackEvent::TOOL_CALL: {
-                // TOOL_CALL fires after STOP - execute immediately
+                // TOOL_CALL fires after STOP - execute and add response, but wait for TOOL_CALLS_COMPLETE to generate
                 std::string params_str;
                 try {
                     auto params = nlohmann::json::parse(content);
@@ -153,12 +153,17 @@ void CLI::init(const FrontendFlags& flags) {
                     (result.success ? result.content.substr(0, 100) : result.error) : result.summary;
                 show_tool_result(summary, result.success);
 
-                // Add tool result to session and generate next response
+                // Add tool result to session (generate deferred to TOOL_CALLS_COMPLETE)
                 {
                     auto lock = backend->acquire_lock();
                     add_message_to_session(Message::TOOL_RESPONSE, result.content, tool_name, tool_call_id);
-                    generate_response();
                 }
+                break;
+            }
+            case CallbackEvent::TOOL_CALLS_COMPLETE: {
+                // All tool calls processed - now generate next response
+                auto lock = backend->acquire_lock();
+                generate_response();
                 break;
             }
             case CallbackEvent::TOOL_RESULT:

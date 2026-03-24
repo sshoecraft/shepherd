@@ -1127,6 +1127,11 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
             callback(CallbackEvent::TOOL_CALL, args, tc.name, tc.tool_call_id);
         }
     }
+
+    // Signal all tool calls emitted - frontend can now generate next response
+    if (!tool_calls.empty()) {
+        callback(CallbackEvent::TOOL_CALLS_COMPLETE, "", "", "");
+    }
 }
 
 size_t OpenAIBackend::query_model_context_size(const std::string& model_name) {

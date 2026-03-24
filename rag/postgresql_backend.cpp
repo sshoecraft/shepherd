@@ -244,6 +244,28 @@ bool PostgreSQLBackend::create_tables() {
     }
     PQclear(res);
 
+    // Migrate: add user_id column and update primary key if needed (tables created before multi-user support)
+    PQexec(conn, "ALTER TABLE facts ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT 'local'");
+
+    // Check if primary key includes user_id; if not, recreate it
+    res = PQexec(conn, R"(
+        SELECT 1 FROM information_schema.key_column_usage
+        WHERE table_name = 'facts' AND column_name = 'user_id'
+        AND constraint_name IN (
+            SELECT constraint_name FROM information_schema.table_constraints
+            WHERE table_name = 'facts' AND constraint_type = 'PRIMARY KEY'
+        )
+    )");
+    if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) == 0) {
+        PQclear(res);
+        // Drop old PK and add new composite PK
+        PQexec(conn, "ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_pkey");
+        PQexec(conn, "ALTER TABLE facts ADD PRIMARY KEY (user_id, key)");
+        dout(1) << "Migrated facts table: updated primary key to (user_id, key)" << std::endl;
+    } else {
+        PQclear(res);
+    }
+
     dout(1) << "PostgreSQL RAG database tables created successfully" << std::endl;
     return true;
 }

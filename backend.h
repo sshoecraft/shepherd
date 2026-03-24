@@ -51,6 +51,7 @@ enum class CallbackEvent {
     CONTENT,      // Assistant text chunk
     THINKING,     // Reasoning/thinking chunk (if show_thinking enabled)
     TOOL_CALL,    // Model requesting a tool call (triggers execution)
+    TOOL_CALLS_COMPLETE,  // All tool calls emitted - frontend should now generate next response
     TOOL_RESULT,  // Result of tool execution (summary in content)
     TOOL_DISP,    // Display-only tool call (remote execution, no local action)
     RESULT_DISP,  // Display-only tool result (remote execution, no local action)

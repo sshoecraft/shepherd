@@ -937,4 +937,9 @@ void AnthropicBackend::generate_from_session(Session& session, int max_tokens) {
         std::string id = tc["id"];
         callback(CallbackEvent::TOOL_CALL, args, name, id);
     }
+
+    // Signal all tool calls emitted - frontend can now generate next response
+    if (!accumulated_tool_calls.empty()) {
+        callback(CallbackEvent::TOOL_CALLS_COMPLETE, "", "", "");
+    }
 }

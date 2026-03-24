@@ -184,6 +184,11 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
         for (const auto& tc : resp.tool_calls) {
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
+
+        // Signal all tool calls emitted - frontend can now generate next response
+        if (!resp.tool_calls.empty()) {
+            callback(CallbackEvent::TOOL_CALLS_COMPLETE, "", "", "");
+        }
     } else {
         // Check if this is a context-full error - throw ContextFullException
         // so the frontend (session owner) can handle eviction

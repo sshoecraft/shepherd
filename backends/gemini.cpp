@@ -811,6 +811,7 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
     // Emit tool calls AFTER STOP - frontend handles immediately
     // accumulated_tool_calls stores Gemini-native parts (with thoughtSignature)
     static int gemini_tool_counter = 0;
+    bool had_tool_calls = false;
     for (const auto& part : accumulated_tool_calls) {
         if (part.contains("functionCall")) {
             const auto& fc = part["functionCall"];
@@ -818,6 +819,12 @@ void GeminiBackend::generate_from_session(Session& session, int max_tokens) {
             std::string args = fc.contains("args") ? fc["args"].dump() : "{}";
             std::string id = "gemini_" + std::to_string(++gemini_tool_counter);
             callback(CallbackEvent::TOOL_CALL, args, name, id);
+            had_tool_calls = true;
         }
+    }
+
+    // Signal all tool calls emitted - frontend can now generate next response
+    if (had_tool_calls) {
+        callback(CallbackEvent::TOOL_CALLS_COMPLETE, "", "", "");
     }
 }

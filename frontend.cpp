@@ -200,10 +200,10 @@ bool Frontend::connect_provider(const std::string& name) {
                 }
             }
 
-            // Initialize RAG if this provider has memory enabled and RAG isn't already initialized
-            if (!flags.no_rag && (config->rag_context_injection || config->memory_extraction)) {
+            // Initialize RAG if this provider has memory enabled, memtools requested, and RAG isn't already initialized
+            if (!flags.no_rag && (config->rag_context_injection || config->memory_extraction || flags.mem_tools)) {
                 if (!RAGManager::is_initialized()) {
-                    std::string db_path = config->memory_database;
+                    std::string db_path = Config::expand_env_vars(config->memory_database);
                     if (db_path.empty()) {
                         try {
                             db_path = Config::get_default_memory_db_path();

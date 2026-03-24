@@ -216,6 +216,34 @@ std::string Config::get_default_memory_db_path() {
     return data_home + "/shepherd/memory.db";
 }
 
+std::string Config::expand_env_vars(const std::string& input) {
+    std::string result;
+    size_t i = 0;
+    while (i < input.size()) {
+        if (input[i] == '$' && i + 1 < input.size() && input[i + 1] == '{') {
+            // Find closing brace
+            size_t end = input.find('}', i + 2);
+            if (end != std::string::npos) {
+                std::string var_name = input.substr(i + 2, end - i - 2);
+                const char* val = getenv(var_name.c_str());
+                if (val) {
+                    result += val;
+                }
+                // If env var not set, replace with empty string
+                i = end + 1;
+            } else {
+                // No closing brace, keep literal
+                result += input[i];
+                ++i;
+            }
+        } else {
+            result += input[i];
+            ++i;
+        }
+    }
+    return result;
+}
+
 std::string Config::get_config_path() const {
     if (!custom_config_path_.empty()) {
         return custom_config_path_;

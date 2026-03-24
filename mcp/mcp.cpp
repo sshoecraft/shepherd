@@ -68,9 +68,10 @@ bool MCP::initialize(Tools& tools) {
                 }
 
                 // SMCP servers use credentials instead of env
+                // Credential values support ${VAR} env var expansion
                 if (server.contains("credentials") && server["credentials"].is_object()) {
                     for (auto it = server["credentials"].begin(); it != server["credentials"].end(); ++it) {
-                        sc.smcp_credentials[it.key()] = it.value().get<std::string>();
+                        sc.smcp_credentials[it.key()] = Config::expand_env_vars(it.value().get<std::string>());
                     }
                 }
 

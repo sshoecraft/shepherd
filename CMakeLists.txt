@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.37.1
+    VERSION 2.38.0
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -60,6 +60,7 @@ set(SHEPHERD_SOURCES
     frontends/api_server.cpp
     frontends/cli_server.cpp
     frontends/client_output.cpp
+    frontends/json_frontend.cpp
 
     # Backend sources (always included)
     backends/factory.cpp

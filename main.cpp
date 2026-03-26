@@ -192,6 +192,7 @@ static void print_usage(int, char** argv) {
 	printf("	--apiserver		   Start HTTP API server mode (OpenAI-compatible)\n");
 	printf("	--server		   Alias for --apiserver\n");
 	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
+	printf("	--json			   Start JSON line mode (stdin/stdout, for machine integration)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
@@ -931,6 +932,7 @@ int main(int argc, char** argv) {
 		{"apiserver", no_argument, 0, 1015},
 		{"server", no_argument, 0, 1015},  // Alias for --apiserver
 		{"cliserver", no_argument, 0, 1036},
+		{"json", no_argument, 0, 1069},
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
 		{"auth-mode", required_argument, 0, 1045},
@@ -1085,6 +1087,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1036: // --cliserver
 				frontend_mode = "cli-server";
+				break;
+			case 1069: // --json
+				frontend_mode = "json";
 				break;
 			case 1016: // --port
 				server_port = std::atoi(optarg);
@@ -1309,7 +1314,7 @@ int main(int argc, char** argv) {
 	// Determine if we need TUI mode
 	// Server modes should never use TUI or interactive input - force TUI off
 	bool use_tui = false;
-	if (g_server_mode || frontend_mode == "cli-server") {
+	if (g_server_mode || frontend_mode == "cli-server" || frontend_mode == "json") {
 		tui_override = 0;  // Force TUI off for server modes
 	} else if (tui_override == -1) {
 		// No command-line override - use config setting

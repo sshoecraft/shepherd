@@ -3,6 +3,7 @@
 #include "cli.h"
 #include "api_server.h"
 #include "cli_server.h"
+#include "json_frontend.h"
 #include "tui.h"
 #include "tools/tools.h"
 #include "tools/remote_tools.h"
@@ -69,6 +70,9 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     }
     else if (mode == "cli-server") {
         frontend = std::make_unique<CLIServer>(host, port);
+    }
+    else if (mode == "json") {
+        frontend = std::make_unique<JsonFrontend>();
     }
     else {
         throw std::runtime_error("Invalid frontend mode: " + mode);

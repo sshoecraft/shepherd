@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.38.0
+    VERSION 2.38.1
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -509,6 +509,15 @@ include(GNUInstallDirs)
 install(TARGETS shepherd
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Set capabilities for chroot support on installed binary
+install(CODE "execute_process(
+    COMMAND sudo -n setcap cap_sys_chroot,cap_setuid,cap_setgid+ep \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/shepherd\"
+    RESULT_VARIABLE _setcap_result
+)
+if(NOT _setcap_result EQUAL 0)
+    message(STATUS \"Note: run 'sudo setcap cap_sys_chroot,cap_setuid,cap_setgid+ep ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/shepherd' to enable chroot\")
+endif()")
 
 # Systemd service file
 configure_file(

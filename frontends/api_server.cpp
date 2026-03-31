@@ -378,6 +378,7 @@ void APIServer::register_endpoints() {
 
             // Parse use_tools: server-side tool execution
             bool use_tools = request.value("use_tools", config->use_tools);
+            bool show_tool_calls = request.value("show_tool_calls", config->show_tool_calls);
             if (use_tools && !config->use_tools) {
                 res.status = 400;
                 res.set_content(create_error_response(400,
@@ -577,17 +578,27 @@ void APIServer::register_endpoints() {
                 // Phase 1: Prefill BEFORE committing to streaming
                 // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
                 // Set up handler to capture prefill stats
-                set_handler([](CallbackEvent type, const std::string& content,
+                // Note: use stream_backend directly (request_backend was moved into stream_backend above)
+                auto prefill_handler = [](CallbackEvent type, const std::string& content,
                                          const std::string&, const std::string&) -> bool {
                     if (type == CallbackEvent::STATS && config->stats) {
                         std::cout << "\033[90m" << content << "\033[0m" << std::flush;
                     }
                     return true;
-                });
+                };
+                if (per_request_cb) {
+                    stream_backend->callback = prefill_handler;
+                } else {
+                    request_handler = prefill_handler;
+                }
                 try {
                     active_backend->prefill_session(request_session);
                 } catch (const ContextFullException& e) {
-                    clear_handler();
+                    if (per_request_cb) {
+                        stream_backend->callback = [](CallbackEvent, const std::string&, const std::string&, const std::string&) { return true; };
+                    } else {
+                        request_handler = nullptr;
+                    }
                     // Context overflow - return proper HTTP 400 (headers not sent yet!)
                     dout(1) << "[api] ERROR: Context overflow during prefill - " << e.what() << std::endl;
                     res.status = 400;
@@ -601,7 +612,11 @@ void APIServer::register_endpoints() {
                     res.set_content(error_resp.dump(), "application/json");
                     return;
                 } catch (const std::exception& e) {
-                    clear_handler();
+                    if (per_request_cb) {
+                        stream_backend->callback = [](CallbackEvent, const std::string&, const std::string&, const std::string&) { return true; };
+                    } else {
+                        request_handler = nullptr;
+                    }
                     // Other errors during prefill
                     dout(1) << "[api] ERROR: Prefill failed - " << e.what() << std::endl;
                     res.status = 500;
@@ -615,7 +630,11 @@ void APIServer::register_endpoints() {
                     res.set_content(error_resp.dump(), "application/json");
                     return;
                 }
-                clear_handler();
+                if (per_request_cb) {
+                    stream_backend->callback = [](CallbackEvent, const std::string&, const std::string&, const std::string&) { return true; };
+                } else {
+                    request_handler = nullptr;
+                }
 
                 // Phase 2: Prefill succeeded - now safe to commit to streaming
                 res.set_header("Content-Type", "text/event-stream; charset=utf-8");
@@ -625,7 +644,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory, use_tools, per_request_cb](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory, use_tools, show_tool_calls, per_request_cb](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -701,7 +720,9 @@ void APIServer::register_endpoints() {
                                     return true;  // Tool calls returned in response
                                 }
                                 // use_tools: execute tool and stream call/result as content
-                                send_content_chunk("\n" + tool_name_arg + "(" + content + ")\n");
+                                if (show_tool_calls) {
+                                    send_content_chunk("\n" + tool_name_arg + "(" + content + ")\n");
+                                }
 
                                 ToolResult result = this->execute_tool(
                                     this->tools, tool_name_arg, content, tool_call_id,
@@ -710,10 +731,25 @@ void APIServer::register_endpoints() {
                                 std::string summary = result.summary.empty() ?
                                     (result.success ? result.content.substr(0, 200) : result.error) :
                                     result.summary;
-                                send_content_chunk(summary + "\n");
+                                if (show_tool_calls) {
+                                    send_content_chunk(summary + "\n");
+                                }
                                 streamed_content += "\n" + tool_name_arg + "(" + content + ")\n" + summary + "\n";
 
-                                // Add tool response to session for re-generation
+                                // Add assistant message with tool_calls then tool response
+                                // OpenAI API requires assistant message with tool_calls before tool responses
+                                {
+                                    Message assistant_msg(Message::ASSISTANT, streamed_content, 0);
+                                    nlohmann::json tc_json = nlohmann::json::array();
+                                    tc_json.push_back({
+                                        {"id", tool_call_id},
+                                        {"type", "function"},
+                                        {"function", {{"name", tool_name_arg}, {"arguments", content}}}
+                                    });
+                                    assistant_msg.tool_calls_json = tc_json.dump();
+                                    request_session.messages.push_back(assistant_msg);
+                                }
+
                                 Message tool_msg(Message::TOOL_RESPONSE, result.content, 0);
                                 tool_msg.tool_name = tool_name_arg;
                                 tool_msg.tool_call_id = tool_call_id;
@@ -880,11 +916,11 @@ void APIServer::register_endpoints() {
                             if (!stream_backend->accumulated_tool_calls.empty()) {
                                 if (use_tools) {
                                     // Execute accumulated tool calls server-side
-                                    // Add assistant message to session
-                                    if (!streamed_content.empty()) {
-                                        request_session.messages.push_back(
-                                            Message(Message::ASSISTANT, streamed_content, 0));
-                                    }
+                                    // Add assistant message with tool_calls to session
+                                    // OpenAI API requires assistant message with tool_calls before tool responses
+                                    Message assistant_msg(Message::ASSISTANT, streamed_content, 0);
+                                    assistant_msg.tool_calls_json = stream_backend->accumulated_tool_calls.dump();
+                                    request_session.messages.push_back(assistant_msg);
 
                                     for (const auto& tc : stream_backend->accumulated_tool_calls) {
                                         std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
@@ -892,7 +928,9 @@ void APIServer::register_endpoints() {
                                         std::string tc_args = tc["function"].value("arguments", "{}");
 
                                         // Stream tool call as content text
-                                        send_content_chunk("\n" + tc_name + "(" + tc_args + ")\n");
+                                        if (show_tool_calls) {
+                                            send_content_chunk("\n" + tc_name + "(" + tc_args + ")\n");
+                                        }
 
                                         // Execute tool
                                         ToolResult result = this->execute_tool(
@@ -902,7 +940,9 @@ void APIServer::register_endpoints() {
                                         std::string summary = result.summary.empty() ?
                                             (result.success ? result.content.substr(0, 200) : result.error) :
                                             result.summary;
-                                        send_content_chunk(summary + "\n");
+                                        if (show_tool_calls) {
+                                            send_content_chunk(summary + "\n");
+                                        }
                                         streamed_content += "\n" + tc_name + "(" + tc_args + ")\n" + summary + "\n";
 
                                         // Add tool response to session
@@ -1100,27 +1140,49 @@ void APIServer::register_endpoints() {
 
                 if (!has_tool_calls) break;  // No tool calls, done
 
-                // Add assistant message to request_session
+                // Add assistant message with tool_calls to request_session
+                // OpenAI API requires assistant message with tool_calls before tool responses
                 std::string assistant_content = accumulated_content.substr(pass_content.size());
                 Message assistant_msg(Message::ASSISTANT, assistant_content, 0);
                 if (!active_backend->accumulated_tool_calls.empty()) {
                     assistant_msg.tool_calls_json = active_backend->accumulated_tool_calls.dump();
+                } else if (tool_call_opt.has_value()) {
+                    auto tc = tool_call_opt.value();
+                    nlohmann::json tc_json = nlohmann::json::array();
+                    nlohmann::json params = nlohmann::json::object();
+                    for (const auto& [key, value] : tc.parameters) {
+                        if (value.type() == typeid(std::string))
+                            params[key] = std::any_cast<std::string>(value);
+                        else if (value.type() == typeid(int))
+                            params[key] = std::any_cast<int>(value);
+                        else if (value.type() == typeid(double))
+                            params[key] = std::any_cast<double>(value);
+                        else if (value.type() == typeid(bool))
+                            params[key] = std::any_cast<bool>(value);
+                    }
+                    std::string tc_id = tc.tool_call_id.empty() ?
+                        "call_" + std::to_string(std::time(nullptr)) : tc.tool_call_id;
+                    tc_json.push_back({
+                        {"id", tc_id},
+                        {"type", "function"},
+                        {"function", {{"name", tc.name}, {"arguments", params.dump()}}}
+                    });
+                    assistant_msg.tool_calls_json = tc_json.dump();
                 }
                 request_session.messages.push_back(assistant_msg);
 
                 // Execute tool calls and format as text content
                 auto execute_one_tool = [&](const std::string& name, const std::string& params_json,
                                             const std::string& tc_id) {
-                    // Format tool call as text content
-                    accumulated_content += "\n" + name + "(" + params_json + ")\n";
-
                     // Execute tool
                     ToolResult result = execute_tool(tools, name, params_json, tc_id, req_user_id);
 
-                    // Format result as text content
-                    std::string summary = result.summary.empty() ?
-                        (result.success ? result.content.substr(0, 200) : result.error) : result.summary;
-                    accumulated_content += summary + "\n";
+                    // Format tool call and result as text content (if show_tool_calls)
+                    if (show_tool_calls) {
+                        std::string summary = result.summary.empty() ?
+                            (result.success ? result.content.substr(0, 200) : result.error) : result.summary;
+                        accumulated_content += "\n" + name + "(" + params_json + ")\n" + summary + "\n";
+                    }
 
                     // Add tool response to session
                     Message tool_msg(Message::TOOL_RESPONSE, result.content, 0);

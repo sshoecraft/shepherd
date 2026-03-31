@@ -106,6 +106,7 @@ public:
     std::string apikey_store;  // API key store URI: file://, postgresql://, msi://
     bool server_tools;    // Expose /v1/tools endpoints for tool discovery/execution
     bool use_tools;       // Execute tools server-side in API server
+    bool show_tool_calls; // Stream tool call/result text to client (use_tools mode)
     nlohmann::json json;  // Parsed config JSON for backend-specific settings
 
     // Unified config: providers loaded from config (Key Vault or file)

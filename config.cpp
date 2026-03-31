@@ -104,6 +104,7 @@ void Config::set_defaults() {
 	apikey_store = "";  // Empty = no auth (NoneKeyStore)
 	server_tools = false;
 	use_tools = false;
+	show_tool_calls = true;
 
 	// Scheduler defaults
 	scheduler_name = "default";
@@ -426,6 +427,9 @@ void Config::load_from_json(const nlohmann::json& j) {
     if (j.contains("use_tools")) {
         use_tools = j["use_tools"].get<bool>();
     }
+    if (j.contains("show_tool_calls")) {
+        show_tool_calls = j["show_tool_calls"].get<bool>();
+    }
 
     // Load RAG memory database path (optional)
     if (j.contains("memory_database")) {
@@ -608,6 +612,9 @@ void Config::save() const {
         if (use_tools) {
             save_json["use_tools"] = use_tools;
         }
+        if (!show_tool_calls) {
+            save_json["show_tool_calls"] = show_tool_calls;
+        }
 
         std::ofstream file(config_path);
         if (!file.is_open()) {
@@ -694,6 +701,7 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "apikey_store") return cfg.apikey_store;
     if (key == "server_tools") return cfg.server_tools ? "true" : "false";
     if (key == "use_tools") return cfg.use_tools ? "true" : "false";
+    if (key == "show_tool_calls") return cfg.show_tool_calls ? "true" : "false";
     if (key == "rag_context_injection") return cfg.rag_context_injection ? "true" : "false";
     if (key == "rag_relevance_threshold") return std::to_string(cfg.rag_relevance_threshold);
     if (key == "rag_max_results") return std::to_string(cfg.rag_max_results);
@@ -748,6 +756,8 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.server_tools = (value == "true" || value == "1" || value == "on");
     } else if (key == "use_tools") {
         cfg.use_tools = (value == "true" || value == "1" || value == "on");
+    } else if (key == "show_tool_calls") {
+        cfg.show_tool_calls = (value == "true" || value == "1" || value == "on");
     } else if (key == "rag_context_injection") {
         cfg.rag_context_injection = (value == "true" || value == "1" || value == "on");
     } else if (key == "rag_relevance_threshold") {
@@ -789,7 +799,7 @@ static const std::vector<std::string> CONFIG_KEYS = {
     "warmup", "calibration", "streaming", "thinking", "reasoning", "tui",
     "truncate_limit", "max_db_size", "web_search_provider",
     "web_search_api_key", "web_search_instance_url", "memory_database",
-    "system_prompt", "auto_provider", "apikey_store", "server_tools", "use_tools",
+    "system_prompt", "auto_provider", "apikey_store", "server_tools", "use_tools", "show_tool_calls",
     "rag_context_injection", "rag_relevance_threshold", "rag_max_results", "user_id",
     "memory_extraction", "memory_extraction_model", "memory_extraction_endpoint",
     "memory_extraction_api_key", "memory_extraction_max_tokens",

@@ -197,6 +197,7 @@ static void print_usage(int, char** argv) {
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
 	printf("	--use-tools	   Execute tools server-side in API server\n");
+	printf("	--show-tool-calls=BOOL  Show tool calls in output (default: true)\n");
 	printf("	--apikey-store URI API key store: file://, postgresql://, msi://\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
@@ -852,6 +853,7 @@ int main(int argc, char** argv) {
 	std::vector<std::string> enable_tools;
 	bool server_tools = false;
 	bool use_tools = false;
+	int show_tool_calls_override = -1;  // -1 = use config, 0 = false, 1 = true
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string config_file_path;
@@ -944,6 +946,7 @@ int main(int argc, char** argv) {
 		{"apikey-store", required_argument, 0, 1045},
 		{"server-tools", no_argument, 0, 1047},
 		{"use-tools", no_argument, 0, 1070},
+		{"show-tool-calls", required_argument, 0, 1071},
 		{"truncate", required_argument, 0, 1019},
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
@@ -1116,6 +1119,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1070: // --use-tools
 				use_tools = true;
+				break;
+			case 1071: // --show-tool-calls=true|false
+				show_tool_calls_override = (std::string(optarg) == "true" || std::string(optarg) == "1") ? 1 : 0;
 				break;
 			case 1019: // --truncate
 				override.truncate_limit = std::atoi(optarg);
@@ -1473,6 +1479,9 @@ int main(int argc, char** argv) {
 	}
 	if (use_tools) {
 		config->use_tools = true;
+	}
+	if (show_tool_calls_override >= 0) {
+		config->show_tool_calls = (show_tool_calls_override == 1);
 	}
 
 	// Validate configuration (skip model path check if overridden)

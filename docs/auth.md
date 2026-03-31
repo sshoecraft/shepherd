@@ -10,16 +10,27 @@ The auth module provides optional API key authentication for Shepherd's server m
 
 ```
 KeyStore (abstract)
-├── NoneKeyStore     - No authentication (default)
-├── JsonKeyStore     - Local JSON file storage
-├── SqliteKeyStore   - SQLite database (future)
-├── VaultKeyStore    - HashiCorp Vault (future)
-└── ManagedKeyStore  - Azure/AWS managed identity (future)
+├── NoneKeyStore     - No authentication (default, no --apikey-store)
+├── JsonKeyStore     - Local JSON file (apikey-store file://)
+├── PGKeyStore       - PostgreSQL database (apikey-store postgresql://)
+└── MsiKeyStore      - Azure Key Vault (apikey-store msi://)
 ```
 
-### Key Storage Format
+### Configuration
 
-Keys are stored in `~/.config/shepherd/api_keys.json`:
+Authentication is configured via the `--apikey-store` flag using a URI scheme:
+
+| URI | Backend |
+|-----|---------|
+| (omitted) | NoneKeyStore - no auth |
+| `file://` | JsonKeyStore - default path `~/.config/shepherd/api_keys.json` |
+| `file:///path/to/keys.json` | JsonKeyStore - custom file path |
+| `postgresql://user:pass@host/db` | PGKeyStore - PostgreSQL table |
+| `msi://vault-name` | MsiKeyStore - Azure Key Vault |
+
+### Key Storage Format (JSON)
+
+Keys are stored in `~/.config/shepherd/api_keys.json` (or custom path):
 
 ```json
 {
@@ -32,7 +43,19 @@ Keys are stored in `~/.config/shepherd/api_keys.json`:
 }
 ```
 
-The API key itself is the map key for O(1) lookup. The `permissions` field is reserved for future authorization features.
+### Key Storage Format (PostgreSQL)
+
+```sql
+CREATE TABLE IF NOT EXISTS api_keys (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    created TEXT NOT NULL,
+    permissions JSONB DEFAULT '{}'
+);
+```
+
+The API key itself is the map key / primary key for O(1) lookup. The `permissions` field is reserved for future authorization features.
 
 ### Key Format
 
@@ -45,8 +68,10 @@ The API key itself is the map key for O(1) lookup. The `permissions` field is re
 
 | File | Purpose |
 |------|---------|
-| `auth.h` | KeyStore interface, NoneKeyStore, JsonKeyStore, ApiKeyEntry |
-| `auth.cpp` | Key generation, validation, JSON load/save |
+| `auth.h` | KeyStore interface, NoneKeyStore, JsonKeyStore, MsiKeyStore, ApiKeyEntry |
+| `auth.cpp` | Key generation, validation, JSON load/save, URI factory |
+| `auth_pg.h` | PGKeyStore class declaration (ENABLE_POSTGRESQL gated) |
+| `auth_pg.cpp` | PGKeyStore implementation using libpq |
 
 ## CLI Usage
 
@@ -65,11 +90,17 @@ shepherd keygen remove production
 ## Server Usage
 
 ```bash
-# Start with JSON key authentication
-shepherd --cliserver --auth-mode json
+# Start with JSON key authentication (default path)
+shepherd --apiserver --apikey-store file://
+
+# Start with JSON key authentication (custom path)
+shepherd --apiserver --apikey-store file:///etc/shepherd/keys.json
+
+# Start with PostgreSQL key store
+shepherd --apiserver --apikey-store "postgresql://user:pass@localhost/shepherd"
 
 # Start without auth (default)
-shepherd --cliserver --auth-mode none
+shepherd --apiserver
 ```
 
 ## Client Configuration
@@ -96,11 +127,19 @@ Provider config in `~/.config/shepherd/providers/cli-server.json`:
 
 ### Authentication Flow
 
-1. Server initializes `KeyStore` from `--auth-mode` parameter
+1. Server initializes `KeyStore` from `--apikey-store` URI
 2. Pre-routing handler intercepts all requests (if auth enabled)
 3. Public endpoints (`/health`, `/v1/models`) bypass auth
 4. Protected endpoints require valid `Authorization: Bearer <key>` header
 5. Invalid/missing key returns 401 with OpenAI-compatible error JSON
+
+### PGKeyStore
+
+- Uses libpq directly (same pattern as `rag/postgresql_backend.cpp`)
+- Connection via `PQconnectdb()` with prepared statements
+- Lazy-loads all keys on first validation call (cached in memory)
+- Only compiled when `ENABLE_POSTGRESQL` cmake option is on
+- Attempts postgresql:// without ENABLE_POSTGRESQL gives a clear error
 
 ### Error Response Format
 
@@ -117,3 +156,4 @@ Provider config in `~/.config/shepherd/providers/cli-server.json`:
 ## Version History
 
 - **2.17.0**: Initial implementation with `none` and `json` auth modes
+- **2.39.0**: Replaced `--auth-mode` with URI-based `--apikey-store`, added PGKeyStore

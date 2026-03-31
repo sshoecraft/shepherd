@@ -39,11 +39,14 @@ shepherd --server --port 8000 --provider mylocal
 
 ## Authentication
 
-By default, the API server requires no authentication. For remote access, enable API key authentication:
+By default, the API server requires no authentication. For remote access, enable API key authentication via `--apikey-store`:
 
 ```bash
-# Start server with authentication
-./shepherd --server --auth-mode json
+# Start server with JSON key authentication (default path)
+./shepherd --server --apikey-store file://
+
+# Start with PostgreSQL key store
+./shepherd --server --apikey-store "postgresql://user:pass@localhost/shepherd"
 
 # Generate an API key
 shepherd apikey add mykey
@@ -56,6 +59,8 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
+See `docs/auth.md` for full URI scheme reference and key store backends.
+
 **API Key Management:**
 ```bash
 shepherd apikey add <name>      # Generate new key
@@ -63,7 +68,32 @@ shepherd apikey list            # List all keys
 shepherd apikey remove <name>   # Remove a key
 ```
 
-## Server-Side Tools
+## Server-Side Tool Execution (`--use-tools`)
+
+When `--use-tools` is enabled, the server executes tools autonomously during generation instead of returning `tool_calls` to the client. The client sees tool calls and results streamed as text content.
+
+```bash
+./shepherd --server --use-tools
+```
+
+**Behavior Matrix:**
+
+| `--use-tools` | `--server-tools` | Request `use_tools` | Behavior |
+|---|---|---|---|
+| off | off | omitted/false | Normal API, no tools |
+| off | off | true | Error 400 (tools not available) |
+| off | on | omitted/false | `/v1/tools` endpoint, tool_calls returned to client |
+| off | on | true | Error 400 (use-tools not enabled) |
+| on | off | omitted/true | Server executes tools, no `/v1/tools` endpoint |
+| on | off | false | Normal API, tool_calls returned to client |
+| on | on | omitted/true | Server executes tools AND `/v1/tools` endpoint |
+| on | on | false | `/v1/tools` endpoint, tool_calls returned to client |
+
+Per-request override: send `"use_tools": false` in the request body to get standard tool_calls behavior even when `--use-tools` is globally enabled.
+
+The tool execution loop runs up to 25 iterations per request. If the limit is reached, `finish_reason` is `"length"`.
+
+## Server-Side Tool Endpoints (`--server-tools`)
 
 By default, the API server does **not** expose Shepherd's tools via HTTP endpoints. Tools are provided by the client in each request and executed client-side.
 
@@ -154,6 +184,7 @@ OpenAI-compatible chat completion endpoint.
 
 **Shepherd-specific parameters:**
 - `memory` (bool, default `true`): Enable/disable RAG context injection and memory extraction for this request. Set to `false` to skip both injection and extraction even when the server has memory enabled.
+- `use_tools` (bool, default from `--use-tools` flag): Override server-side tool execution for this request. Set to `false` to get standard `tool_calls` behavior even when `--use-tools` is globally enabled.
 
 **Response:**
 ```json
@@ -178,7 +209,9 @@ OpenAI-compatible chat completion endpoint.
 
 ### GET /v1/models
 
-List available models.
+List available models. Response includes a `capabilities` array indicating server features:
+- `"tool_execution"` — `--use-tools` enabled (server executes tools)
+- `"server_tools"` — `--server-tools` enabled (`/v1/tools` endpoints available)
 
 ### GET /health
 
@@ -320,7 +353,7 @@ This ensures proper HTTP semantics: context overflow returns HTTP 400, not 200 +
 import openai
 
 client = openai.OpenAI(
-    api_key="sk-shep-abc123...",  # Or "dummy" if --auth-mode none
+    api_key="sk-shep-abc123...",  # Or "dummy" if no --apikey-store
     base_url="http://localhost:8000/v1"
 )
 
@@ -386,11 +419,10 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## Important Notes
 
-- **Tools**: In server mode, tools are provided by the **client** in each request
-  - Server does NOT execute tools by default (client-side execution)
-  - Server returns tool calls to client for execution
-  - Client executes tools and sends results back in next request
-  - Use `--server-tools` to enable server-side tool execution
+- **Tools**: In server mode, tools are provided by the **client** in each request by default
+  - Server returns tool calls to client for execution (standard OpenAI behavior)
+  - Use `--use-tools` to have the server execute tools autonomously (tools streamed as content)
+  - Use `--server-tools` to expose `/v1/tools` and `/v1/tools/execute` endpoints
 
 - **KV Cache (Local Backends)**: With llamacpp/TensorRT, the KV cache persists across requests
   - Prefix matching provides fast multi-turn conversations
@@ -398,6 +430,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## Version History
 
+- **2.39.0** - Add `--use-tools` for server-side tool execution, `capabilities` in `/v1/models`, `--apikey-store` URI-based auth config
 - **2.21.1** - Fix non-streaming responses dropping CODEBLOCK events (content inside markdown code blocks was not accumulated)
 - **2.17.0** - Two-phase streaming for proper HTTP error codes
 - **2.13.0** - Unified EventCallback pattern (no add_message_stream)

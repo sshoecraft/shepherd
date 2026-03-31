@@ -40,7 +40,8 @@ private:
     bool is_api_provider = false;
 
     // Per-request output routing - set before generate, cleared after
-    // The callback routes events through this function when set
+    // For GPU backends (shared): routes through this shared handler (serialized by backend lock)
+    // For API backends (per-request): callback set directly on the backend instance
     std::function<bool(CallbackEvent, const std::string&, const std::string&, const std::string&)> request_handler;
 
     /// @brief Handle chat completion request (standard OpenAI behavior)

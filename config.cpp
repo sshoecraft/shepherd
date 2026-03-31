@@ -101,8 +101,9 @@ void Config::set_defaults() {
 	tui_history = 10000;  // TUI scrollback buffer size
 
 	// Server settings
-	auth_mode = "none";
+	apikey_store = "";  // Empty = no auth (NoneKeyStore)
 	server_tools = false;
+	use_tools = false;
 
 	// Scheduler defaults
 	scheduler_name = "default";
@@ -416,11 +417,14 @@ void Config::load_from_json(const nlohmann::json& j) {
     }
 
     // Load server settings
-    if (j.contains("auth_mode")) {
-        auth_mode = j["auth_mode"].get<std::string>();
+    if (j.contains("apikey_store")) {
+        apikey_store = j["apikey_store"].get<std::string>();
     }
     if (j.contains("server_tools")) {
         server_tools = j["server_tools"].get<bool>();
+    }
+    if (j.contains("use_tools")) {
+        use_tools = j["use_tools"].get<bool>();
     }
 
     // Load RAG memory database path (optional)
@@ -595,6 +599,15 @@ void Config::save() const {
         if (!schedulers_json.empty()) {
             save_json["schedulers"] = schedulers_json;
         }
+        if (!apikey_store.empty()) {
+            save_json["apikey_store"] = apikey_store;
+        }
+        if (server_tools) {
+            save_json["server_tools"] = server_tools;
+        }
+        if (use_tools) {
+            save_json["use_tools"] = use_tools;
+        }
 
         std::ofstream file(config_path);
         if (!file.is_open()) {
@@ -678,8 +691,9 @@ static std::string get_config_value(const Config& cfg, const std::string& key) {
     if (key == "memory_database") return cfg.memory_database.empty() ? Config::get_default_memory_db_path() : cfg.memory_database;
     if (key == "system_prompt") return cfg.system_prompt.empty() ? "(default)" : cfg.system_prompt;
     if (key == "auto_provider") return cfg.auto_provider ? "true" : "false";
-    if (key == "auth_mode") return cfg.auth_mode;
+    if (key == "apikey_store") return cfg.apikey_store;
     if (key == "server_tools") return cfg.server_tools ? "true" : "false";
+    if (key == "use_tools") return cfg.use_tools ? "true" : "false";
     if (key == "rag_context_injection") return cfg.rag_context_injection ? "true" : "false";
     if (key == "rag_relevance_threshold") return std::to_string(cfg.rag_relevance_threshold);
     if (key == "rag_max_results") return std::to_string(cfg.rag_max_results);
@@ -728,10 +742,12 @@ static bool set_config_value(Config& cfg, const std::string& key, const std::str
         cfg.system_prompt = value;
     } else if (key == "auto_provider") {
         cfg.auto_provider = (value == "true" || value == "1" || value == "on");
-    } else if (key == "auth_mode") {
-        cfg.auth_mode = value;
+    } else if (key == "apikey_store") {
+        cfg.apikey_store = value;
     } else if (key == "server_tools") {
         cfg.server_tools = (value == "true" || value == "1" || value == "on");
+    } else if (key == "use_tools") {
+        cfg.use_tools = (value == "true" || value == "1" || value == "on");
     } else if (key == "rag_context_injection") {
         cfg.rag_context_injection = (value == "true" || value == "1" || value == "on");
     } else if (key == "rag_relevance_threshold") {
@@ -773,7 +789,7 @@ static const std::vector<std::string> CONFIG_KEYS = {
     "warmup", "calibration", "streaming", "thinking", "reasoning", "tui",
     "truncate_limit", "max_db_size", "web_search_provider",
     "web_search_api_key", "web_search_instance_url", "memory_database",
-    "system_prompt", "auto_provider", "auth_mode", "server_tools",
+    "system_prompt", "auto_provider", "apikey_store", "server_tools", "use_tools",
     "rag_context_injection", "rag_relevance_threshold", "rag_max_results", "user_id",
     "memory_extraction", "memory_extraction_model", "memory_extraction_endpoint",
     "memory_extraction_api_key", "memory_extraction_max_tokens",

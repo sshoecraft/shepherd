@@ -196,7 +196,7 @@ Server::Server(const std::string& host, int port, const std::string& server_type
     }
 
     // Initialize API key authentication from config
-    key_store = KeyStore::create(config->auth_mode);
+    key_store = KeyStore::create(config->apikey_store);
 
     // Default no-op callback - subclasses should set their own callback
     // in their constructor to properly handle events

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.38.1
+    VERSION 2.39.2
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -245,11 +245,11 @@ target_link_libraries(shepherd PRIVATE
 
 # PostgreSQL backend (optional)
 if(ENABLE_POSTGRESQL)
-    target_sources(shepherd PRIVATE rag/postgresql_backend.cpp)
+    target_sources(shepherd PRIVATE rag/postgresql_backend.cpp auth_pg.cpp)
     target_include_directories(shepherd PRIVATE ${LIBPQ_INCLUDE_DIRS})
     target_link_libraries(shepherd PRIVATE ${LIBPQ_LIBRARIES})
     target_compile_definitions(shepherd PRIVATE ENABLE_POSTGRESQL)
-    message(STATUS "PostgreSQL RAG backend enabled")
+    message(STATUS "PostgreSQL backend enabled (RAG + API key store)")
 endif()
 
 # TensorRT-LLM library from pip installation

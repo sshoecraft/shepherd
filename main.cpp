@@ -196,7 +196,8 @@ static void print_usage(int, char** argv) {
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
-	printf("	--auth-mode MODE   Authentication mode: none (default), json\n");
+	printf("	--use-tools	   Execute tools server-side in API server\n");
+	printf("	--apikey-store URI API key store: file://, postgresql://, msi://\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
 	printf("	--colors		   Force enable colored output (overrides environment)\n");
@@ -828,12 +829,16 @@ int main(int argc, char** argv) {
 
 	// Handle apikey subcommand (API key management)
 	if (subcommand == "apikey") {
+		if (!config) {
+			config = std::make_unique<Config>();
+			config->load();
+		}
 		std::vector<std::string> args;
 		for (int i = 2; i < argc; i++) {
 			args.push_back(argv[i]);
 		}
 		auto out = [](const std::string& msg) { std::cout << msg; };
-		return handle_apikey_args(args, out);
+		return handle_apikey_args(args, out, config->apikey_store);
 	}
 
 	// Flags and settings that don't map directly to config
@@ -846,6 +851,7 @@ int main(int argc, char** argv) {
 	std::vector<std::string> disable_tools;
 	std::vector<std::string> enable_tools;
 	bool server_tools = false;
+	bool use_tools = false;
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
 	std::string config_file_path;
@@ -854,7 +860,7 @@ int main(int argc, char** argv) {
 	std::string run_as_user;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
-	std::string auth_mode = "none";
+	std::string apikey_store;
 	std::string frontend_mode = "cli";
 
 	// Temporary storage for command-line overrides (applied to config after load)
@@ -935,8 +941,9 @@ int main(int argc, char** argv) {
 		{"json", no_argument, 0, 1069},
 		{"port", required_argument, 0, 1016},
 		{"host", required_argument, 0, 1017},
-		{"auth-mode", required_argument, 0, 1045},
+		{"apikey-store", required_argument, 0, 1045},
 		{"server-tools", no_argument, 0, 1047},
+		{"use-tools", no_argument, 0, 1070},
 		{"truncate", required_argument, 0, 1019},
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
@@ -1101,15 +1108,14 @@ int main(int argc, char** argv) {
 			case 1017: // --host
 				server_host = optarg;
 				break;
-			case 1045: // --auth-mode
-				auth_mode = optarg;
-				if (auth_mode != "none" && auth_mode != "json") {
-					printf("Error: auth-mode must be one of: none, json\n");
-					return 1;
-				}
+			case 1045: // --apikey-store
+				apikey_store = optarg;
 				break;
 			case 1047: // --server-tools
 				server_tools = true;
+				break;
+			case 1070: // --use-tools
+				use_tools = true;
 				break;
 			case 1019: // --truncate
 				override.truncate_limit = std::atoi(optarg);
@@ -1305,7 +1311,7 @@ int main(int argc, char** argv) {
 			return 1;
 		}
 
-		// Store vault name if provided (for --auth-mode msi without --config msi)
+		// Store vault name if provided (for --apikey-store msi:// without --config msi)
 		if (!keyvault_name.empty()) {
 			config->keyvault_name = keyvault_name;
 		}
@@ -1459,11 +1465,14 @@ int main(int argc, char** argv) {
 	}
 
 	// Apply server settings from command line (these override config file values)
-	if (auth_mode != "none") {
-		config->auth_mode = auth_mode;
+	if (!apikey_store.empty()) {
+		config->apikey_store = apikey_store;
 	}
 	if (server_tools) {
 		config->server_tools = true;
+	}
+	if (use_tools) {
+		config->use_tools = true;
 	}
 
 	// Validate configuration (skip model path check if overridden)

@@ -18,29 +18,53 @@ using json = nlohmann::json;
 // KeyStore factory
 // =============================================================================
 
-std::unique_ptr<KeyStore> KeyStore::create(const std::string& mode) {
-    if (mode == "none" || mode.empty()) {
+std::unique_ptr<KeyStore> KeyStore::create(const std::string& uri) {
+    if (uri.empty()) {
         return std::make_unique<NoneKeyStore>();
     }
-    if (mode == "json") {
-        return std::make_unique<JsonKeyStore>();
+
+    // Parse URI scheme
+    auto scheme_end = uri.find("://");
+    if (scheme_end == std::string::npos) {
+        throw std::runtime_error("Invalid apikey_store URI: " + uri + " (expected scheme://...)");
     }
-    if (mode == "msi") {
+
+    std::string scheme = uri.substr(0, scheme_end);
+    std::string path = uri.substr(scheme_end + 3);  // Everything after ://
+
+    if (scheme == "file") {
+        return std::make_unique<JsonKeyStore>(path);
+    }
+    if (scheme == "postgresql" || scheme == "postgres") {
+#ifdef ENABLE_POSTGRESQL
+        // PGKeyStore created with full URI (needs connection string)
+        return create_pg_keystore(uri);
+#else
+        throw std::runtime_error("PostgreSQL support not compiled. Rebuild with -DENABLE_POSTGRESQL=ON");
+#endif
+    }
+    if (scheme == "msi") {
         return std::make_unique<MsiKeyStore>();
     }
-    // Future: sqlite, vault
-    throw std::runtime_error("Unknown auth mode: " + mode + " (valid: none, json, msi)");
+
+    throw std::runtime_error("Unknown apikey_store scheme: " + scheme + " (valid: file, postgresql, msi)");
 }
 
 // =============================================================================
 // JsonKeyStore implementation
 // =============================================================================
 
-JsonKeyStore::JsonKeyStore() {
+JsonKeyStore::JsonKeyStore(const std::string& path) {
+    if (!path.empty()) {
+        custom_path = path;
+    }
     keys = load_keys();
 }
 
 std::string JsonKeyStore::get_keys_file_path() {
+    if (!custom_path.empty()) {
+        return custom_path;
+    }
     // Use XDG base directory (same pattern as config.cpp)
     std::string config_home;
     const char* xdg_config = getenv("XDG_CONFIG_HOME");
@@ -176,6 +200,40 @@ const ApiKeyEntry* JsonKeyStore::get_entry(const std::string& key) const {
     return (it != keys.end()) ? &it->second : nullptr;
 }
 
+std::map<std::string, ApiKeyEntry> JsonKeyStore::list_keys() {
+    return load_keys();
+}
+
+bool JsonKeyStore::add_key(const std::string& key, const ApiKeyEntry& entry) {
+    auto all = load_keys();
+    all[key] = entry;
+    save_keys(all);
+    keys = all;
+    return true;
+}
+
+bool JsonKeyStore::remove_key(const std::string& key) {
+    auto all = load_keys();
+    if (all.erase(key) == 0) return false;
+    save_keys(all);
+    keys = all;
+    return true;
+}
+
+bool JsonKeyStore::update_key(const std::string& key, const ApiKeyEntry& entry) {
+    auto all = load_keys();
+    auto it = all.find(key);
+    if (it == all.end()) return false;
+    it->second = entry;
+    save_keys(all);
+    keys = all;
+    return true;
+}
+
+std::string JsonKeyStore::store_location() {
+    return get_keys_file_path();
+}
+
 // =============================================================================
 // MsiKeyStore implementation
 // =============================================================================
@@ -282,16 +340,21 @@ static std::string mask_key(const std::string& key) {
 }
 
 int handle_apikey_args(const std::vector<std::string>& args,
-                       std::function<void(const std::string&)> callback) {
-    // No args shows list
-    if (args.empty()) {
-        auto keys = JsonKeyStore::load_keys();
-        if (keys.empty()) {
-            callback("No API keys configured.\n");
-            callback("Create one with: shepherd apikey create <name>\n");
-            return 0;
-        }
+                       std::function<void(const std::string&)> callback,
+                       const std::string& apikey_store_uri) {
+    // Create the appropriate key store from configured URI
+    // Empty URI or no URI defaults to file:// (local JSON)
+    std::string uri = apikey_store_uri.empty() ? "file://" : apikey_store_uri;
+    std::unique_ptr<KeyStore> store;
+    try {
+        store = KeyStore::create(uri);
+    } catch (const std::exception& e) {
+        callback("Error creating key store: " + std::string(e.what()) + "\n");
+        return 1;
+    }
 
+    // Helper: list keys in table format
+    auto print_key_list = [&](const std::map<std::string, ApiKeyEntry>& keys) {
         callback("NAME           KEY               CREATED      NOTES\n");
         for (const auto& [key, entry] : keys) {
             std::string line = entry.name;
@@ -304,6 +367,17 @@ int handle_apikey_args(const std::vector<std::string>& args,
             line += " " + entry.notes + "\n";
             callback(line);
         }
+    };
+
+    // No args shows list
+    if (args.empty()) {
+        auto keys = store->list_keys();
+        if (keys.empty()) {
+            callback("No API keys configured.\n");
+            callback("Create one with: shepherd apikey create <name>\n");
+            return 0;
+        }
+        print_key_list(keys);
         return 0;
     }
 
@@ -346,28 +420,13 @@ int handle_apikey_args(const std::vector<std::string>& args,
 
     // List keys
     if (subcmd == "list") {
-        auto keys = JsonKeyStore::load_keys();
+        auto keys = store->list_keys();
         if (keys.empty()) {
             callback("No API keys configured.\n");
             callback("Create one with: shepherd apikey create --name <name>\n");
             return 0;
         }
-
-        callback("NAME           KEY               CREATED      NOTES\n");
-        for (const auto& [key, entry] : keys) {
-            std::string line = entry.name;
-            // Pad name to 14 chars
-            while (line.length() < 14) line += " ";
-            line += " " + mask_key(key);
-            // Pad key to 17 chars
-            while (line.length() < 32) line += " ";
-            // Extract date from ISO timestamp
-            std::string date = entry.created.length() >= 10 ? entry.created.substr(0, 10) : entry.created;
-            line += " " + date;
-            while (line.length() < 45) line += " ";
-            line += " " + entry.notes + "\n";
-            callback(line);
-        }
+        print_key_list(keys);
         return 0;
     }
 
@@ -378,7 +437,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
             return 1;
         }
 
-        auto keys = JsonKeyStore::load_keys();
+        auto keys = store->list_keys();
 
         // Find key by name
         for (const auto& [key, entry] : keys) {
@@ -429,14 +488,14 @@ int handle_apikey_args(const std::vector<std::string>& args,
             return 1;
         }
 
-        auto keys = JsonKeyStore::load_keys();
+        auto keys = store->list_keys();
 
         // Find and update key
         for (auto& [key, entry] : keys) {
             if (entry.name == name) {
                 if (has_notes) entry.notes = notes;
                 if (has_perms) entry.permissions = permissions;
-                JsonKeyStore::save_keys(keys);
+                store->update_key(key, entry);
                 callback("Key '" + name + "' updated.\n");
                 return 0;
             }
@@ -453,7 +512,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
             return 1;
         }
 
-        auto keys = JsonKeyStore::load_keys();
+        auto keys = store->list_keys();
 
         // Find key by name
         std::string key_to_remove;
@@ -469,8 +528,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
             return 1;
         }
 
-        keys.erase(key_to_remove);
-        JsonKeyStore::save_keys(keys);
+        store->remove_key(key_to_remove);
         callback("Key '" + name + "' removed.\n");
         return 0;
     }
@@ -502,7 +560,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
         }
 
         // Check for duplicate name
-        auto keys = JsonKeyStore::load_keys();
+        auto keys = store->list_keys();
         for (const auto& [key, entry] : keys) {
             if (entry.name == name) {
                 callback("Error: Key with name '" + name + "' already exists\n");
@@ -521,12 +579,11 @@ int handle_apikey_args(const std::vector<std::string>& args,
         entry.permissions = permissions;
 
         // Save
-        keys[new_key] = entry;
-        JsonKeyStore::save_keys(keys);
+        store->add_key(new_key, entry);
 
         callback("API key created successfully.\n\n");
         callback("Key: " + new_key + "\n\n");
-        callback("Keys are stored in: " + JsonKeyStore::get_keys_file_path() + "\n");
+        callback("Keys are stored in: " + store->store_location() + "\n");
         return 0;
     }
 

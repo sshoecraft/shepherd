@@ -287,6 +287,27 @@ void APIServer::register_endpoints() {
         // Increment request counter
         requests_processed++;
 
+        // For API providers, set the handler directly on the per-request backend
+        // to avoid concurrent requests stomping the shared request_handler.
+        // For GPU providers, the backend lock serializes access so the shared handler is safe.
+        bool per_request_cb = (is_api_provider && request_backend);
+
+        auto set_handler = [&](Backend::EventCallback handler) {
+            if (per_request_cb) {
+                request_backend->callback = handler;
+            } else {
+                request_handler = handler;
+            }
+        };
+        auto clear_handler = [&]() {
+            if (per_request_cb) {
+                request_backend->callback = [](CallbackEvent, const std::string&,
+                    const std::string&, const std::string&) { return true; };
+            } else {
+                request_handler = nullptr;
+            }
+        };
+
         try {
             // Parse request body as JSON
             json request;
@@ -355,6 +376,21 @@ void APIServer::register_endpoints() {
             bool stream = request.value("stream", false);
             bool request_memory = request.value("memory", true);
 
+            // Parse use_tools: server-side tool execution
+            bool use_tools = request.value("use_tools", config->use_tools);
+            if (use_tools && !config->use_tools) {
+                res.status = 400;
+                res.set_content(create_error_response(400,
+                    "Server-side tool execution not enabled. Start server with --use-tools").dump(),
+                    "application/json");
+                return;
+            }
+
+            // When use_tools is active, use the server's own tool definitions
+            if (use_tools) {
+                request_session.tools = session.tools;
+                dout(1) << "use_tools: using " << session.tools.size() << " server-side tools" << std::endl;
+            } else {
             // Parse tools from request (if provided)
             request_session.tools.clear();
             if (request.contains("tools") && request["tools"].is_array()) {
@@ -384,6 +420,7 @@ void APIServer::register_endpoints() {
                 }
                 dout(1) << "Parsed " + std::to_string(request_session.tools.size()) + " tools from request" << std::endl;
             }
+            } // end else (!use_tools)
 
             // Parse messages from request into session
             // OpenAI protocol sends FULL conversation history each time, so REPLACE not append
@@ -540,17 +577,17 @@ void APIServer::register_endpoints() {
                 // Phase 1: Prefill BEFORE committing to streaming
                 // This allows us to return HTTP 400 for context overflow instead of 200 + SSE error
                 // Set up handler to capture prefill stats
-                request_handler = [](CallbackEvent type, const std::string& content,
+                set_handler([](CallbackEvent type, const std::string& content,
                                          const std::string&, const std::string&) -> bool {
                     if (type == CallbackEvent::STATS && config->stats) {
                         std::cout << "\033[90m" << content << "\033[0m" << std::flush;
                     }
                     return true;
-                };
+                });
                 try {
                     active_backend->prefill_session(request_session);
                 } catch (const ContextFullException& e) {
-                    request_handler = nullptr;
+                    clear_handler();
                     // Context overflow - return proper HTTP 400 (headers not sent yet!)
                     dout(1) << "[api] ERROR: Context overflow during prefill - " << e.what() << std::endl;
                     res.status = 400;
@@ -564,7 +601,7 @@ void APIServer::register_endpoints() {
                     res.set_content(error_resp.dump(), "application/json");
                     return;
                 } catch (const std::exception& e) {
-                    request_handler = nullptr;
+                    clear_handler();
                     // Other errors during prefill
                     dout(1) << "[api] ERROR: Prefill failed - " << e.what() << std::endl;
                     res.status = 500;
@@ -578,7 +615,7 @@ void APIServer::register_endpoints() {
                     res.set_content(error_resp.dump(), "application/json");
                     return;
                 }
-                request_handler = nullptr;
+                clear_handler();
 
                 // Phase 2: Prefill succeeded - now safe to commit to streaming
                 res.set_header("Content-Type", "text/event-stream; charset=utf-8");
@@ -588,7 +625,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory, use_tools, per_request_cb](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -634,7 +671,9 @@ void APIServer::register_endpoints() {
                         };
 
                         // Set request handler for this streaming request
-                        request_handler = [&](CallbackEvent type,
+                        // For per-request backends, set directly on the backend to avoid
+                        // concurrent requests stomping the shared request_handler
+                        auto streaming_handler = [&](CallbackEvent type,
                                               const std::string& content,
                                               const std::string& tool_name_arg,
                                               const std::string& tool_call_id) -> bool {
@@ -656,9 +695,38 @@ void APIServer::register_endpoints() {
                             if (type == CallbackEvent::ERROR) {
                                 return true;  // Errors handled via response status
                             }
-                            // Handle TOOL_CALL (queue for later)
+                            // Handle TOOL_CALL
                             if (type == CallbackEvent::TOOL_CALL) {
-                                return true;  // Tool calls returned in response
+                                if (!use_tools) {
+                                    return true;  // Tool calls returned in response
+                                }
+                                // use_tools: execute tool and stream call/result as content
+                                send_content_chunk("\n" + tool_name_arg + "(" + content + ")\n");
+
+                                ToolResult result = this->execute_tool(
+                                    this->tools, tool_name_arg, content, tool_call_id,
+                                    request_session.user_id);
+
+                                std::string summary = result.summary.empty() ?
+                                    (result.success ? result.content.substr(0, 200) : result.error) :
+                                    result.summary;
+                                send_content_chunk(summary + "\n");
+                                streamed_content += "\n" + tool_name_arg + "(" + content + ")\n" + summary + "\n";
+
+                                // Add tool response to session for re-generation
+                                Message tool_msg(Message::TOOL_RESPONSE, result.content, 0);
+                                tool_msg.tool_name = tool_name_arg;
+                                tool_msg.tool_call_id = tool_call_id;
+                                request_session.messages.push_back(tool_msg);
+                                return true;
+                            }
+                            // Handle TOOL_CALLS_COMPLETE - re-generate after tool execution
+                            if (type == CallbackEvent::TOOL_CALLS_COMPLETE) {
+                                if (use_tools) {
+                                    // Re-generate with tool results in session
+                                    stream_backend->generate_from_session(request_session, max_tokens);
+                                }
+                                return true;
                             }
                             // Handle STATS - print to server console if enabled
                             if (type == CallbackEvent::STATS) {
@@ -772,62 +840,126 @@ void APIServer::register_endpoints() {
                             return send_content_chunk(output_delta);
                         };
 
-                        std::string finish_reason = "stop";
-                        try {
-                            // Use generate_from_prefilled since prefill_session() was called before streaming
-                            stream_backend->generate_from_prefilled(request_session, max_tokens);
-                        } catch (const std::exception& e) {
-                            // Errors during generation (prefill already succeeded)
-                            // Note: ContextFullException should have been caught during prefill phase
-                            json error_chunk = {
-                                {"error", {
-                                    {"message", e.what()},
-                                    {"type", "server_error"},
-                                    {"code", "500"}
-                                }}
-                            };
-                            std::string error_data = "data: " + error_chunk.dump() + "\n\ndata: [DONE]\n\n";
-                            sink.write(error_data.c_str(), error_data.size());
-                            sink.done();
-                            request_handler = nullptr;
-                            return false;
+                        if (per_request_cb) {
+                            stream_backend->callback = streaming_handler;
+                        } else {
+                            request_handler = streaming_handler;
                         }
-                        request_handler = nullptr;  // Clear after request
 
-                        // Check for accumulated tool calls (for channel-based models like GPT-OSS)
-                        // These are captured by the channel parser during streaming
-                        if (!stream_backend->accumulated_tool_calls.empty()) {
-                            const auto& tc = stream_backend->accumulated_tool_calls[0];
-                            std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
-                            std::string tc_name = tc["function"].value("name", "");
-                            std::string tc_args = tc["function"].value("arguments", "{}");
+                        std::string finish_reason = "stop";
+                        int max_tool_iterations = 25;
+                        for (int tool_iter = 0; tool_iter < max_tool_iterations; tool_iter++) {
+                            try {
+                                if (tool_iter == 0) {
+                                    // First pass: use prefilled session
+                                    stream_backend->generate_from_prefilled(request_session, max_tokens);
+                                } else {
+                                    // Subsequent passes: re-generate after tool execution
+                                    stream_backend->generate_from_session(request_session, max_tokens);
+                                }
+                            } catch (const std::exception& e) {
+                                json error_chunk = {
+                                    {"error", {
+                                        {"message", e.what()},
+                                        {"type", "server_error"},
+                                        {"code", "500"}
+                                    }}
+                                };
+                                std::string error_data = "data: " + error_chunk.dump() + "\n\ndata: [DONE]\n\n";
+                                sink.write(error_data.c_str(), error_data.size());
+                                sink.done();
+                                if (per_request_cb) {
+                                    stream_backend->callback = [](CallbackEvent, const std::string&, const std::string&, const std::string&) { return true; };
+                                } else {
+                                    request_handler = nullptr;
+                                }
+                                return false;
+                            }
 
-                            json tool_chunk = {
-                                {"id", request_id},
-                                {"object", "chat.completion.chunk"},
-                                {"created", std::time(nullptr)},
-                                {"model", model_name},
-                                {"choices", json::array({{
-                                    {"index", 0},
-                                    {"delta", {
-                                        {"tool_calls", json::array({{
+                            // Check for accumulated tool calls (channel-based models)
+                            if (!stream_backend->accumulated_tool_calls.empty()) {
+                                if (use_tools) {
+                                    // Execute accumulated tool calls server-side
+                                    // Add assistant message to session
+                                    if (!streamed_content.empty()) {
+                                        request_session.messages.push_back(
+                                            Message(Message::ASSISTANT, streamed_content, 0));
+                                    }
+
+                                    for (const auto& tc : stream_backend->accumulated_tool_calls) {
+                                        std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
+                                        std::string tc_name = tc["function"].value("name", "");
+                                        std::string tc_args = tc["function"].value("arguments", "{}");
+
+                                        // Stream tool call as content text
+                                        send_content_chunk("\n" + tc_name + "(" + tc_args + ")\n");
+
+                                        // Execute tool
+                                        ToolResult result = this->execute_tool(
+                                            this->tools, tc_name, tc_args, tc_id,
+                                            request_session.user_id);
+
+                                        std::string summary = result.summary.empty() ?
+                                            (result.success ? result.content.substr(0, 200) : result.error) :
+                                            result.summary;
+                                        send_content_chunk(summary + "\n");
+                                        streamed_content += "\n" + tc_name + "(" + tc_args + ")\n" + summary + "\n";
+
+                                        // Add tool response to session
+                                        Message tool_msg(Message::TOOL_RESPONSE, result.content, 0);
+                                        tool_msg.tool_name = tc_name;
+                                        tool_msg.tool_call_id = tc_id;
+                                        request_session.messages.push_back(tool_msg);
+                                    }
+                                    stream_backend->clear_tool_calls();
+                                    dout(1) << "[api] use_tools streaming: completed tool iteration " << (tool_iter + 1) << std::endl;
+
+                                    if (tool_iter == max_tool_iterations - 1) {
+                                        finish_reason = "length";
+                                    }
+                                    continue;  // Re-generate with tool results
+                                } else {
+                                    // Standard behavior: send tool calls to client
+                                    const auto& tc = stream_backend->accumulated_tool_calls[0];
+                                    std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
+                                    std::string tc_name = tc["function"].value("name", "");
+                                    std::string tc_args = tc["function"].value("arguments", "{}");
+
+                                    json tool_chunk = {
+                                        {"id", request_id},
+                                        {"object", "chat.completion.chunk"},
+                                        {"created", std::time(nullptr)},
+                                        {"model", model_name},
+                                        {"choices", json::array({{
                                             {"index", 0},
-                                            {"id", tc_id},
-                                            {"type", "function"},
-                                            {"function", {
-                                                {"name", tc_name},
-                                                {"arguments", tc_args}
-                                            }}
+                                            {"delta", {
+                                                {"tool_calls", json::array({{
+                                                    {"index", 0},
+                                                    {"id", tc_id},
+                                                    {"type", "function"},
+                                                    {"function", {
+                                                        {"name", tc_name},
+                                                        {"arguments", tc_args}
+                                                    }}
+                                                }})}
+                                            }},
+                                            {"logprobs", nullptr},
+                                            {"finish_reason", nullptr}
                                         }})}
-                                    }},
-                                    {"logprobs", nullptr},
-                                    {"finish_reason", nullptr}
-                                }})}
-                            };
-                            std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
-                            sink.write(tool_data.c_str(), tool_data.size());
-                            finish_reason = "tool_calls";
-                            dout(1) << "Streaming: sent tool_call: " << tc_name << std::endl;
+                                    };
+                                    std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
+                                    sink.write(tool_data.c_str(), tool_data.size());
+                                    finish_reason = "tool_calls";
+                                    dout(1) << "Streaming: sent tool_call: " << tc_name << std::endl;
+                                }
+                            }
+                            break;  // No more tool calls or not using tools
+                        }
+                        // Clear handler after request
+                        if (per_request_cb) {
+                            stream_backend->callback = [](CallbackEvent, const std::string&, const std::string&, const std::string&) { return true; };
+                        } else {
+                            request_handler = nullptr;
                         }
 
                         // Send final chunk with finish_reason (vLLM compatible)
@@ -898,7 +1030,7 @@ void APIServer::register_endpoints() {
             std::string error_message;
             std::string finish_reason = "stop";
 
-            request_handler = [&accumulated_content, &error_message, &finish_reason](
+            set_handler([&accumulated_content, &error_message, &finish_reason](
                 CallbackEvent event, const std::string& data,
                 const std::string& type, const std::string& id) -> bool {
                 switch (event) {
@@ -916,32 +1048,128 @@ void APIServer::register_endpoints() {
                         break;
                 }
                 return true;
-            };
+            });
 
             // Acquire backend lock for GPU backends (serializes access to llama_decode)
             auto backend_lock = active_backend->acquire_lock();
 
-            try {
-                active_backend->generate_from_session(request_session, max_tokens);
-            } catch (const ContextFullException& e) {
-                request_handler = nullptr;
-                res.status = 400;
-                json error_resp = {
-                    {"error", {
-                        {"message", e.what()},
-                        {"type", "invalid_request_error"},
-                        {"code", "context_length_exceeded"}
-                    }}
+            // Tool execution loop (or single pass if use_tools is off)
+            int max_tool_iterations = 25;
+            for (int tool_iter = 0; tool_iter < max_tool_iterations; tool_iter++) {
+                // Reset per-pass state
+                std::string pass_content;
+                std::swap(accumulated_content, pass_content);
+                if (tool_iter > 0) {
+                    // Append prior pass content to overall accumulated
+                    accumulated_content = pass_content;
+                }
+                error_message.clear();
+
+                try {
+                    active_backend->generate_from_session(request_session, max_tokens);
+                } catch (const ContextFullException& e) {
+                    clear_handler();
+                    res.status = 400;
+                    json error_resp = {
+                        {"error", {
+                            {"message", e.what()},
+                            {"type", "invalid_request_error"},
+                            {"code", "context_length_exceeded"}
+                        }}
+                    };
+                    res.set_content(error_resp.dump(), "application/json");
+                    return;
+                }
+
+                if (tool_iter == 0) {
+                    // First pass: accumulated_content has the full content
+                } else {
+                    // Subsequent passes: prepend prior content
+                    accumulated_content = pass_content + accumulated_content;
+                }
+
+                if (!use_tools) break;  // Single pass, standard behavior
+
+                // Check for tool calls (text-parsed or accumulated)
+                Response check_resp;
+                check_resp.success = true;
+                check_resp.content = accumulated_content.substr(pass_content.size());
+                auto tool_call_opt = extract_tool_call(check_resp, active_backend);
+                bool has_tool_calls = tool_call_opt.has_value() ||
+                                     !active_backend->accumulated_tool_calls.empty();
+
+                if (!has_tool_calls) break;  // No tool calls, done
+
+                // Add assistant message to request_session
+                std::string assistant_content = accumulated_content.substr(pass_content.size());
+                Message assistant_msg(Message::ASSISTANT, assistant_content, 0);
+                if (!active_backend->accumulated_tool_calls.empty()) {
+                    assistant_msg.tool_calls_json = active_backend->accumulated_tool_calls.dump();
+                }
+                request_session.messages.push_back(assistant_msg);
+
+                // Execute tool calls and format as text content
+                auto execute_one_tool = [&](const std::string& name, const std::string& params_json,
+                                            const std::string& tc_id) {
+                    // Format tool call as text content
+                    accumulated_content += "\n" + name + "(" + params_json + ")\n";
+
+                    // Execute tool
+                    ToolResult result = execute_tool(tools, name, params_json, tc_id, req_user_id);
+
+                    // Format result as text content
+                    std::string summary = result.summary.empty() ?
+                        (result.success ? result.content.substr(0, 200) : result.error) : result.summary;
+                    accumulated_content += summary + "\n";
+
+                    // Add tool response to session
+                    Message tool_msg(Message::TOOL_RESPONSE, result.content, 0);
+                    tool_msg.tool_name = name;
+                    tool_msg.tool_call_id = tc_id;
+                    request_session.messages.push_back(tool_msg);
                 };
-                res.set_content(error_resp.dump(), "application/json");
-                return;
+
+                // Handle text-parsed tool call
+                if (tool_call_opt.has_value()) {
+                    auto tc = tool_call_opt.value();
+                    json params = json::object();
+                    for (const auto& [key, value] : tc.parameters) {
+                        if (value.type() == typeid(std::string))
+                            params[key] = std::any_cast<std::string>(value);
+                        else if (value.type() == typeid(int))
+                            params[key] = std::any_cast<int>(value);
+                        else if (value.type() == typeid(double))
+                            params[key] = std::any_cast<double>(value);
+                        else if (value.type() == typeid(bool))
+                            params[key] = std::any_cast<bool>(value);
+                    }
+                    std::string tc_id = tc.tool_call_id.empty() ?
+                        "call_" + std::to_string(std::time(nullptr)) : tc.tool_call_id;
+                    execute_one_tool(tc.name, params.dump(), tc_id);
+                }
+
+                // Handle accumulated tool calls (channel-based models)
+                for (const auto& tc : active_backend->accumulated_tool_calls) {
+                    std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
+                    std::string tc_name = tc["function"].value("name", "");
+                    std::string tc_args = tc["function"].value("arguments", "{}");
+                    execute_one_tool(tc_name, tc_args, tc_id);
+                }
+                active_backend->clear_tool_calls();
+
+                dout(1) << "[api] use_tools: completed tool iteration " << (tool_iter + 1) << std::endl;
+
+                // If we hit max iterations, signal length-limited
+                if (tool_iter == max_tool_iterations - 1) {
+                    finish_reason = "length";
+                }
             }
-            request_handler = nullptr;  // Clear after request
+            clear_handler();  // Clear after request
 
             // Build Response from accumulated content
             Response resp;
             bool has_content = !accumulated_content.empty();
-            bool has_tool_calls = !active_backend->accumulated_tool_calls.empty();
+            bool has_tool_calls = !use_tools && !active_backend->accumulated_tool_calls.empty();
             if (error_message.empty() && (has_content || has_tool_calls)) {
                 resp.success = true;
                 resp.content = accumulated_content;
@@ -988,11 +1216,6 @@ void APIServer::register_endpoints() {
                 reasoning_content = reasoning;
             }
 
-            // Check for tool calls (use stripped content)
-            Response stripped_resp = resp;
-            stripped_resp.content = response_content;
-            auto tool_call_opt = extract_tool_call(stripped_resp, active_backend);
-
             // Build OpenAI-compatible response
             json choice = {
                 {"index", 0},
@@ -1008,50 +1231,53 @@ void APIServer::register_endpoints() {
                 choice["message"]["reasoning_content"] = sanitize_utf8(reasoning_content);
             }
 
-            // Check for tool calls from text parsing or accumulated_tool_calls
-            if (tool_call_opt.has_value()) {
-                auto tool_call = tool_call_opt.value();
-                choice["message"]["content"] = sanitize_utf8(tool_call.content);
-                choice["finish_reason"] = "tool_calls";
-
-                json tc;
-                tc["id"] = tool_call.tool_call_id.empty() ?
-                          "call_" + std::to_string(std::time(nullptr)) :
-                          tool_call.tool_call_id;
-                tc["type"] = "function";
-
-                // Build function object with name and arguments
-                json function_obj;
-                function_obj["name"] = tool_call.name;
-
-                // Convert parameters to JSON object
-                json parameters = json::object();
-                for (const auto& [key, value] : tool_call.parameters) {
-                    if (value.type() == typeid(std::string)) {
-                        parameters[key] = std::any_cast<std::string>(value);
-                    } else if (value.type() == typeid(int)) {
-                        parameters[key] = std::any_cast<int>(value);
-                    } else if (value.type() == typeid(double)) {
-                        parameters[key] = std::any_cast<double>(value);
-                    } else if (value.type() == typeid(bool)) {
-                        parameters[key] = std::any_cast<bool>(value);
-                    }
-                }
-
-                // OpenAI expects arguments as a JSON string, not an object
-                function_obj["arguments"] = parameters.dump();
-
-                tc["function"] = function_obj;
-                choice["message"]["tool_calls"] = json::array({tc});
-            } else if (!active_backend->accumulated_tool_calls.empty()) {
-                // Use accumulated_tool_calls from channel parser (already in OpenAI format)
-                choice["message"]["tool_calls"] = active_backend->accumulated_tool_calls;
-                choice["finish_reason"] = "tool_calls";
-                dout(1) << "Using accumulated_tool_calls from channel parser" << std::endl;
-            } else {
-                // No tool call - regular response
+            if (use_tools) {
+                // Tools already executed server-side - return all content as text
                 choice["message"]["content"] = sanitize_utf8(response_content);
                 choice["finish_reason"] = resp.finish_reason.empty() ? "stop" : resp.finish_reason;
+            } else {
+                // Standard behavior: check for tool calls and return them to client
+                Response stripped_resp = resp;
+                stripped_resp.content = response_content;
+                auto tool_call_opt = extract_tool_call(stripped_resp, active_backend);
+
+                if (tool_call_opt.has_value()) {
+                    auto tool_call = tool_call_opt.value();
+                    choice["message"]["content"] = sanitize_utf8(tool_call.content);
+                    choice["finish_reason"] = "tool_calls";
+
+                    json tc;
+                    tc["id"] = tool_call.tool_call_id.empty() ?
+                              "call_" + std::to_string(std::time(nullptr)) :
+                              tool_call.tool_call_id;
+                    tc["type"] = "function";
+
+                    json function_obj;
+                    function_obj["name"] = tool_call.name;
+
+                    json parameters = json::object();
+                    for (const auto& [key, value] : tool_call.parameters) {
+                        if (value.type() == typeid(std::string))
+                            parameters[key] = std::any_cast<std::string>(value);
+                        else if (value.type() == typeid(int))
+                            parameters[key] = std::any_cast<int>(value);
+                        else if (value.type() == typeid(double))
+                            parameters[key] = std::any_cast<double>(value);
+                        else if (value.type() == typeid(bool))
+                            parameters[key] = std::any_cast<bool>(value);
+                    }
+
+                    function_obj["arguments"] = parameters.dump();
+                    tc["function"] = function_obj;
+                    choice["message"]["tool_calls"] = json::array({tc});
+                } else if (!active_backend->accumulated_tool_calls.empty()) {
+                    choice["message"]["tool_calls"] = active_backend->accumulated_tool_calls;
+                    choice["finish_reason"] = "tool_calls";
+                    dout(1) << "Using accumulated_tool_calls from channel parser" << std::endl;
+                } else {
+                    choice["message"]["content"] = sanitize_utf8(response_content);
+                    choice["finish_reason"] = resp.finish_reason.empty() ? "stop" : resp.finish_reason;
+                }
             }
 
             // Get usage statistics from session (updated by backend during generate_from_session)
@@ -1114,12 +1340,17 @@ void APIServer::register_endpoints() {
             // Use display_name if set, otherwise fall back to model_name
             std::string model_id = backend->display_name.empty() ? backend->model_name : backend->display_name;
 
+            json caps = json::array();
+            if (config->use_tools) caps.push_back("tool_execution");
+            if (config->server_tools) caps.push_back("server_tools");
+
             json model_info = {
                 {"id", model_id},
                 {"object", "model"},
                 {"created", std::time(nullptr)},
                 {"owned_by", "shepherd"},
-                {"max_model_len", backend->context_size}
+                {"max_model_len", backend->context_size},
+                {"capabilities", caps}
             };
 
             json response = {
@@ -1141,6 +1372,10 @@ void APIServer::register_endpoints() {
             // Use display_name if set, otherwise fall back to model_name
             std::string model_id = backend->display_name.empty() ? backend->model_name : backend->display_name;
 
+            json caps = json::array();
+            if (config->use_tools) caps.push_back("tool_execution");
+            if (config->server_tools) caps.push_back("server_tools");
+
             json response = {
                 {"id", model_id},
                 {"object", "model"},
@@ -1148,7 +1383,8 @@ void APIServer::register_endpoints() {
                 {"owned_by", "shepherd"},
                 {"context_window", backend->context_size},
                 {"backend", backend->backend_name},
-                {"model_path", backend->model_name}
+                {"model_path", backend->model_name},
+                {"capabilities", caps}
             };
 
             res.set_content(response.dump(), "application/json");

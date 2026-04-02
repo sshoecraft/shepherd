@@ -1,5 +1,6 @@
 #include "shepherd.h"
 #include "api_server.h"
+#include "../version.h"
 #include "../session.h"
 #include "backend.h"
 #include "../backends/chat_template.h"
@@ -1406,18 +1407,24 @@ void APIServer::register_endpoints() {
             if (config->use_tools) caps.push_back("tool_execution");
             if (config->server_tools) caps.push_back("server_tools");
 
+            json provider = {
+                {"name", "shepherd"},
+                {"version", SHEPHERD_VERSION},
+                {"capabilities", caps}
+            };
+
             json model_info = {
                 {"id", model_id},
                 {"object", "model"},
                 {"created", std::time(nullptr)},
                 {"owned_by", "shepherd"},
-                {"max_model_len", backend->context_size},
-                {"capabilities", caps}
+                {"max_model_len", backend->context_size}
             };
 
             json response = {
                 {"object", "list"},
-                {"data", json::array({model_info})}
+                {"data", json::array({model_info})},
+                {"provider", provider}
             };
 
             res.set_content(response.dump(), "application/json");
@@ -1438,15 +1445,21 @@ void APIServer::register_endpoints() {
             if (config->use_tools) caps.push_back("tool_execution");
             if (config->server_tools) caps.push_back("server_tools");
 
+            json provider = {
+                {"name", "shepherd"},
+                {"version", SHEPHERD_VERSION},
+                {"capabilities", caps}
+            };
+
             json response = {
                 {"id", model_id},
                 {"object", "model"},
                 {"created", std::time(nullptr)},
                 {"owned_by", "shepherd"},
-                {"context_window", backend->context_size},
+                {"max_model_len", backend->context_size},
                 {"backend", backend->backend_name},
                 {"model_path", backend->model_name},
-                {"capabilities", caps}
+                {"provider", provider}
             };
 
             res.set_content(response.dump(), "application/json");

@@ -1,8 +1,8 @@
 # Shepherd
 
-**Advanced Multi-Backend LLM System with Intelligent Memory Management**
+**Multi-Backend LLM Inference Server and Interactive Agent**
 
-Shepherd is a production-grade C++ LLM inference system supporting both local models (llama.cpp, TensorRT-LLM) and cloud APIs (OpenAI, Anthropic, Gemini, Ollama). It features KV cache eviction for indefinite conversations, retrieval-augmented generation (RAG), and comprehensive tool/function calling.
+Shepherd is a C++ LLM system supporting local models (llama.cpp, TensorRT-LLM) and cloud APIs (OpenAI, Anthropic, Gemini, Grok, Ollama). It provides multiple frontends (CLI, TUI, OpenAI-compatible API server, CLI server, JSON line-protocol), automatic KV cache eviction for indefinite conversations, retrieval-augmented generation (RAG) with SQLite or PostgreSQL, tool/function calling, MCP integration, multi-model collaboration, and background memory extraction.
 
 ---
 
@@ -33,11 +33,11 @@ shepherd provider add sonnet anthropic --model claude-sonnet-4 --api-key sk-ant-
 ```bash
 $ ./shepherd --provider mylocal
 
-Shepherd v2.1.0
+Shepherd v2.39.5
 Provider: mylocal (llamacpp)
 Model: qwen3-30b-a3b
 Context: 40960 tokens
-Tools: 18 available
+Tools: 50+ available
 
 > What files are in the current directory?
 * list_directory(path=".")
@@ -85,12 +85,16 @@ Shepherd includes built-in tools across several categories:
 
 | Category | Tools |
 |----------|-------|
+| **Core** | bash, glob, grep, edit, web_fetch, web_search, todo_write, task, get_time, get_date |
 | **Filesystem** | read, write, list_directory, delete_file, file_exists |
-| **Command** | shell (execute commands with timeout) |
+| **Command** | execute_command, get_environment_variable, list_processes |
 | **HTTP** | http_get, http_post, http_put, http_delete |
-| **JSON** | json_parse, json_validate, json_extract |
-| **Memory** | search_memory, set_fact, get_fact, store_memory |
-| **MCP** | list_mcp_resources, read_mcp_resource, plus dynamic `server:tool` |
+| **JSON** | json_parse, json_serialize, json_extract |
+| **Memory** | search_memory, set_fact, get_fact, clear_fact, store_memory, clear_memory |
+| **Scheduler** | list_schedules, add_schedule, remove_schedule, enable_schedule, disable_schedule, get_schedule |
+| **MCP** | list_mcp_resources, read_mcp_resource, plus dynamic `server:tool` from configured MCP servers |
+| **API Provider** | `ask_<provider>` tools for cross-model consultation (auto-generated from configured providers) |
+| **Remote** | Remote tool proxy for distributed tool execution |
 
 ```bash
 # List tools
@@ -110,15 +114,30 @@ shepherd tools disable shell
 
 ### Config File
 
-Configuration is stored at `~/.config/shepherd/config.json`:
+Configuration is stored at `~/.config/shepherd/config.json` (XDG-compliant):
 
 ```json
 {
     "streaming": true,
     "thinking": false,
+    "reasoning": "off",
     "tui": true,
+    "stats": false,
+    "auto_provider": false,
+    "warmup": true,
+    "max_tokens": 0,
+    "memory_database": "~/.local/share/shepherd/memory.db",
     "max_db_size": "10G",
-    "memory_database": "~/.local/share/shepherd/memory.db"
+    "rag_context_injection": true,
+    "rag_relevance_threshold": 0.3,
+    "rag_max_results": 5,
+    "memory_extraction": false,
+    "memory_extraction_model": "",
+    "memory_extraction_endpoint": "",
+    "user_id": "",
+    "web_search_provider": "",
+    "auth_mode": "none",
+    "server_tools": false
 }
 ```
 
@@ -170,15 +189,25 @@ shepherd smcp add database smcp-postgres --cred DB_URL=postgresql://user:pass@ho
 
 Credentials are sent via the [SMCP protocol](https://github.com/sshoecraft/smcp) handshake, never exposed in `/proc`, `ps`, or config files.
 
-### Azure Key Vault
+### External Configuration Sources
 
-Load configuration from Azure Key Vault using Managed Identity:
+**Azure Key Vault** -- Load configuration from Azure Key Vault using Managed Identity:
 
 ```bash
 ./shepherd --config msi --kv my-vault-name
 ```
 
 Store a secret named `shepherd-config` containing the unified JSON config. The VM's managed identity needs "Key Vault Secrets User" role.
+
+**HashiCorp Vault** -- Load configuration from HashiCorp Vault using a pre-injected token:
+
+```bash
+./shepherd --config vault --kv https://vault.example.com
+```
+
+Reads the token from `/vault/secrets/token` (Vault Agent Injector) and fetches config from `shepherd/config` (KV v2).
+
+Configuration loaded from either vault is **read-only** -- settings cannot be modified at runtime.
 
 ### Environment Variables
 
@@ -193,7 +222,7 @@ NO_COLOR=1                # Disable colored output
 
 Shepherd can run as a server for remote access or persistent sessions.
 
-### 🌐 API Server (OpenAI-Compatible)
+### API Server (OpenAI-Compatible)
 
 Exposes an OpenAI-compatible REST API for remote access to your local Shepherd instance.
 
@@ -208,7 +237,7 @@ Exposes an OpenAI-compatible REST API for remote access to your local Shepherd i
 
 **Endpoints:**
 - `POST /v1/chat/completions` - Chat completions (streaming supported)
-- `GET /v1/models` - List available models
+- `GET /v1/models` - List available models (includes provider info, version, capabilities)
 - `GET /health` - Health check
 
 **Authentication:**
@@ -217,12 +246,25 @@ Generate API keys for clients to authenticate against the server (OpenAI-compati
 
 ```bash
 ./shepherd --server --auth-mode json
-shepherd apikey add mykey    # Generates sk-shep-...
+shepherd apikey create mykey    # Generates sk-shep-...
+```
+
+**Server-side tool execution:**
+
+```bash
+# Tools execute on the server, results returned to client
+./shepherd --server --use-tools
+
+# Expose /v1/tools endpoint for tool discovery
+./shepherd --server --server-tools
+
+# Control whether tool call details are streamed to clients
+./shepherd --server --use-tools --show-tool-calls true
 ```
 
 For full documentation, see [docs/api_server.md](docs/api_server.md).
 
-### 🖥️ CLI Server (Persistent Session)
+### CLI Server (Persistent Session)
 
 Runs a persistent AI session with server-side tool execution and multi-client access.
 
@@ -242,7 +284,41 @@ Runs a persistent AI session with server-side tool execution and multi-client ac
 
 For full documentation, see [docs/cli_server.md](docs/cli_server.md).
 
-### 🔗 Server Composability
+### JSON Frontend (Machine Integration)
+
+A JSON line-protocol frontend for pipe-based machine-to-machine communication (chatroom adapters, orchestration scripts, test harnesses).
+
+```bash
+# Interactive pipe mode
+shepherd --json -p provider_name
+
+# Single query mode
+shepherd --json --prompt "hello" -p provider_name
+
+# Piped input
+echo '{"type":"user","content":"hello"}' | shepherd --json -p provider_name
+```
+
+**Input** (stdin, one JSON object per line):
+```json
+{"type": "user", "content": "your message here"}
+```
+
+**Output** (stdout, one JSON object per line):
+
+| Type | Description | Fields |
+|------|-------------|--------|
+| `text` | Assistant response chunk | `content` |
+| `thinking` | Reasoning/thinking chunk | `content` |
+| `tool_use` | Tool call initiated | `name`, `params`, `id` |
+| `tool_result` | Tool execution result | `name`, `id`, `success`, `summary` |
+| `end_turn` | Turn complete | `turns`, `total_tokens`, `cost_usd` |
+| `error` | Error occurred | `message` |
+| `system` | System message | `content` |
+
+Tools execute locally (same as CLI/TUI). No threads, no terminal handling, no HTTP -- the simplest frontend.
+
+### Server Composability
 
 Shepherd's architecture allows **any backend** with **any frontend**, and servers can be chained together.
 
@@ -261,8 +337,8 @@ Hide your Azure OpenAI credentials while adding tools and your own API keys:
            --server --port 8000 --auth-mode json --server-tools
 
 # Generate keys for your clients
-shepherd apikey add client1
-shepherd apikey add client2
+shepherd apikey create client1
+shepherd apikey create client2
 ```
 
 Clients get:
@@ -306,21 +382,33 @@ Now you have:
 
 ## Features
 
-### 🔄 Multi-Backend Architecture
+### Multi-Backend Architecture
 
-| Backend | Type | Models | Context | Tools |
-|---------|------|--------|---------|-------|
-| **llama.cpp** | Local | Llama, Qwen, Mistral, Gemma, etc. | 8K-256K | ✓ |
-| **TensorRT-LLM** | Local | Same (NVIDIA optimized) | 2K-256K | ✓ |
-| **OpenAI** | Cloud | GPT-5, GPT-4o, GPT-4 Turbo | 128K-200K | ✓ |
-| **Anthropic** | Cloud | Claude Opus 4.5, Sonnet 4, Haiku | 200K | ✓ |
-| **Gemini** | Cloud | Gemini 3, 2.5 Pro/Flash | 32K-2M | ✓ |
-| **Azure OpenAI** | Cloud | GPT models via deployment | 128K-200K | ✓ |
-| **Ollama** | Local/Cloud | Any Ollama model | 8K-128K | ✓ |
+| Backend | Type | Description | Tools |
+|---------|------|-------------|-------|
+| **llama.cpp** | Local | Llama, Qwen, Mistral, Gemma, and other GGUF models | Yes |
+| **TensorRT-LLM** | Local | NVIDIA-optimized inference for supported models | Yes |
+| **OpenAI** | Cloud | GPT-4o, GPT-4 Turbo, o1, o3 (also Azure OpenAI deployments) | Yes |
+| **Anthropic** | Cloud | Claude Opus, Sonnet, Haiku | Yes |
+| **Gemini** | Cloud | Gemini 2.5 Pro/Flash | Yes |
+| **Grok** | Cloud | xAI Grok models (OpenAI-compatible protocol) | Yes |
+| **Ollama** | Local/Cloud | Any model available in Ollama | Yes |
+| **CLI Client** | Remote | Connects to a remote Shepherd CLI server | Yes |
 
-### 📚 RAG System
+### RAG System
 
-Evicted messages are automatically archived to a SQLite database with FTS5 full-text search:
+Evicted messages are automatically archived to a database with full-text search. Supports two backends:
+
+- **SQLite** (default): FTS5 full-text search with BM25 ranking + time-based recency scoring
+- **PostgreSQL** (optional): `tsvector`/`tsquery` with GIN index + recency scoring
+
+```bash
+# SQLite (default)
+shepherd config memory_database ~/.local/share/shepherd/memory.db
+
+# PostgreSQL
+shepherd config memory_database postgresql://user:pass@host/shepherd
+```
 
 ```bash
 > Remember that the project deadline is March 15
@@ -339,7 +427,11 @@ Search archived conversations:
 * search_memory(query="authentication")
 ```
 
-### 🤝 Multi-Model Collaboration
+**Memory extraction**: An optional background thread that automatically extracts facts and context summaries from conversations using a separate LLM API call. Enable with `memory_extraction: true` in config and configure `memory_extraction_endpoint` and `memory_extraction_api_key`.
+
+**Multi-tenant isolation**: All RAG operations are scoped by `user_id`. Set a global `user_id` in config to share memory across platforms, or leave empty for automatic per-client isolation.
+
+### Multi-Model Collaboration
 
 When multiple providers are configured, Shepherd creates `ask_*` tools for cross-model consultation:
 
@@ -358,7 +450,7 @@ Claude's analysis appears in your local model's context.
 
 The current provider is excluded (you don't ask yourself). Switch providers and the tools update automatically.
 
-### 🧠 Automatic Session Eviction
+### Automatic Session Eviction
 
 Shepherd supports automatic eviction for indefinite conversations with **any backend**:
 
@@ -378,7 +470,7 @@ Shepherd supports automatic eviction for indefinite conversations with **any bac
 
 For local backend implementation details, see [docs/llamacpp.md](docs/llamacpp.md).
 
-### ⏰ Scheduling
+### Scheduling
 
 Shepherd includes a cron-like scheduler that injects prompts into the session automatically. Works with CLI, TUI, and CLI server modes.
 
@@ -418,12 +510,12 @@ Clients connect to see results from scheduled tasks in the conversation history.
 | Command | Description |
 |---------|-------------|
 | `shepherd provider <add\|list\|show\|remove\|use>` | Manage providers |
-| `shepherd config <show\|set>` | View/modify configuration |
+| `shepherd config <show\|set\|KEY\|KEY VALUE>` | View/modify configuration |
 | `shepherd tools <list\|enable\|disable>` | Manage tools |
-| `shepherd mcp <add\|remove\|list>` | Manage MCP servers |
-| `shepherd smcp <add\|remove\|list>` | Manage SMCP servers |
-| `shepherd sched <list\|add\|remove\|enable\|disable>` | Scheduled tasks |
-| `shepherd apikey <add\|list\|remove>` | API key management |
+| `shepherd mcp <add\|remove\|list\|NAME show\|NAME test>` | Manage MCP servers |
+| `shepherd smcp <add\|remove\|list>` | Manage SMCP servers (secure credentials) |
+| `shepherd sched <list\|add\|remove\|enable\|disable\|show\|next>` | Scheduled tasks |
+| `shepherd apikey <create\|list\|remove>` | API key management |
 | `shepherd edit-system` | Edit system prompt in $EDITOR |
 
 ### Common Flags
@@ -432,15 +524,36 @@ Clients connect to see results from scheduled tasks in the conversation history.
 |------|-------------|
 | `-p, --provider NAME` | Use specific provider |
 | `-m, --model PATH` | Model name or file |
-| `--backend TYPE` | Backend: llamacpp, openai, anthropic, etc. |
-| `--context-size N` | Context window size (0 = model default) |
+| `--backend TYPE` | Backend: llamacpp, tensorrt, openai, anthropic, gemini, grok, ollama, cli |
+| `--context-size N` | Context window size (0 = auto) |
+| `--max-tokens N` | Max generation tokens (-1 = max, 0 = auto, >0 = explicit) |
+| `--prompt, -e TEXT` | Single query mode (run one query and exit) |
 | `--server` | Start API server mode |
 | `--cliserver` | Start CLI server mode |
+| `--json` | JSON line-protocol frontend for machine integration |
 | `--port N` | Server port (default: 8000) |
+| `--use-tools` | Execute tools server-side in API server |
+| `--server-tools` | Expose /v1/tools endpoints for tool discovery/execution |
+| `--show-tool-calls BOOL` | Control streaming of tool call/result text to clients |
 | `--notools` | Disable all tools |
+| `--enable-tools PATTERN` | Enable tools matching glob pattern |
+| `--disable-tools PATTERN` | Disable tools matching glob pattern |
+| `--memtools` | Enable memory tools |
 | `--nostream` | Disable streaming output |
+| `--reasoning LEVEL` | Extended thinking: off, low, medium, high |
+| `--stats` | Show performance stats (prefill/decode speed, KV cache) |
 | `--tui` / `--no-tui` | Enable/disable TUI mode |
+| `--nomcp` | Disable MCP server loading |
+| `--norag` | Disable RAG entirely |
+| `--nomemory` | Disable memory injection and extraction |
+| `--nosched` | Disable scheduler |
+| `--warmup` | Send warmup message before first prompt |
+| `--flash-attn` | Enable flash attention (llama.cpp) |
+| `--system-prompt TEXT` | Override system prompt |
 | `--config msi --kv VAULT` | Load config from Azure Key Vault |
+| `--config vault --kv ADDR` | Load config from HashiCorp Vault |
+
+**Sampling overrides**: `--temperature`, `--top-p`, `--top-k`, `--freq` (frequency penalty), `--repeat-penalty`
 
 Run `shepherd --help` for the complete list.
 
@@ -467,21 +580,34 @@ Run `shepherd --help` for the complete list.
 
 ## Performance
 
-### Throughput (70B model, batch_size=1)
+Benchmarked with `scripts/openai_bench.py` (5 runs, 2048 max tokens, streaming, batch_size=1).
 
-| Backend | Prompt Speed | Generation Speed | Latency |
-|---------|--------------|------------------|---------|
-| TensorRT-LLM | 8000 tok/s | 45 tok/s | ~50ms |
-| llama.cpp (CUDA) | 1200 tok/s | 25 tok/s | ~80ms |
-| llama.cpp (CPU) | 150 tok/s | 8 tok/s | ~200ms |
+### Shepherd vs Other Servers (gpt-oss-120b Q4_K_M, 4x GPU pp=4, 32K context, f16 KV cache)
 
-### Memory Usage (70B model)
+| Server | Tokens/sec | TTFT (ms) | ITL (ms) |
+|--------|-----------|-----------|----------|
+| **Shepherd** | **141.30** | 1063 | **7.62** |
+| llama-server (standalone) | 124.52 | 952 | 8.03 |
+| vLLM | 98.18 | 809 | 10.19 |
 
-| Configuration | VRAM | System RAM | Context |
-|---------------|------|------------|---------|
-| Q4_K_M + 64K ctx | 38GB | 8GB | 65536 |
-| Q4_K_M + 128K ctx | 42GB | 12GB | 131072 |
-| Q8_0 + 64K ctx | 72GB | 16GB | 65536 |
+### Model Quantization Comparison (Shepherd, gpt-oss-120b, 4x GPU pp=4)
+
+| Model / Quant | Tokens/sec | TTFT (ms) | ITL (ms) |
+|---------------|-----------|-----------|----------|
+| Q4_K_M | 141.30 | 1063 | 7.62 |
+| Q4_K_M + flash-attn | 138.27 | 767 | 7.62 |
+| MXFP4 | 128.72 | 794 | 8.21 |
+| MXFP4 + flash-attn | 130.79 | 681 | 8.03 |
+
+### Provider Configuration (Shepherd, gpt-oss-120b-heretic-v2-MXFP4, flash-attn, server-tools)
+
+| Metric | Value |
+|--------|-------|
+| Tokens/sec (mean) | 130.85 |
+| Tokens/sec (stddev) | 0.55 |
+| TTFT (median) | 739 ms |
+| ITL (mean) | 8.00 ms |
+| Avg tokens generated | 2048 |
 
 ---
 
@@ -516,21 +642,21 @@ For debug builds, use `-d=3` for verbose KV cache logging.
 ### Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Frontend                              │
-│  CLI, TUI, API Server, CLI Server                           │
-└──────────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                          Frontend                              │
+│  CLI, TUI, JSON, API Server, CLI Server                       │
+└──────────────────────────┬────────────────────────────────────┘
                            │
-┌──────────────────────────v──────────────────────────────────┐
-│                     Session + Provider                       │
-│  Message routing, provider switching, tool execution        │
-└──────────────────────────┬──────────────────────────────────┘
+┌──────────────────────────v────────────────────────────────────┐
+│                     Session + Provider                         │
+│  Message routing, provider switching, tool execution, RAG     │
+└──────────────────────────┬────────────────────────────────────┘
                            │
         ┌──────────────────┼──────────────────┐
         │                  │                  │
 ┌───────v────┐      ┌──────v─────┐     ┌─────v─────────┐
 │  LlamaCpp  │      │  TensorRT  │     │ API Backends  │
-│  Backend   │      │  Backend   │     │ (5 types)     │
+│  Backend   │      │  Backend   │     │ (6 types)     │
 └────────────┘      └────────────┘     └───────────────┘
 ```
 
@@ -540,40 +666,65 @@ For detailed architecture, see [docs/architecture.md](docs/architecture.md).
 
 ```
 shepherd/
-├── main.cpp              # Application entry point
-├── frontend.cpp/h        # Frontend abstraction
-├── backend.cpp/h         # Backend base class
-├── session.cpp/h         # Session management
-├── provider.cpp/h        # Provider management
-├── config.cpp/h          # Configuration
-├── rag.cpp/h             # RAG system
-├── server.cpp/h          # HTTP server base
+├── main.cpp                  # Entry point, argument parsing, subcommand dispatch
+├── frontend.cpp/h            # Frontend abstraction and event callback system
+├── backend.cpp/h             # Backend base class
+├── session.cpp/h             # Session management, eviction logic
+├── session_manager.cpp/h     # Multi-session management
+├── provider.cpp/h            # Provider configuration and switching
+├── config.cpp/h              # Configuration (file, Azure KV, HashiCorp Vault)
+├── rag.cpp/h                 # RAG interface and context injection
+├── server.cpp/h              # HTTP server base class
+├── auth.cpp/h                # API key authentication (JSON file, Azure MSI, PostgreSQL)
+├── scheduler.cpp/h           # Cron-like task scheduler (SIGALRM-based)
+├── memory_extraction.cpp/h   # Background fact extraction from conversations
+├── http_client.cpp/h         # HTTP client with retry logic
+├── generation_thread.cpp/h   # Threaded generation support
+├── azure_msi.cpp/h           # Azure Managed Identity integration
+├── hashicorp_vault.cpp/h     # HashiCorp Vault config loading
 │
 ├── backends/
-│   ├── llamacpp.cpp/h    # llama.cpp backend
-│   ├── tensorrt.cpp/h    # TensorRT-LLM backend
-│   ├── openai.cpp/h      # OpenAI API
-│   ├── anthropic.cpp/h   # Anthropic Claude
-│   ├── gemini.cpp/h      # Google Gemini
-│   ├── ollama.cpp/h      # Ollama
-│   ├── api.cpp/h         # Base for API backends
-│   └── factory.cpp/h     # Backend factory
+│   ├── api.cpp/h             # Base class for all API backends
+│   ├── gpu.cpp/h             # Base class for local GPU backends
+│   ├── llamacpp.cpp/h        # llama.cpp backend
+│   ├── tensorrt.cpp/h        # TensorRT-LLM backend
+│   ├── openai.cpp/h          # OpenAI / Azure OpenAI API
+│   ├── anthropic.cpp/h       # Anthropic Claude API
+│   ├── gemini.cpp/h          # Google Gemini API
+│   ├── grok.cpp/h            # xAI Grok API
+│   ├── ollama.cpp/h          # Ollama API
+│   ├── cli_client.cpp/h      # CLI client (connects to remote CLI server)
+│   ├── models.cpp/h          # Model family detection and context size database
+│   ├── chat_template.cpp/h   # Chat template parsing (Jinja2)
+│   ├── harmony.cpp/h         # GPT-OSS / Harmony format parser
+│   └── factory.cpp/h         # Backend factory
 │
 ├── frontends/
-│   ├── cli.cpp/h         # CLI frontend
-│   ├── tui.cpp/h         # TUI frontend
-│   ├── api_server.cpp/h  # API server
-│   └── cli_server.cpp/h  # CLI server
+│   ├── cli.cpp/h             # Interactive CLI (replxx line editing)
+│   ├── tui.cpp/h             # Full-screen TUI (ncurses)
+│   ├── json_frontend.cpp/h   # JSON line-protocol (machine integration)
+│   ├── api_server.cpp/h      # OpenAI-compatible HTTP API server
+│   └── cli_server.cpp/h      # Persistent CLI session over HTTP + SSE
 │
-├── tools/                # Tool implementations
-├── mcp/                  # MCP client/server
-└── Makefile              # Build system
+├── tools/                    # Tool implementations (core, filesystem, command,
+│                             #   HTTP, JSON, memory, scheduler, MCP, remote, API)
+├── mcp/                      # MCP/SMCP client, server, config, tool adapters
+├── rag/                      # RAG database backends (SQLite, PostgreSQL)
+├── scripts/                  # Benchmark and utility scripts
+├── tests/                    # Unit and integration tests
+├── docs/                     # Architecture and feature documentation
+├── packaging/                # Debian packaging scripts
+├── vendor/                   # Third-party: llama.cpp, replxx, tokenizers
+├── CMakeLists.txt            # Build system
+└── Makefile                  # Build wrapper
 ```
 
 ### Extending Shepherd
 
 - **Adding backends**: See [docs/backends.md](docs/backends.md)
-- **Adding tools**: See [docs/tools.md](docs/tools.md) (if exists) or `tools/tool.h`
+- **Adding tools**: See `tools/tool.h` for the tool interface
+- **Architecture**: See [docs/architecture.md](docs/architecture.md) for the full system design
+- **Frontend design**: See [docs/frontend.md](docs/frontend.md)
 
 ---
 

@@ -336,6 +336,7 @@ generate_response() returns
 
 ## Version History
 
+- **2.40.0** - Added `continue_session` to `FrontendFlags` for `--continue` session persistence
 - **2.34.0** - `FrontendFlags` struct replaces individual bool parameters in `create()`, `init()`, `init_tools()`. `--nomemory` flag overrides provider memory setting. Per-request `"memory": false` in API/CLI server requests.
 - **2.33.2** - RAG initialization deferred to `connect_provider()` — only opens database when provider has `memory: true`
 - **2.22.2** - Skip local tool init for CLI backend (tools provided by remote server)

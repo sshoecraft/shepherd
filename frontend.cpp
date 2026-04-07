@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <sstream>
 #include <regex>
+#include <filesystem>
 #include <unistd.h>
 #include <climits>
 #ifndef HOST_NAME_MAX
@@ -938,6 +939,9 @@ bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {
             backend->clear_session();
         }
         session.clear();
+        // Delete saved session file so --continue starts fresh
+        std::string session_path = Session::get_session_file_path(current_provider);
+        std::filesystem::remove(session_path);
         callback(CallbackEvent::SYSTEM, "Session cleared.\n", "", "");
         return true;
     }

@@ -2,6 +2,10 @@
 #include "shepherd.h"
 #include "backend.h"
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+#include <ctime>
 
 
 std::vector<std::pair<int, int>> Session::calculate_messages_to_evict(int tokens_needed) {
@@ -348,4 +352,114 @@ void Session::clear() {
     last_assistant_message_tokens = 0;
 
     dout(1) << "Session cleared. System message and tools preserved." << std::endl;
+}
+
+std::string Session::get_session_file_path(const std::string& provider) {
+    // Sanitize provider name for use in filename
+    std::string sanitized;
+    for (char c : provider) {
+        if (std::isalnum(c) || c == '-' || c == '.') {
+            sanitized += c;
+        } else {
+            sanitized += '-';
+        }
+    }
+    return ".shepherd_session." + sanitized + ".json";
+}
+
+bool Session::save_to_file(const std::string& path,
+                           const std::string& provider_name,
+                           const std::string& model_name) const {
+    try {
+        // Build timestamp
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        char time_buf[64];
+        std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%dT%H:%M:%S", std::localtime(&time_t_now));
+
+        nlohmann::json j;
+        j["version"] = 1;
+        j["timestamp"] = std::string(time_buf);
+        j["provider"] = provider_name;
+        j["model"] = model_name;
+        j["messages"] = messages;
+        j["last_user_message_index"] = last_user_message_index;
+        j["last_assistant_message_index"] = last_assistant_message_index;
+
+        // Write atomically: tmp file then rename
+        std::string tmp_path = path + ".tmp";
+        {
+            std::ofstream out(tmp_path);
+            if (!out.is_open()) {
+                dout(1) << "Failed to open session file for writing: " + tmp_path << std::endl;
+                return false;
+            }
+            out << j.dump(2);
+        }
+        std::filesystem::rename(tmp_path, path);
+        dout(1) << "Session saved: " + std::to_string(messages.size()) + " messages to " + path << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        dout(1) << "Failed to save session: " + std::string(e.what()) << std::endl;
+        return false;
+    }
+}
+
+bool Session::load_from_file(const std::string& path,
+                             std::string& out_provider,
+                             std::string& out_model) {
+    try {
+        std::ifstream in(path);
+        if (!in.is_open()) {
+            return false;
+        }
+
+        nlohmann::json j = nlohmann::json::parse(in);
+
+        // Check version compatibility
+        int version = j.value("version", 0);
+        if (version < 1 || version > 1) {
+            dout(1) << "Unsupported session file version: " + std::to_string(version) << std::endl;
+            return false;
+        }
+
+        out_provider = j.value("provider", "");
+        out_model = j.value("model", "");
+
+        // Restore messages
+        messages.clear();
+        for (const auto& msg_json : j["messages"]) {
+            Message msg(Message::USER, "", 0);
+            from_json(msg_json, msg);
+            messages.push_back(std::move(msg));
+        }
+
+        // Restore tracked indices
+        last_user_message_index = j.value("last_user_message_index", -1);
+        last_assistant_message_index = j.value("last_assistant_message_index", -1);
+
+        // Recalculate token values for tracked messages
+        if (last_user_message_index >= 0 && last_user_message_index < static_cast<int>(messages.size())) {
+            last_user_message_tokens = messages[last_user_message_index].tokens;
+        } else {
+            last_user_message_index = -1;
+            last_user_message_tokens = 0;
+        }
+        if (last_assistant_message_index >= 0 && last_assistant_message_index < static_cast<int>(messages.size())) {
+            last_assistant_message_tokens = messages[last_assistant_message_index].tokens;
+        } else {
+            last_assistant_message_index = -1;
+            last_assistant_message_tokens = 0;
+        }
+
+        // Reset token counters - API will re-establish on first request
+        total_tokens = 0;
+        last_prompt_tokens = 0;
+
+        dout(1) << "Session loaded: " + std::to_string(messages.size()) + " messages from " + path << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        dout(1) << "Failed to load session: " + std::string(e.what()) << std::endl;
+        return false;
+    }
 }

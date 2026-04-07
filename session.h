@@ -157,6 +157,21 @@ public:
     /// Keeps message history, resets token counters
     void switch_backend(Backend* new_backend);
 
+    /// @brief Save session state to JSON file for --continue support
+    /// Saves only post-eviction messages (what's currently in context)
+    bool save_to_file(const std::string& path,
+                      const std::string& provider_name,
+                      const std::string& model_name) const;
+
+    /// @brief Load session state from JSON file
+    /// Restores messages but resets token counters (API will re-establish on first call)
+    bool load_from_file(const std::string& path,
+                        std::string& out_provider,
+                        std::string& out_model);
+
+    /// @brief Get session file path for a given provider (in current working directory)
+    static std::string get_session_file_path(const std::string& provider);
+
 private:
     // Helper methods for auto-eviction
     /// @brief Check if adding message would exceed context limit

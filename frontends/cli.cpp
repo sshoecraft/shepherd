@@ -264,6 +264,26 @@ int CLI::run(Provider* cmdline_provider) {
         backend->valid_tool_names.insert(tool.name);
     }
 
+    // Restore previous session if --continue
+    if (init_flags.continue_session) {
+        std::string session_path = Session::get_session_file_path(current_provider);
+        std::string saved_provider, saved_model;
+        if (session.load_from_file(session_path, saved_provider, saved_model)) {
+            if (!saved_provider.empty() && saved_provider != current_provider) {
+                callback(CallbackEvent::SYSTEM,
+                    "Note: Provider changed from '" + saved_provider + "' to '" + current_provider + "'\n", "", "");
+            }
+            if (!saved_model.empty() && backend && saved_model != backend->model_name) {
+                callback(CallbackEvent::SYSTEM,
+                    "Note: Model changed from '" + saved_model + "' to '" + backend->model_name + "'\n", "", "");
+            }
+            callback(CallbackEvent::SYSTEM,
+                "Restored " + std::to_string(session.messages.size()) + " messages from previous session.\n", "", "");
+        } else {
+            callback(CallbackEvent::SYSTEM, "No previous session found, starting fresh.\n", "", "");
+        }
+    }
+
     // Configure session based on backend capabilities
     if (config->max_tokens == -1) {
         // -1 = max possible: no cap on completion tokens (use all available)
@@ -437,6 +457,14 @@ int CLI::run(Provider* cmdline_provider) {
         // Show token count to stderr (only for GPU backends - API backends have their own display)
         if (backend->is_gpu) {
             fprintf(stderr, "tokens: %d/%zu\n", session.total_tokens, backend->context_size);
+        }
+    }
+
+    // Save session for --continue (always save if we have messages)
+    if (!session.messages.empty()) {
+        std::string session_path = Session::get_session_file_path(current_provider);
+        if (session.save_to_file(session_path, current_provider, backend ? backend->model_name : "")) {
+            cli_debug(1, "Session saved to " + session_path);
         }
     }
 

@@ -238,6 +238,7 @@ CLI behavior influenced by:
 
 ## Version History
 
+- **2.40.0** - Session persistence (`--continue`): save on exit, restore on startup
 - **2.14.0** - Standalone CLI (no TerminalIO dependency), direct replxx usage
 - **2.13.0** - Unified input (no InputReader), EventCallback pattern
 - **2.7.0** - Producer-consumer input with InputReader

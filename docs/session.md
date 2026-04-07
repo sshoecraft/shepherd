@@ -271,6 +271,7 @@ Messages can be serialized for:
 - Saving conversation history
 - Sending to API backends
 - Logging/debugging
+- Session persistence (`--continue` flag)
 
 ```cpp
 nlohmann::json to_json() const {
@@ -285,3 +286,52 @@ nlohmann::json to_json() const {
     return j;
 }
 ```
+
+## Session Persistence (v2.40.0)
+
+The `--continue` flag enables resuming a previous conversation. Sessions are always
+saved on clean exit; `--continue` loads the saved state on startup.
+
+### File Location
+
+Session files are scoped by **working directory + provider name**:
+- Path: `.shepherd_session.<provider>.json` in the current working directory
+- Provider name is sanitized (non-alphanumeric chars become `-`)
+- Different providers in the same directory get separate session files
+
+### Methods
+
+```cpp
+// Save session state to JSON file
+bool save_to_file(const std::string& path,
+                  const std::string& provider_name,
+                  const std::string& model_name) const;
+
+// Load session state from JSON file
+bool load_from_file(const std::string& path,
+                    std::string& out_provider,
+                    std::string& out_model);
+
+// Get session file path for a provider
+static std::string get_session_file_path(const std::string& provider);
+```
+
+### What is saved
+- Messages (post-eviction, only what's in the context window)
+- Message metadata (role, content, tokens, tool fields)
+- Tracked message indices (last_user, last_assistant)
+- Provider and model names (for validation on restore)
+
+### What is NOT saved
+- System message (regenerated at startup from config + tools)
+- Token counters (reset to 0; API re-establishes on first request)
+- Tools, sampling params, backend pointer, auto_evict settings
+
+### Token Strategy on Restore
+Token counters are reset to 0 on load, matching the `switch_backend()` pattern.
+The first API call re-establishes accurate counts. Individual `msg.tokens` values
+are preserved for eviction heuristics.
+
+### `/clear` Behavior
+The `/clear` command deletes the saved session file in addition to clearing
+the in-memory session, ensuring `--continue` starts fresh.

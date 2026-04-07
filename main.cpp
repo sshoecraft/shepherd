@@ -198,6 +198,7 @@ static void print_usage(int, char** argv) {
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
 	printf("	--use-tools	   Execute tools server-side in API server\n");
 	printf("	--show-tool-calls=BOOL  Show tool calls in output (default: true)\n");
+	printf("	--continue             Resume previous conversation\n");
 	printf("	--apikey-store URI API key store: file://, postgresql://, msi://\n");
 	printf("	--truncate LIMIT   Truncate tool results to LIMIT tokens (0 = auto 85%% of available space)\n");
 	printf("	--warmup		   Send warmup message before first user prompt (initializes model)\n");
@@ -784,10 +785,10 @@ int main(int argc, char** argv) {
 
 		tools.build_all_tools();
 
-		// Build args vector from argv[2] onwards
+		// Build args vector from subcmd_argv[2] onwards
 		std::vector<std::string> args;
-		for (int i = 2; i < argc; i++) {
-			args.push_back(argv[i]);
+		for (int i = 2; i < subcmd_argc; i++) {
+			args.push_back(subcmd_argv[i]);
 		}
 
 		auto out = [](const std::string& msg) { std::cout << msg; };
@@ -822,8 +823,8 @@ int main(int argc, char** argv) {
 	// Handle ctl subcommand (server control)
 	if (subcommand == "ctl") {
 		std::vector<std::string> args;
-		for (int i = 2; i < argc; i++) {
-			args.push_back(argv[i]);
+		for (int i = 2; i < subcmd_argc; i++) {
+			args.push_back(subcmd_argv[i]);
 		}
 		return handle_ctl_args(args);
 	}
@@ -835,8 +836,8 @@ int main(int argc, char** argv) {
 			config->load();
 		}
 		std::vector<std::string> args;
-		for (int i = 2; i < argc; i++) {
-			args.push_back(argv[i]);
+		for (int i = 2; i < subcmd_argc; i++) {
+			args.push_back(subcmd_argv[i]);
 		}
 		auto out = [](const std::string& msg) { std::cout << msg; };
 		return handle_apikey_args(args, out, config->apikey_store);
@@ -853,6 +854,7 @@ int main(int argc, char** argv) {
 	std::vector<std::string> enable_tools;
 	bool server_tools = false;
 	bool use_tools = false;
+	bool continue_session = false;
 	int show_tool_calls_override = -1;  // -1 = use config, 0 = false, 1 = true
 	int color_override = -1;  // -1 = auto, 0 = off, 1 = on
 	int tui_override = -1;    // -1 = auto, 0 = off, 1 = on
@@ -947,6 +949,7 @@ int main(int argc, char** argv) {
 		{"server-tools", no_argument, 0, 1047},
 		{"use-tools", no_argument, 0, 1070},
 		{"show-tool-calls", required_argument, 0, 1071},
+		{"continue", no_argument, 0, 1072},
 		{"truncate", required_argument, 0, 1019},
 		{"warmup", no_argument, 0, 1026},
 		{"tp", required_argument, 0, 1029},
@@ -1122,6 +1125,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1071: // --show-tool-calls=true|false
 				show_tool_calls_override = (std::string(optarg) == "true" || std::string(optarg) == "1") ? 1 : 0;
+				break;
+			case 1072: // --continue
+				continue_session = true;
 				break;
 			case 1019: // --truncate
 				override.truncate_limit = std::atoi(optarg);
@@ -1589,6 +1595,7 @@ int main(int argc, char** argv) {
 		frontend_flags.no_memory = no_memory;
 		frontend_flags.disable_tools = disable_tools;
 		frontend_flags.enable_tools = enable_tools;
+		frontend_flags.continue_session = continue_session;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 

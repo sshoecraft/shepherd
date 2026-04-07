@@ -383,7 +383,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
 
     // Determine if first arg is an action (action-first) or a name (name-first)
     std::string first_arg = args[0];
-    bool action_first = (first_arg == "list" || first_arg == "create" ||
+    bool action_first = (first_arg == "list" || first_arg == "create" || first_arg == "add" ||
                          first_arg == "help" || first_arg == "--help" || first_arg == "-h");
 
     std::string name;
@@ -534,7 +534,7 @@ int handle_apikey_args(const std::vector<std::string>& args,
     }
 
     // Create new key
-    if (subcmd == "create") {
+    if (subcmd == "create" || subcmd == "add") {
         if (args.size() < 2) {
             callback("Error: Missing key name\n");
             callback("Usage: shepherd apikey create <name> [--notes <notes>] [--perms <json>]\n");

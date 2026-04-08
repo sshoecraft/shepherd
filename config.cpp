@@ -11,7 +11,6 @@
 #include <algorithm>
 
 // include the system prompt
-#include "system_prompt.h"
 
 using json = nlohmann::json;
 
@@ -25,8 +24,8 @@ void Config::set_max_db_size(const std::string& size_str) {
 }
 
 void Config::set_defaults() {
-	// Default system prompt (loaded from system_prompt.h)
-	system_message = SYSTEM_PROMPT;
+	// No default system prompt - only set via config file or --system-prompt/--system-prompt-file
+	system_message = "";
 
 	// Default warmup message
 	warmup_message = "I want you to respond with exactly 'Ready.' and absolutely nothing else one time only at the start.  **IMPORTANT:** DO NOT USE TOOLS!";

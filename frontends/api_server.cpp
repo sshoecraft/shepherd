@@ -486,6 +486,12 @@ void APIServer::register_endpoints() {
                 }
             }
 
+            // If request didn't include a system message, use the server's configured system prompt
+            if (request_session.system_message.empty() && !session.system_message.empty()) {
+                dout(1) << "No system message in request, using server's configured system prompt" << std::endl;
+                request_session.system_message = session.system_message;
+            }
+
             // Enrich last user message with RAG context (unless client opted out)
             if (request_memory) {
                 enrich_with_rag_context(request_session);

@@ -196,7 +196,9 @@ Server::Server(const std::string& host, int port, const std::string& server_type
     }
 
     // Initialize API key authentication from config
+    // Eager-load keys now so the DB connection isn't needed after chroot
     key_store = KeyStore::create(config->apikey_store);
+    key_store->is_enabled();
 
     // Default no-op callback - subclasses should set their own callback
     // in their constructor to properly handle events

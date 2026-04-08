@@ -430,6 +430,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ## Version History
 
+- **2.40.1** - Fix system prompt not applied to API requests when client (e.g. Open WebUI) doesn't send a system message; server's `--system-prompt-file` now used as fallback
 - **2.39.0** - Add `--use-tools` for server-side tool execution, `capabilities` in `/v1/models`, `--apikey-store` URI-based auth config
 - **2.21.1** - Fix non-streaming responses dropping CODEBLOCK events (content inside markdown code blocks was not accumulated)
 - **2.17.0** - Two-phase streaming for proper HTTP error codes

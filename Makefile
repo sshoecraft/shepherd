@@ -31,7 +31,50 @@ ifeq ($(TENSORRT),ON)
 endif
 
 config:
+	@# Detect platform for install hints
+	@MISSING=""; \
+	OS=$$(uname -s); \
+	if [ "$$OS" = "Darwin" ]; then \
+		PKG_MGR="brew install"; \
+	elif command -v apt-get >/dev/null 2>&1; then \
+		PKG_MGR="sudo apt-get install"; \
+	elif command -v dnf >/dev/null 2>&1; then \
+		PKG_MGR="sudo dnf install"; \
+	else \
+		PKG_MGR="install"; \
+	fi; \
+	command -v cmake >/dev/null 2>&1 || MISSING="$$MISSING cmake"; \
+	command -v g++ >/dev/null 2>&1 || command -v c++ >/dev/null 2>&1 || { \
+		if [ "$$OS" = "Darwin" ]; then MISSING="$$MISSING (run: xcode-select --install)"; \
+		else MISSING="$$MISSING g++"; fi; \
+	}; \
+	command -v pkg-config >/dev/null 2>&1 || MISSING="$$MISSING pkg-config"; \
+	if [ "$$OS" = "Darwin" ]; then \
+		pkg-config --exists openssl 2>/dev/null || MISSING="$$MISSING openssl"; \
+		pkg-config --exists sqlite3 2>/dev/null || MISSING="$$MISSING sqlite"; \
+		pkg-config --exists libcurl 2>/dev/null || MISSING="$$MISSING curl"; \
+		pkg-config --exists ncursesw 2>/dev/null || pkg-config --exists ncurses 2>/dev/null || MISSING="$$MISSING ncurses"; \
+	else \
+		pkg-config --exists openssl 2>/dev/null || MISSING="$$MISSING libssl-dev"; \
+		pkg-config --exists sqlite3 2>/dev/null || MISSING="$$MISSING libsqlite3-dev"; \
+		pkg-config --exists libcurl 2>/dev/null || MISSING="$$MISSING libcurl4-openssl-dev"; \
+		pkg-config --exists ncursesw 2>/dev/null || MISSING="$$MISSING libncurses-dev"; \
+	fi; \
+	if [ -n "$$MISSING" ]; then \
+		echo ""; \
+		echo "ERROR: Missing dependencies:$$MISSING"; \
+		echo ""; \
+		echo "Install with: $$PKG_MGR$$MISSING"; \
+		echo ""; \
+		exit 1; \
+	fi
+	@# Initialize replxx submodule if needed
 	@if [ ! -f vendor/replxx/CMakeLists.txt ]; then echo "Initializing replxx submodule..."; git submodule update --init vendor/replxx; fi
+	@# Apply replxx patch if not already applied
+	@if ! grep -q "Disable postfixes" vendor/replxx/CMakeLists.txt 2>/dev/null; then \
+		echo "Applying replxx build fixes..."; \
+		cd vendor/replxx && git apply ../../patches/replxx-build-fixes.patch; \
+	fi
 	rm -rf build; mkdir -p build
 	cd build && $(_ACT) cmake -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DBUILD_TESTS=$(TESTS) -DENABLE_API_BACKENDS=ON -DENABLE_LLAMACPP=$(LLAMACPP) -DENABLE_TENSORRT=$(TENSORRT) -DENABLE_POSTGRESQL=$(POSTGRES) ..
 

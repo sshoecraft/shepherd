@@ -8,21 +8,32 @@ Shepherd is a C++ LLM system supporting local models (llama.cpp, TensorRT-LLM) a
 
 ## Quick Start
 
-**Local model:**
+```bash
+git clone --recursive https://github.com/sshoecraft/shepherd.git
+cd shepherd
+make
+```
+
+The Makefile checks for missing dependencies and tells you exactly what to install.
+
+**Add a cloud provider and start using it:**
+```bash
+# OpenAI
+shepherd provider add gpt openai --model gpt-4o --api-key sk-...
+
+# Anthropic
+shepherd provider add sonnet anthropic --model claude-sonnet-4 --api-key sk-ant-...
+
+# Start chatting
+./shepherd --provider sonnet
+```
+
+**Local model (requires NVIDIA GPU + CUDA):**
 ```bash
 ./shepherd -m /path/to/model.gguf
 ```
 
-**Cloud provider:**
-```bash
-# Add a provider
-shepherd provider add sonnet anthropic --model claude-sonnet-4 --api-key sk-ant-...
-
-# Use it
-./shepherd --provider sonnet
-```
-
-**Build from source:** See [BUILD.md](BUILD.md) for prerequisites and installation.
+See [BUILD.md](BUILD.md) for GPU setup and advanced build options.
 
 ---
 

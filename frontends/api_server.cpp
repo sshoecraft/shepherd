@@ -315,6 +315,7 @@ void APIServer::register_endpoints() {
             try {
                 std::string sanitized_body = utf8_sanitizer::sanitize_utf8(req.body);
                 request = json::parse(sanitized_body);
+                dout(5) << "Incoming request JSON: " << request.dump(2) << std::endl;
             } catch (const std::exception& e) {
                 res.status = 400;
                 res.set_content(create_error_response(400, "Invalid JSON").dump(), "application/json");
@@ -380,6 +381,12 @@ void APIServer::register_endpoints() {
             // Parse use_tools: server-side tool execution
             bool use_tools = request.value("use_tools", config->use_tools);
             bool show_tool_calls = request.value("show_tool_calls", config->show_tool_calls);
+            dout(3) << "use_tools: " << use_tools
+                    << " (from request: " << request.contains("use_tools")
+                    << ", server default: " << config->use_tools << ")" << std::endl;
+            dout(3) << "show_tool_calls: " << show_tool_calls
+                    << " (from request: " << request.contains("show_tool_calls")
+                    << ", server default: " << config->show_tool_calls << ")" << std::endl;
             if (use_tools && !config->use_tools) {
                 res.status = 400;
                 res.set_content(create_error_response(400,

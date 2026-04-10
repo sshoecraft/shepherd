@@ -710,6 +710,9 @@ void APIServer::register_endpoints() {
                                               const std::string& content,
                                               const std::string& tool_name_arg,
                                               const std::string& tool_call_id) -> bool {
+                            dout(3) << "streaming_handler: event=" << static_cast<int>(type)
+                                    << " content_len=" << content.length()
+                                    << " content=[" << content.substr(0, 80) << "]" << std::endl;
                             // Accumulate content for memory extraction
                             if (type == CallbackEvent::CONTENT || type == CallbackEvent::CODEBLOCK) {
                                 streamed_content += content;
@@ -752,7 +755,19 @@ void APIServer::register_endpoints() {
 
                                 // Add assistant message with tool_calls then tool response
                                 // OpenAI API requires assistant message with tool_calls before tool responses
-                                {
+                                // Check if ApiBackend already added it (non-streaming backend path)
+                                // Look backwards through messages since tool responses from earlier
+                                // calls in the same batch may have been appended
+                                bool already_has_assistant = false;
+                                for (int i = request_session.messages.size() - 1; i >= 0; i--) {
+                                    auto& m = request_session.messages[i];
+                                    if (m.role == Message::ASSISTANT && !m.tool_calls_json.empty()) {
+                                        already_has_assistant = true;
+                                        break;
+                                    }
+                                    if (m.role != Message::TOOL_RESPONSE) break;
+                                }
+                                if (!already_has_assistant) {
                                     Message assistant_msg(Message::ASSISTANT, streamed_content, 0);
                                     nlohmann::json tc_json = nlohmann::json::array();
                                     tc_json.push_back({
@@ -973,12 +988,25 @@ void APIServer::register_endpoints() {
                                     }
                                     continue;  // Re-generate with tool results
                                 } else {
-                                    // Standard behavior: send tool calls to client
-                                    const auto& tc = stream_backend->accumulated_tool_calls[0];
-                                    std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
-                                    std::string tc_name = tc["function"].value("name", "");
-                                    std::string tc_args = tc["function"].value("arguments", "{}");
-
+                                    // Pass tool calls through to client as SSE delta chunks
+                                    // Convert message.tool_calls to delta.tool_calls format
+                                    json tool_calls_array = json::array();
+                                    int tc_index = 0;
+                                    for (const auto& tc : stream_backend->accumulated_tool_calls) {
+                                        std::string tc_id = tc.value("id", "call_" + std::to_string(std::time(nullptr)));
+                                        std::string tc_name = tc["function"].value("name", "");
+                                        std::string tc_args = tc["function"].value("arguments", "{}");
+                                        tool_calls_array.push_back({
+                                            {"index", tc_index++},
+                                            {"id", tc_id},
+                                            {"type", "function"},
+                                            {"function", {
+                                                {"name", tc_name},
+                                                {"arguments", tc_args}
+                                            }}
+                                        });
+                                        dout(1) << "Streaming: sending tool_call[" << (tc_index - 1) << "]: " << tc_name << std::endl;
+                                    }
                                     json tool_chunk = {
                                         {"id", request_id},
                                         {"object", "chat.completion.chunk"},
@@ -987,15 +1015,8 @@ void APIServer::register_endpoints() {
                                         {"choices", json::array({{
                                             {"index", 0},
                                             {"delta", {
-                                                {"tool_calls", json::array({{
-                                                    {"index", 0},
-                                                    {"id", tc_id},
-                                                    {"type", "function"},
-                                                    {"function", {
-                                                        {"name", tc_name},
-                                                        {"arguments", tc_args}
-                                                    }}
-                                                }})}
+                                                {"role", "assistant"},
+                                                {"tool_calls", tool_calls_array}
                                             }},
                                             {"logprobs", nullptr},
                                             {"finish_reason", nullptr}
@@ -1004,7 +1025,7 @@ void APIServer::register_endpoints() {
                                     std::string tool_data = "data: " + tool_chunk.dump() + "\n\n";
                                     sink.write(tool_data.c_str(), tool_data.size());
                                     finish_reason = "tool_calls";
-                                    dout(1) << "Streaming: sent tool_call: " << tc_name << std::endl;
+                                    stream_backend->clear_tool_calls();
                                 }
                             }
                             break;  // No more tool calls or not using tools
@@ -1017,6 +1038,8 @@ void APIServer::register_endpoints() {
                         }
 
                         // Send final chunk with finish_reason (vLLM compatible)
+                        json final_delta = (finish_reason == "tool_calls") ?
+                            json::object() : json{{"content", ""}};
                         json final_chunk = {
                             {"id", request_id},
                             {"object", "chat.completion.chunk"},
@@ -1024,7 +1047,7 @@ void APIServer::register_endpoints() {
                             {"model", model_name},
                             {"choices", json::array({{
                                 {"index", 0},
-                                {"delta", {{"content", ""}}},
+                                {"delta", final_delta},
                                 {"logprobs", nullptr},
                                 {"finish_reason", finish_reason}
                             }})}

@@ -180,8 +180,9 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
 
         callback(CallbackEvent::STOP, resp.finish_reason, "", "");
 
-        // Send tool calls AFTER STOP - frontend handles immediately
+        // Record and send tool calls AFTER STOP - frontend handles immediately
         for (const auto& tc : resp.tool_calls) {
+            record_tool_call(tc.name, tc.raw_json.empty() ? "{}" : tc.raw_json, tc.tool_call_id);
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
 

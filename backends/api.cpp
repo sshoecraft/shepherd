@@ -106,6 +106,9 @@ void ApiBackend::parse_backend_config() {
 // NOTE: add_message() removed - use Frontend::add_message_to_session() + generate_response() instead
 
 void ApiBackend::generate_from_session(Session& session, int max_tokens) {
+    // Clear state from previous generation
+    reset_output_state();
+
     // Build request using backend-specific format
     nlohmann::json request = build_request_from_session(session, max_tokens);
 
@@ -150,39 +153,22 @@ void ApiBackend::generate_from_session(Session& session, int max_tokens) {
             flush_output();
         }
 
-        // Store assistant message in session (critical for tool call flows)
+        // Update session token tracking for the assistant response
         int assistant_tokens = resp.completion_tokens > 0 ? resp.completion_tokens : estimate_message_tokens(resp.content);
-        Message assistant_msg(Message::ASSISTANT, resp.content, assistant_tokens);
-
-        // Build tool_calls_json if we have tool calls
-        if (!resp.tool_calls.empty()) {
-            // Prefer backend-native format (e.g. Gemini stores parts with thoughtSignature)
-            if (!resp.tool_calls_json.empty()) {
-                assistant_msg.tool_calls_json = resp.tool_calls_json;
-            } else {
-                // Build OpenAI-format tool_calls_json
-                nlohmann::json tool_calls_array = nlohmann::json::array();
-                for (const auto& tc : resp.tool_calls) {
-                    nlohmann::json tc_json;
-                    tc_json["id"] = tc.tool_call_id;
-                    tc_json["type"] = "function";
-                    tc_json["function"]["name"] = tc.name;
-                    tc_json["function"]["arguments"] = tc.raw_json;
-                    tool_calls_array.push_back(tc_json);
-                }
-                assistant_msg.tool_calls_json = tool_calls_array.dump();
-            }
-        }
-
-        session.messages.push_back(assistant_msg);
-        session.last_assistant_message_index = session.messages.size() - 1;
         session.last_assistant_message_tokens = assistant_tokens;
 
-        callback(CallbackEvent::STOP, resp.finish_reason, "", "");
-
-        // Record and send tool calls AFTER STOP - frontend handles immediately
+        // Record tool calls BEFORE STOP so generate_response() wrapper can include
+        // them in the assistant message it adds to the session
         for (const auto& tc : resp.tool_calls) {
             record_tool_call(tc.name, tc.raw_json.empty() ? "{}" : tc.raw_json, tc.tool_call_id);
+        }
+
+        // Signal completion - the generate_response() wrapper in frontend.cpp adds
+        // the assistant message to session on STOP (using accumulated content and tool calls)
+        callback(CallbackEvent::STOP, resp.finish_reason, "", "");
+
+        // Send tool calls AFTER STOP - frontend handles immediately
+        for (const auto& tc : resp.tool_calls) {
             callback(CallbackEvent::TOOL_CALL, tc.raw_json, tc.name, tc.tool_call_id);
         }
 

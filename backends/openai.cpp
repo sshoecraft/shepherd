@@ -4,6 +4,7 @@
 #include "nlohmann/json.hpp"
 #include "sse_parser.h"
 #include "../tools/utf8_sanitizer.h"
+#include <set>
 
 using json = nlohmann::json;
 
@@ -190,7 +191,18 @@ Response OpenAIBackend::parse_http_response(const HttpResponse& http_response) {
             if (error_json.contains("error")) {
                 // OpenAI format: {"error": {"message": "..."}} or {"error": "..."}
                 if (error_json["error"].is_object() && error_json["error"].contains("message")) {
-                    resp.error = error_json["error"]["message"].get<std::string>();
+                    const auto& msg = error_json["error"]["message"];
+                    if (msg.is_string()) {
+                        resp.error = msg.get<std::string>();
+                    } else if (msg.is_array()) {
+                        // Azure proxy format: {"error": {"message": [{"error": {"message": "..."}}]}}
+                        for (const auto& item : msg) {
+                            if (item.contains("error") && item["error"].contains("message")) {
+                                resp.error = item["error"]["message"].get<std::string>();
+                                break;
+                            }
+                        }
+                    }
                 } else if (error_json["error"].is_string()) {
                     resp.error = error_json["error"].get<std::string>();
                 }
@@ -622,7 +634,15 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
         messages.push_back({{"role", "system"}, {"content", session.system_message}});
     }
 
-    // Add all messages from session
+    // Add all messages from session, validating tool_call_id consistency
+    // Collect tool_call_ids that have responses so we can skip orphaned assistant messages
+    std::set<std::string> responded_tool_call_ids;
+    for (const auto& msg : session.messages) {
+        if (msg.role == Message::TOOL_RESPONSE && !msg.tool_call_id.empty()) {
+            responded_tool_call_ids.insert(msg.tool_call_id);
+        }
+    }
+
     for (const auto& msg : session.messages) {
         nlohmann::json jmsg;
         jmsg["role"] = msg.get_role();
@@ -631,7 +651,28 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
         // Restore tool_calls for assistant messages that made tool calls
         if (msg.role == Message::ASSISTANT && !msg.tool_calls_json.empty()) {
             try {
-                jmsg["tool_calls"] = nlohmann::json::parse(msg.tool_calls_json);
+                auto tool_calls = nlohmann::json::parse(msg.tool_calls_json);
+
+                // Filter out tool_calls that don't have corresponding tool responses
+                // This prevents "tool_call_id did not have response messages" API errors
+                nlohmann::json valid_tool_calls = nlohmann::json::array();
+                for (const auto& tc : tool_calls) {
+                    std::string tc_id = tc.value("id", "");
+                    if (!tc_id.empty() && responded_tool_call_ids.count(tc_id)) {
+                        valid_tool_calls.push_back(tc);
+                    } else if (!tc_id.empty()) {
+                        dout(1) << "WARNING: Dropping orphaned tool_call " + tc_id +
+                                   " (no matching tool response in session)" << std::endl;
+                    }
+                }
+
+                if (!valid_tool_calls.empty()) {
+                    jmsg["tool_calls"] = valid_tool_calls;
+                } else if (tool_calls.size() > 0 && valid_tool_calls.empty()) {
+                    // All tool_calls were orphaned - skip this assistant message entirely
+                    dout(1) << "WARNING: Skipping assistant message with all orphaned tool_calls" << std::endl;
+                    continue;
+                }
             } catch (const std::exception& e) {
                 dout(1) << std::string("WARNING: ") +"Failed to parse stored tool_calls: " + std::string(e.what()) << std::endl;
             }
@@ -1082,11 +1123,23 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
         if (error_msg.empty() && !http_response.body.empty()) {
             try {
                 auto json_body = nlohmann::json::parse(http_response.body);
-                if (json_body.contains("error") && json_body["error"].contains("message")) {
-                    error_msg = json_body["error"]["message"].get<std::string>();
+                if (json_body.contains("error") && json_body["error"].is_object() &&
+                    json_body["error"].contains("message")) {
+                    const auto& msg = json_body["error"]["message"];
+                    if (msg.is_string()) {
+                        error_msg = msg.get<std::string>();
+                    } else if (msg.is_array()) {
+                        // Azure proxy format: {"error": {"message": [{"error": {"message": "..."}}]}}
+                        for (const auto& item : msg) {
+                            if (item.contains("error") && item["error"].contains("message")) {
+                                error_msg = item["error"]["message"].get<std::string>();
+                                break;
+                            }
+                        }
+                    }
                 }
             } catch (...) {
-                error_msg = http_response.body;
+                error_msg = http_response.body.substr(0, 500);
             }
         }
         if (error_msg.empty()) {

@@ -34,6 +34,14 @@ DEFAULT_BASE_URL = "http://localhost:8000"
 
 print = functools.partial(print, flush=True)
 
+def fetch_server_models(base_url: str) -> List[str]:
+    """Query GET {base_url}/v1/models and return the list of model IDs."""
+    url = base_url.rstrip('/') + "/v1/models"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = json.loads(resp.read().decode('utf-8'))
+    return [m["id"] for m in body.get("data", []) if "id" in m]
+
 def clean_latex(text: str) -> str:
     """Convert LaTeX notation to readable format"""
     import re
@@ -193,7 +201,7 @@ HELLASWAG_QUESTIONS = [
 MMLU_CACHE_DIR = os.path.expanduser("~/.cache/shepherd")
 MMLU_CACHE_FILE = os.path.join(MMLU_CACHE_DIR, "mmlu_{split}.json")
 
-def load_mmlu_questions(subjects=None, count=None, split='test'):
+def load_mmlu_questions(subjects=None, count=None, split='test', refresh=False):
     """
     Load MMLU questions from Hugging Face (with local caching).
 
@@ -201,11 +209,12 @@ def load_mmlu_questions(subjects=None, count=None, split='test'):
         subjects: List of subject names to include, or None for all
         count: Number of questions to sample, or None for all
         split: Which split to use ('test', 'dev', 'validation')
+        refresh: If True, ignore the local cache and re-download from Hugging Face
     """
     cache_file = MMLU_CACHE_FILE.format(split=split)
 
     # Try to load from cache first
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not refresh:
         print(f"Loading MMLU dataset from cache: {cache_file}")
         with open(cache_file, 'r') as f:
             all_questions = json.load(f)
@@ -890,9 +899,9 @@ class BenchmarkTestRunner:
 
         return None
 
-    def run_mmlu_benchmark(self, count: int = None, subjects: List[str] = None) -> BenchmarkResult:
+    def run_mmlu_benchmark(self, count: int = None, subjects: List[str] = None, refresh: bool = False) -> BenchmarkResult:
         """Run MMLU benchmark questions"""
-        questions = load_mmlu_questions(subjects=subjects, count=count)
+        questions = load_mmlu_questions(subjects=subjects, count=count, refresh=refresh)
 
         print(f"\n{'='*70}")
         print(f"Running MMLU Benchmark ({len(questions)} questions)")
@@ -1440,8 +1449,11 @@ def main():
                        default=DEFAULT_BASE_URL,
                        help=f"OpenAI API base URL (default: {DEFAULT_BASE_URL})")
     parser.add_argument("--model",
-                       default="default",
-                       help="Model name for API calls (default: default)")
+                       default=None,
+                       help="Model name for API calls (default: auto-detect via /v1/models)")
+    parser.add_argument("--list-models",
+                       action="store_true",
+                       help="List models advertised by the server and exit")
     parser.add_argument("--provider", "-p",
                        help="Use subprocess mode with this provider (legacy)")
     parser.add_argument("--benchmark", "-b",
@@ -1474,6 +1486,9 @@ def main():
     parser.add_argument("--nothink",
                        action="store_true",
                        help="Send /nothink command before starting tests")
+    parser.add_argument("--refresh",
+                       action="store_true",
+                       help="Force refresh of MMLU dataset from Hugging Face")
     parser.add_argument("--temperature", "--temp",
                        type=float,
                        help="Sampling temperature (e.g., 0.7)")
@@ -1495,6 +1510,23 @@ def main():
 
     args = parser.parse_args()
 
+    # Auto-detect or list models via /v1/models (skip in subprocess/provider mode)
+    if not args.provider and (args.list_models or args.model is None):
+        try:
+            models = fetch_server_models(args.baseurl)
+        except Exception as e:
+            print(f"ERROR: Failed to query {args.baseurl}/v1/models: {e}")
+            sys.exit(1)
+        if args.list_models:
+            for m in models:
+                print(m)
+            sys.exit(0)
+        if not models:
+            print(f"ERROR: Server at {args.baseurl} returned no models")
+            sys.exit(1)
+        args.model = models[0]
+        print(f"Auto-selected model: {args.model}")
+
     # Handle --list-subjects
     if args.list_subjects:
         print("Available MMLU subjects:")
@@ -1503,6 +1535,10 @@ def main():
         print(f"\nTotal: {len(MMLU_SUBJECTS)} subjects")
         print("\nUsage: --subjects college_computer_science machine_learning")
         sys.exit(0)
+
+    # Subprocess/provider mode doesn't use --model
+    if args.model is None:
+        args.model = "default"
 
     # Check binary exists (only needed for subprocess mode)
     if args.provider and not os.path.exists(SHEPHERD_BINARY):
@@ -1536,7 +1572,7 @@ def main():
         results = []
 
         if args.benchmark in ["mmlu", "all"]:
-            result = runner.run_mmlu_benchmark(count=args.count, subjects=args.subjects)
+            result = runner.run_mmlu_benchmark(count=args.count, subjects=args.subjects, refresh=args.refresh)
             if result:
                 print_summary(result)
                 results.append(result)

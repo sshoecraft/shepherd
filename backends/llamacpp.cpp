@@ -388,35 +388,36 @@ LlamaCppBackend::LlamaCppBackend(size_t max_context_tokens, Session& session, Ev
             dout(1) << "WARNING: Failed to load draft model - speculative decoding disabled" << std::endl;
             model_draft.clear();
         } else {
-            // Create draft context with smaller context window
+            // Create draft context (matches target context size so spec can run end-to-end)
             llama_context_params draft_ctx_params = ctx_params;
-            draft_ctx_params.n_ctx = std::min(static_cast<uint32_t>(2048), ctx_params.n_ctx);
-            draft_ctx_params.kv_need_space_callback = nullptr;  // No eviction for draft
-
             draft_model_ctx = llama_init_from_model(static_cast<llama_model*>(draft_model), draft_ctx_params);
             if (!draft_model_ctx) {
                 llama_model_free(static_cast<llama_model*>(draft_model));
                 draft_model = nullptr;
                 model_draft.clear();
-                dout(1) << "WARNING: Failed to create draft model context - speculative decoding disabled" << std::endl;
+                dout(1) << "WARNING: Failed to create draft context - speculative decoding disabled" << std::endl;
             } else {
-                // Initialize speculative state
-                spec_state = common_speculative_init(
-                    static_cast<llama_context*>(model_ctx),
-                    static_cast<llama_context*>(draft_model_ctx)
-                );
+                // Initialize speculative state (DRAFT_SIMPLE: standalone draft model)
+                common_params_speculative spec_params;
+                spec_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE };
+                spec_params.draft.ctx_tgt = static_cast<llama_context*>(model_ctx);
+                spec_params.draft.ctx_dft = static_cast<llama_context*>(draft_model_ctx);
+                spec_params.draft.n_max = draft_max;
+                spec_params.draft.p_min = draft_p_min;
+                spec_params.draft.mparams.path = full_draft_path;
 
-                bool compatible = common_speculative_are_compatible(
-                    static_cast<llama_context*>(model_ctx),
-                    static_cast<llama_context*>(draft_model_ctx)
-                );
-
-                if (!compatible) {
-                    dout(1) << "WARNING: Draft and target models may have incompatible vocabularies" << std::endl;
+                spec_state = common_speculative_init(spec_params, 1);
+                if (!spec_state) {
+                    llama_free(static_cast<llama_context*>(draft_model_ctx));
+                    draft_model_ctx = nullptr;
+                    llama_model_free(static_cast<llama_model*>(draft_model));
+                    draft_model = nullptr;
+                    model_draft.clear();
+                    dout(1) << "WARNING: common_speculative_init failed - speculative decoding disabled" << std::endl;
+                } else {
+                    dout(1) << "Speculative decoding enabled: draft_max=" + std::to_string(draft_max) +
+                              ", p_min=" + std::to_string(draft_p_min) << std::endl;
                 }
-
-                dout(1) << "Speculative decoding enabled: draft_max=" + std::to_string(draft_max) +
-                          ", p_min=" + std::to_string(draft_p_min) << std::endl;
             }
         }
     }
@@ -1652,8 +1653,9 @@ std::string LlamaCppBackend::run_inference(const std::string& prompt_text, int m
                 }
 
                 // Emit thinking/reasoning delta (NOT added to response - transient)
+                // Always emit; frontends decide whether to display based on config->thinking
                 std::string thinking_delta = parser->get_reasoning_delta();
-                if (!thinking_delta.empty() && config->thinking ) {
+                if (!thinking_delta.empty()) {
                     if (!callback(CallbackEvent::THINKING, thinking_delta, "", "")) {
                         dout(1) << "callback signaled stop after thinking" << std::endl;
                         break;

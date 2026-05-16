@@ -65,6 +65,11 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, top
         stream=stream,
         temperature=temperature,
         top_p=top_p,
+        # Required so the server includes `usage` in the final streaming chunk.
+        # Without this, completion_tokens is unknown and we fall back to counting
+        # SSE chunks — which under-counts when speculative decoding bundles
+        # multiple verified tokens per chunk.
+        **({"stream_options": {"include_usage": True}} if stream else {}),
         **({"extra_body": extra_body} if extra_body else {})
     )
 
@@ -123,10 +128,13 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, top
         ttft = total_time * 1000
         generation_time = total_time
 
-    # Inter-token latency (time between tokens after first)
-    if len(token_times) > 1:
-        itl_samples = [token_times[i] - token_times[i-1] for i in range(1, len(token_times))]
-        itl_ms = statistics.mean(itl_samples) * 1000
+    # Inter-token latency.
+    # token_times records timestamps per SSE chunk, not per token. With
+    # speculative decoding the server bundles multiple verified tokens into
+    # each chunk, so chunk-arrival deltas overstate true ITL. Derive ITL from
+    # actual generation time / actual token count instead.
+    if tokens > 0 and generation_time > 0:
+        itl_ms = (generation_time * 1000) / tokens
     else:
         itl_ms = 0
 
@@ -282,8 +290,10 @@ Examples:
                         help="OpenAI-compatible API base URL (default: http://localhost:8000/v1)")
     parser.add_argument("--api-key", default="not-needed",
                         help="API key (default: not-needed)")
-    parser.add_argument("--model", default="default",
-                        help="Model name (default: default)")
+    parser.add_argument("--model", default=None,
+                        help="Model name (default: auto-detect via /v1/models)")
+    parser.add_argument("--list-models", action="store_true",
+                        help="List models advertised by the server and exit")
     parser.add_argument("--prompt", 
                         default="Write a detailed explanation of how transformers work in neural networks.",
                         help="Prompt to use for benchmarking")
@@ -313,7 +323,24 @@ Examples:
                         help="Disable streaming (use non-streaming API)")
 
     args = parser.parse_args()
-    
+
+    if args.list_models or args.model is None:
+        probe = OpenAI(base_url=args.base_url, api_key=args.api_key)
+        try:
+            models = [m.id for m in probe.models.list().data]
+        except Exception as e:
+            print(f"Failed to query {args.base_url}/models: {e}")
+            return
+        if args.list_models:
+            for m in models:
+                print(m)
+            return
+        if not models:
+            print(f"Server at {args.base_url} returned no models")
+            return
+        args.model = models[0]
+        print(f"Auto-selected model: {args.model}")
+
     print(f"Benchmarking: {args.base_url}")
     print(f"Model: {args.model}")
     print(f"Max tokens: {args.max_tokens}")

@@ -109,9 +109,9 @@ void GpuBackend::flush_output() {
             filter(content_delta.c_str(), content_delta.length());
         }
 
-        // Emit any remaining reasoning delta
+        // Emit any remaining reasoning delta (frontends decide display)
         std::string reasoning_delta = parser->get_reasoning_delta();
-        if (!reasoning_delta.empty() && config->thinking ) {
+        if (!reasoning_delta.empty()) {
             callback(CallbackEvent::THINKING, reasoning_delta, "", "");
         }
 

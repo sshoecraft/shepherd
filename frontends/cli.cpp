@@ -122,9 +122,11 @@ void CLI::init(const FrontendFlags& flags) {
 
         switch (type) {
             case CallbackEvent::CONTENT:
-            case CallbackEvent::THINKING:
             case CallbackEvent::CODEBLOCK:
                 write_colored(content, type);
+                break;
+            case CallbackEvent::THINKING:
+                if (config->thinking) write_colored(content, type);
                 break;
             case CallbackEvent::TOOL_CALL: {
                 // TOOL_CALL fires after STOP - execute and add response, but wait for TOOL_CALLS_COMPLETE to generate

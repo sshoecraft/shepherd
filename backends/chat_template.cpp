@@ -392,17 +392,29 @@ std::string MinjaTemplate::get_generation_prompt() const {
         return minja::Value(std::string(buffer));
     });
 
+    bool reasoning_enabled = config && !config->reasoning.empty() && config->reasoning != "off";
+
     context_without->set("messages", messages);
     context_without->set("bos_token", minja::Value(bos_token));
     context_without->set("eos_token", minja::Value(eos_token));
     context_without->set("add_generation_prompt", minja::Value(false));
     context_without->set("strftime_now", strftime_now);
+    context_without->set("enable_thinking", minja::Value(reasoning_enabled));
+    context_without->set("thinking", minja::Value(reasoning_enabled));
+    if (reasoning_enabled) {
+        context_without->set("reasoning_effort", minja::Value(config->reasoning));
+    }
 
     context_with->set("messages", messages);
     context_with->set("bos_token", minja::Value(bos_token));
     context_with->set("eos_token", minja::Value(eos_token));
     context_with->set("add_generation_prompt", minja::Value(true));
     context_with->set("strftime_now", strftime_now);
+    context_with->set("enable_thinking", minja::Value(reasoning_enabled));
+    context_with->set("thinking", minja::Value(reasoning_enabled));
+    if (reasoning_enabled) {
+        context_with->set("reasoning_effort", minja::Value(config->reasoning));
+    }
 
     std::string without_prompt = (*template_ptr)->render(context_without);
     std::string with_prompt = (*template_ptr)->render(context_with);

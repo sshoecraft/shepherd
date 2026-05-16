@@ -1061,10 +1061,19 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
                                 }
                             }
 
-                            // Handle tool_calls delta (incremental)
+                            // Handle tool_calls delta (incremental).
+                            // OpenAI streaming protocol: id/name/type are populated on
+                            // the FIRST delta for a given index, then re-sent as null
+                            // (vLLM) or omitted (others) on subsequent deltas. We must
+                            // treat "present but null" identically to "absent" — calling
+                            // .get<std::string>() on a null throws json::type_error,
+                            // which would kill the whole chunk and lose the arguments
+                            // fragment riding along with it (incl. closing "}).
                             if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
                                 for (const auto& tc_delta : delta["tool_calls"]) {
-                                    int index = tc_delta.value("index", 0);
+                                    int index = tc_delta.contains("index") && tc_delta["index"].is_number_integer()
+                                                ? tc_delta["index"].get<int>()
+                                                : 0;
 
                                     while (tool_calls.size() <= static_cast<size_t>(index)) {
                                         tool_calls.push_back(ToolParser::ToolCall());
@@ -1072,16 +1081,16 @@ void OpenAIBackend::generate_from_session(Session& session, int max_tokens) {
 
                                     auto& tool_call = tool_calls[index];
 
-                                    if (tc_delta.contains("id")) {
+                                    if (tc_delta.contains("id") && tc_delta["id"].is_string()) {
                                         tool_call.tool_call_id = tc_delta["id"].get<std::string>();
                                     }
 
-                                    if (tc_delta.contains("function")) {
+                                    if (tc_delta.contains("function") && tc_delta["function"].is_object()) {
                                         const auto& func = tc_delta["function"];
-                                        if (func.contains("name")) {
+                                        if (func.contains("name") && func["name"].is_string()) {
                                             tool_call.name = func["name"].get<std::string>();
                                         }
-                                        if (func.contains("arguments")) {
+                                        if (func.contains("arguments") && func["arguments"].is_string()) {
                                             tool_call.raw_json += func["arguments"].get<std::string>();
                                         }
                                     }

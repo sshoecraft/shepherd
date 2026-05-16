@@ -1223,7 +1223,7 @@ bool TUI::output_callback(CallbackEvent type, const std::string& content,
             write_output(content, CallbackEvent::SYSTEM);
             break;
         case CallbackEvent::THINKING:
-            write_output(content, CallbackEvent::THINKING);
+            if (config->thinking) write_output(content, CallbackEvent::THINKING);
             break;
         case CallbackEvent::STATS:
             // Only show stats if enabled via --stats flag

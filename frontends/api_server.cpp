@@ -378,6 +378,13 @@ void APIServer::register_endpoints() {
             bool stream = request.value("stream", false);
             bool request_memory = request.value("memory", true);
 
+            // OpenAI spec: emit a final usage chunk in the stream only when the
+            // client opts in via stream_options.include_usage=true. Default false.
+            bool include_usage = false;
+            if (request.contains("stream_options") && request["stream_options"].is_object()) {
+                include_usage = request["stream_options"].value("include_usage", false);
+            }
+
             // Parse use_tools: server-side tool execution
             bool use_tools = request.value("use_tools", config->use_tools);
             bool show_tool_calls = request.value("show_tool_calls", config->show_tool_calls);
@@ -658,7 +665,7 @@ void APIServer::register_endpoints() {
                 // Use content provider for true token-by-token streaming
                 res.set_content_provider(
                     "text/event-stream",
-                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory, use_tools, show_tool_calls, per_request_cb](size_t offset, httplib::DataSink& sink) mutable {
+                    [this, stream_backend, request_session, max_tokens, request_id, model_name, thinking_start, thinking_end, filter_thinking, has_channels, request_start_time, backend_lock, req_user_id, request_memory, use_tools, show_tool_calls, per_request_cb, include_usage](size_t offset, httplib::DataSink& sink) mutable {
                         // Send initial chunk with role (vLLM/OpenAI compatible)
                         json initial_chunk = {
                             {"id", request_id},
@@ -695,6 +702,24 @@ void APIServer::register_endpoints() {
                                 {"choices", json::array({{
                                     {"index", 0},
                                     {"delta", {{"content", sanitize_utf8(text)}}},
+                                    {"logprobs", nullptr},
+                                    {"finish_reason", nullptr}
+                                }})}
+                            };
+                            std::string chunk_data = "data: " + delta_chunk.dump() + "\n\n";
+                            return sink.write(chunk_data.c_str(), chunk_data.size());
+                        };
+
+                        auto send_reasoning_chunk = [&](const std::string& text) -> bool {
+                            if (text.empty()) return true;
+                            json delta_chunk = {
+                                {"id", request_id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", std::time(nullptr)},
+                                {"model", model_name},
+                                {"choices", json::array({{
+                                    {"index", 0},
+                                    {"delta", {{"reasoning_content", sanitize_utf8(text)}}},
                                     {"logprobs", nullptr},
                                     {"finish_reason", nullptr}
                                 }})}
@@ -843,6 +868,13 @@ void APIServer::register_endpoints() {
                                 }
 
                                 return send_content_chunk(content);
+                            }
+
+                            // For non-channel models: backend's parser already separates
+                            // thinking from content. THINKING events carry reasoning text;
+                            // stream them as delta.reasoning_content (OpenAI o1-style).
+                            if (type == CallbackEvent::THINKING) {
+                                return send_reasoning_chunk(content);
                             }
 
                             // For non-channel models: use existing thinking block filter
@@ -1055,27 +1087,29 @@ void APIServer::register_endpoints() {
                         std::string final_data = "data: " + final_chunk.dump() + "\n\n";
                         sink.write(final_data.c_str(), final_data.size());
 
-                        // Send usage chunk (OpenAI stream_options.include_usage=true compatible)
-                        // Token counts are updated by backend in generate_from_session()
+                        // Per OpenAI spec, only emit the final usage chunk when the
+                        // client opted in via stream_options.include_usage=true.
                         int prompt_tokens = request_session.last_prompt_tokens;
                         int completion_tokens = request_session.last_assistant_message_tokens;
-                        dout(1) << "API server streaming usage: prompt_tokens=" << prompt_tokens
-                                << ", completion_tokens=" << completion_tokens
-                                << ", total_tokens=" << request_session.total_tokens << std::endl;
-                        json usage_chunk = {
-                            {"id", request_id},
-                            {"object", "chat.completion.chunk"},
-                            {"created", std::time(nullptr)},
-                            {"model", model_name},
-                            {"choices", json::array()},
-                            {"usage", {
-                                {"prompt_tokens", prompt_tokens},
-                                {"completion_tokens", completion_tokens},
-                                {"total_tokens", prompt_tokens + completion_tokens}
-                            }}
-                        };
-                        std::string usage_data = "data: " + usage_chunk.dump() + "\n\n";
-                        sink.write(usage_data.c_str(), usage_data.size());
+                        if (include_usage) {
+                            dout(1) << "API server streaming usage: prompt_tokens=" << prompt_tokens
+                                    << ", completion_tokens=" << completion_tokens
+                                    << ", total_tokens=" << request_session.total_tokens << std::endl;
+                            json usage_chunk = {
+                                {"id", request_id},
+                                {"object", "chat.completion.chunk"},
+                                {"created", std::time(nullptr)},
+                                {"model", model_name},
+                                {"choices", json::array()},
+                                {"usage", {
+                                    {"prompt_tokens", prompt_tokens},
+                                    {"completion_tokens", completion_tokens},
+                                    {"total_tokens", prompt_tokens + completion_tokens}
+                                }}
+                            };
+                            std::string usage_data = "data: " + usage_chunk.dump() + "\n\n";
+                            sink.write(usage_data.c_str(), usage_data.size());
+                        }
 
                         // Log streaming completion details
                         auto stream_end_time = std::chrono::high_resolution_clock::now();
@@ -1084,6 +1118,7 @@ void APIServer::register_endpoints() {
                                   << " stream completed: " << prompt_tokens << " prompt + " << completion_tokens << " completion = "
                                   << (prompt_tokens + completion_tokens) << " tokens"
                                   << " (" << stream_duration_ms << "ms)"
+                                  << (include_usage ? " (usage emitted)" : " (usage suppressed)")
                                   << std::endl;
 
                         std::string done = "data: [DONE]\n\n";

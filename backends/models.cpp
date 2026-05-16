@@ -231,6 +231,12 @@ ModelConfig Models::detect_from_template_content(const std::string& template_tex
         return ModelConfig::create_gpt_oss();
     }
 
+    // Gemma 4: Uses <|channel>thought ... <channel|> for reasoning (distinct from GPT-OSS <|channel|>)
+    if (template_text.find("<|channel>thought") != std::string::npos) {
+        dout(1) << "Detected Gemma 4 model family from chat template" << std::endl;
+        return ModelConfig::create_gemma_4();
+    }
+
     // No match - return generic, but check for thinking markers
     ModelConfig config = ModelConfig::create_generic();
 

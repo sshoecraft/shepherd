@@ -349,6 +349,50 @@ struct ModelConfig {
         return config;
     }
 
+    /// @brief Create config for Google Gemma 4 family
+    /// Uses non-standard thought channel markers: <|channel>thought ... <channel|>
+    static ModelConfig create_gemma_4() {
+        return ModelConfig{
+            .family = ModelFamily::GEMMA,
+            .version = "4",
+            .tool_result_role = "tool",
+            .uses_eom_token = false,
+            .uses_python_tag = false,
+            .uses_builtin_tools_array = false,
+            .supports_thinking_mode = true,
+            .uses_observation_role = false,
+            .tool_call_format = "json",
+            .tool_call_start_markers = {},
+            .tool_call_end_markers = {},
+            .thinking_start_markers = {"<|channel>thought"},
+            .thinking_end_markers = {"<channel|>"},
+            .content_extract_marker = "",
+            .content_end_marker = "",
+            .assistant_start_tag = "<start_of_turn>model\n",
+            .assistant_end_tag = "<end_of_turn>",
+            .provider = "local",
+            .model_name = "",
+            .context_window = 131072,
+            .max_output_tokens = 0,
+            .max_cot_tokens = 0,
+            .max_tokens_param_name = "max_tokens",
+            .supported_endpoints = {},
+            .special_headers = {},
+            .aliases = {},
+            .supports_temperature = true,
+            .supports_streaming = true,
+            .vision_support = true,
+            .audio_support = false,
+            .function_calling_support = true,
+            .realtime_capable = false,
+            .fine_tunable = false,
+            .training_cutoff_date = "",
+            .deprecated = false,
+            .replacement_model = "",
+            .notes = "Google Gemma 4 with <|channel>thought ... <channel|> reasoning channel"
+        };
+    }
+
     /// @brief Create config for OpenAI GPT-OSS family
     /// Channel-based output format detected dynamically from template
     static ModelConfig create_gpt_oss() {

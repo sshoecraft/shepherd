@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.41.2
+    VERSION 2.42.4
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -381,6 +381,7 @@ if(ENABLE_LLAMACPP)
         ${LLAMACPP_DIR}/ggml/include
         ${LLAMACPP_DIR}/common
         ${LLAMACPP_DIR}/src
+        ${LLAMACPP_DIR}/vendor
     )
 
     # Determine shared library extension based on platform
@@ -398,7 +399,7 @@ if(ENABLE_LLAMACPP)
 
     # Base libraries (all platforms)
     target_link_libraries(shepherd PRIVATE
-        ${LLAMACPP_DIR}/build/common/libcommon.a
+        llama-common
         llama
         ggml
         ggml-base

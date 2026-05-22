@@ -38,9 +38,10 @@ AnthropicBackend::AnthropicBackend(size_t context_size, Session& session, EventC
 
     // --- Initialization ---
 
-    // Validate API key
-    if (api_key.empty()) {
-        std::cerr << "Anthropic API key is required" << std::endl;
+    // Validate authentication: require either API key or OAuth credentials
+    bool has_oauth = !oauth_client_id_.empty() && !oauth_token_url_.empty();
+    if (api_key.empty() && !has_oauth) {
+        std::cerr << "Anthropic API key or OAuth credentials required" << std::endl;
         throw std::runtime_error("Anthropic API key not configured");
     }
 
@@ -373,13 +374,15 @@ nlohmann::json AnthropicBackend::build_request_from_session(const Session& sessi
     if (sampling) {
         // Anthropic supports: temperature, top_p, top_k
         // Note: Anthropic doesn't allow both temperature and top_p to be set
-        // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
-        bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
-        bool top_p_is_default = (top_p >= 0.99f);
+        // Skip negative values (sentinel for "not set")
+        bool temp_valid = (temperature >= 0.0f);
+        bool top_p_valid = (top_p >= 0.0f);
+        bool temp_is_default = temp_valid && (temperature >= 0.69f && temperature <= 0.71f);
+        bool top_p_is_default = !top_p_valid || (top_p >= 0.99f);
 
         if (temp_is_default && !top_p_is_default) {
             request["top_p"] = round2(top_p);
-        } else {
+        } else if (temp_valid) {
             request["temperature"] = round2(temperature);
         }
         if (top_k > 0) {
@@ -595,13 +598,15 @@ nlohmann::json AnthropicBackend::build_request(const Session& session,
     if (sampling) {
         // Anthropic supports: temperature, top_p, top_k
         // Note: Anthropic doesn't allow both temperature and top_p to be set
-        // Use temperature unless it's at default (0.7) and top_p is not default (1.0)
-        bool temp_is_default = (temperature >= 0.69f && temperature <= 0.71f);
-        bool top_p_is_default = (top_p >= 0.99f);
+        // Skip negative values (sentinel for "not set")
+        bool temp_valid = (temperature >= 0.0f);
+        bool top_p_valid = (top_p >= 0.0f);
+        bool temp_is_default = temp_valid && (temperature >= 0.69f && temperature <= 0.71f);
+        bool top_p_is_default = !top_p_valid || (top_p >= 0.99f);
 
         if (temp_is_default && !top_p_is_default) {
             request["top_p"] = round2(top_p);
-        } else {
+        } else if (temp_valid) {
             request["temperature"] = round2(temperature);
         }
         if (top_k > 0) {
@@ -682,8 +687,18 @@ int AnthropicBackend::extract_tokens_to_evict(const HttpResponse& response) {
 std::map<std::string, std::string> AnthropicBackend::get_api_headers() {
     std::map<std::string, std::string> headers;
     headers["Content-Type"] = "application/json";
-    headers["x-api-key"] = api_key;
     headers["anthropic-version"] = api_version;
+
+    // Use OAuth token if configured, otherwise use API key
+    if (ensure_valid_oauth_token() && !oauth_token_.access_token.empty()) {
+        headers["Authorization"] = oauth_token_.token_type + " " + oauth_token_.access_token;
+        dout(1) << "Using OAuth token for Anthropic authorization" << std::endl;
+    } else if (!api_key.empty()) {
+        headers["x-api-key"] = api_key;
+        dout(1) << "Using API key for Anthropic authorization" << std::endl;
+    } else {
+        dout(1) << std::string("WARNING: ") + "No authentication configured for Anthropic" << std::endl;
+    }
 
     // Add model-specific special headers if any
     for (const auto& [key, value] : model_config.special_headers) {
@@ -716,15 +731,13 @@ size_t AnthropicBackend::query_model_context_size(const std::string& model_name)
 std::vector<std::string> AnthropicBackend::fetch_models() {
     std::vector<std::string> result;
 
-    if (!http_client || api_key.empty()) {
+    bool has_oauth = !oauth_client_id_.empty() && !oauth_token_url_.empty();
+    if (!http_client || (api_key.empty() && !has_oauth)) {
         return result;
     }
 
     // Build request to /v1/models (base URL, not chat endpoint)
-    std::map<std::string, std::string> headers;
-    headers["x-api-key"] = api_key;
-    headers["anthropic-version"] = "2023-06-01";
-    headers["Content-Type"] = "application/json";
+    auto headers = get_api_headers();
 
     HttpResponse response = http_client->get("https://api.anthropic.com/v1/models", headers);
 

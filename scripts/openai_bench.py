@@ -76,14 +76,26 @@ def benchmark_request(client, model, prompt, max_tokens, temperature, top_p, top
     if stream:
         usage_tokens = None
         for chunk in response:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            # Thinking models emit <think> tokens in a separate field. vLLM uses
+            # `reasoning_content` (qwen3 parser) or `reasoning` (some builds);
+            # other servers may differ. Pull from model_extra so we catch any
+            # field the SDK doesn't model as a typed attribute.
+            piece = None
+            if delta:
+                extra = getattr(delta, "model_extra", None) or {}
+                piece = (
+                    delta.content
+                    or getattr(delta, "reasoning_content", None)
+                    or extra.get("reasoning_content")
+                    or extra.get("reasoning")
+                )
             if debug:
-                delta_content = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta else None
                 print(f"  DEBUG chunk: choices={len(chunk.choices) if chunk.choices else 0}, "
                       f"finish={chunk.choices[0].finish_reason if chunk.choices else None}, "
-                      f"content={delta_content!r}")
-            if chunk.choices and chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                all_content.append(content)
+                      f"content={piece!r}")
+            if piece:
+                all_content.append(piece)
                 now = time.perf_counter()
                 if first_token_time is None:
                     first_token_time = now

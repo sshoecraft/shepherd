@@ -419,3 +419,182 @@ int handle_mcp_args(const std::vector<std::string>& args,
     callback("Use 'shepherd mcp help' to see available commands\n");
     return 1;
 }
+
+int handle_smcp_args(const std::vector<std::string>& args,
+                     std::function<void(const std::string&)> callback) {
+    std::string config_path = Config::get_default_config_path();
+
+    // Load config
+    nlohmann::json config_json;
+    std::ifstream infile(config_path);
+    if (infile.is_open()) {
+        try {
+            config_json = nlohmann::json::parse(infile);
+        } catch (const std::exception& e) {
+            callback("Failed to parse config: " + std::string(e.what()) + "\n");
+            return 1;
+        }
+    }
+
+    if (!config_json.contains("smcp_servers") || !config_json["smcp_servers"].is_array()) {
+        config_json["smcp_servers"] = nlohmann::json::array();
+    }
+
+    auto list_all = [&]() {
+        auto& servers = config_json["smcp_servers"];
+        if (servers.empty()) {
+            callback("No SMCP servers configured\n");
+        } else {
+            callback("SMCP servers:\n");
+            for (const auto& s : servers) {
+                callback("  " + s.value("name", std::string("unnamed")) + ": "
+                         + s.value("command", std::string("")) + "\n");
+            }
+        }
+    };
+
+    // No args - list
+    if (args.empty()) {
+        list_all();
+        return 0;
+    }
+
+    // Determine action-first vs name-first
+    std::string first_arg = args[0];
+    bool action_first = (first_arg == "list" || first_arg == "add" ||
+                         first_arg == "help" || first_arg == "--help" || first_arg == "-h");
+
+    std::string name;
+    std::string subcmd;
+
+    if (action_first) {
+        subcmd = first_arg;
+        name = (args.size() >= 2) ? args[1] : "";
+    } else {
+        name = first_arg;
+        subcmd = (args.size() >= 2) ? args[1] : "help";
+    }
+
+    // Read-only guard for mutating commands
+    if (config && config->is_read_only()) {
+        if (subcmd == "add" || subcmd == "remove") {
+            callback("Error: Cannot modify SMCP servers in read-only mode (config from Key Vault)\n");
+            return 1;
+        }
+    }
+
+    if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
+        if (!name.empty()) {
+            callback("Usage: shepherd smcp " + name + " <action>\n"
+                "\nActions:\n"
+                "  show    - Show server details\n"
+                "  remove  - Remove server\n");
+        } else {
+            callback("Usage: shepherd smcp <name> <action>\n"
+                "\nActions (after name):\n"
+                "  show    - Show server details\n"
+                "  remove  - Remove server\n"
+                "\nOther commands:\n"
+                "  list    - List all servers\n"
+                "  add <name> <command> [--cred KEY=VALUE ...]\n");
+        }
+        return 0;
+    }
+
+    if (subcmd == "list") {
+        list_all();
+        return 0;
+    }
+
+    if (subcmd == "add") {
+        // Action-first: smcp add NAME COMMAND [--cred KEY=VALUE ...]
+        if (args.size() < 3) {
+            callback("Usage: shepherd smcp add <name> <command> [--cred KEY=VALUE ...]\n");
+            return 1;
+        }
+
+        nlohmann::json server;
+        server["name"] = args[1];
+        server["command"] = args[2];
+        server["credentials"] = nlohmann::json::object();
+
+        for (size_t i = 3; i < args.size(); i++) {
+            if (args[i] == "--cred" && i + 1 < args.size()) {
+                i++;
+                const std::string& pair = args[i];
+                size_t eq = pair.find('=');
+                if (eq != std::string::npos) {
+                    server["credentials"][pair.substr(0, eq)] = pair.substr(eq + 1);
+                } else {
+                    callback("Warning: Invalid cred format (use KEY=VALUE): " + pair + "\n");
+                }
+            }
+        }
+
+        config_json["smcp_servers"].push_back(server);
+
+        std::ofstream outfile(config_path);
+        if (!outfile.is_open()) {
+            callback("Failed to write config: " + config_path + "\n");
+            return 1;
+        }
+        outfile << config_json.dump(4) << std::endl;
+        callback("Added SMCP server '" + args[1] + "'\n");
+        return 0;
+    }
+
+    if (subcmd == "show") {
+        if (name.empty()) {
+            callback("Usage: shepherd smcp <name> show\n");
+            return 1;
+        }
+        auto& servers = config_json["smcp_servers"];
+        for (const auto& s : servers) {
+            if (s.value("name", std::string("")) == name) {
+                callback("=== SMCP Server: " + name + " ===\n");
+                callback("command = " + s.value("command", std::string("")) + "\n");
+                if (s.contains("credentials") && !s["credentials"].empty()) {
+                    callback("credentials:\n");
+                    for (auto& [k, v] : s["credentials"].items()) {
+                        callback("  " + k + " = " + v.get<std::string>() + "\n");
+                    }
+                }
+                return 0;
+            }
+        }
+        callback("SMCP server '" + name + "' not found\n");
+        return 1;
+    }
+
+    if (subcmd == "remove") {
+        if (name.empty()) {
+            callback("Usage: shepherd smcp <name> remove\n");
+            return 1;
+        }
+        auto& servers = config_json["smcp_servers"];
+        bool found = false;
+        for (auto it = servers.begin(); it != servers.end(); ++it) {
+            if ((*it).value("name", std::string("")) == name) {
+                servers.erase(it);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            callback("SMCP server '" + name + "' not found\n");
+            return 1;
+        }
+        std::ofstream outfile(config_path);
+        if (!outfile.is_open()) {
+            callback("Failed to write config: " + config_path + "\n");
+            return 1;
+        }
+        outfile << config_json.dump(4) << std::endl;
+        callback("Removed SMCP server '" + name + "'\n");
+        return 0;
+    }
+
+    callback("Unknown smcp command: " + subcmd + "\n");
+    callback("Use 'shepherd smcp help' to see available commands\n");
+    return 1;
+}

@@ -24,6 +24,9 @@ struct FrontendFlags {
     std::vector<std::string> disable_tools;  // --disable-tools: glob patterns to disable
     std::vector<std::string> enable_tools;   // --enable-tools: glob patterns to re-enable
     bool continue_session = false;           // --continue: restore previous session
+    std::string ssl_cert;      // --ssl-cert: path to TLS certificate file
+    std::string ssl_key;       // --ssl-key: path to TLS private key file
+    bool passthrough = false;  // --passthrough: proxy requests without conversion (anthropic-server)
 };
 
 /// @brief Logical colors for frontend output

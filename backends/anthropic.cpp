@@ -28,6 +28,14 @@ AnthropicBackend::AnthropicBackend(size_t context_size, Session& session, EventC
     // Set API endpoint from config if provided
     if (!config->api_base.empty()) {
         api_endpoint = config->api_base;
+        // Append /v1/messages if not already present
+        if (api_endpoint.find("/v1/messages") == std::string::npos) {
+            if (api_endpoint.back() == '/') {
+                api_endpoint += "v1/messages";
+            } else {
+                api_endpoint += "/v1/messages";
+            }
+        }
         dout(1) << "Using custom Anthropic endpoint: " + api_endpoint << std::endl;
     }
 

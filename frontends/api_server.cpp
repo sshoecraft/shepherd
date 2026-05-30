@@ -22,8 +22,9 @@ using json = nlohmann::json;
 extern std::unique_ptr<Config> config;
 
 // APIServer class implementation
-APIServer::APIServer(const std::string& host, int port, bool, bool)
-    : Server(host, port, "api") {
+APIServer::APIServer(const std::string& host, int port, bool, bool,
+                     const std::string& ssl_cert, const std::string& ssl_key)
+    : Server(host, port, "api", ssl_cert, ssl_key) {
     // Set up the event callback - routes to request_handler when set
     callback = [this](CallbackEvent event, const std::string& content,
                       const std::string& name, const std::string& id) -> bool {
@@ -250,7 +251,7 @@ void APIServer::register_endpoints() {
     }
 
     // POST /v1/chat/completions - OpenAI-compatible chat completions
-    tcp_server.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) {
         auto request_start_time = std::chrono::high_resolution_clock::now();
 
         // Per-request backend for API providers (nullptr for GPU providers)
@@ -1469,7 +1470,7 @@ void APIServer::register_endpoints() {
     });
 
     // GET /v1/models - List available models
-    tcp_server.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             // Use display_name if set, otherwise fall back to model_name
             std::string model_id = backend->display_name.empty() ? backend->model_name : backend->display_name;
@@ -1507,7 +1508,7 @@ void APIServer::register_endpoints() {
     });
 
     // GET /v1/models/{model_name} - Get specific model info
-    tcp_server.Get("/v1/models/:model_name", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Get("/v1/models/:model_name", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             // Use display_name if set, otherwise fall back to model_name
             std::string model_id = backend->display_name.empty() ? backend->model_name : backend->display_name;
@@ -1545,7 +1546,7 @@ void APIServer::register_endpoints() {
     if (config->server_tools) {
 
     // GET /v1/tools - List available tools for MCP proxy
-    tcp_server.Get("/v1/tools", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Get("/v1/tools", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             // Check authentication if enabled
             bool auth_required = key_store && key_store->is_enabled();
@@ -1616,7 +1617,7 @@ void APIServer::register_endpoints() {
     });
 
     // POST /v1/tools/execute - Execute a tool for MCP proxy
-    tcp_server.Post("/v1/tools/execute", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Post("/v1/tools/execute", [this](const httplib::Request& req, httplib::Response& res) {
         try {
             // Extract API key for auth and user_id resolution
             std::string api_key = extract_bearer_token(req);

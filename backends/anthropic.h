@@ -35,6 +35,7 @@ public:
     int extract_tokens_to_evict(const HttpResponse& response) override;
     std::map<std::string, std::string> get_api_headers() override;
     std::string get_api_endpoint() override;
+    std::string get_api_key() override { return api_key; }
 
     // Override set_model to update model_config when model changes
     void set_model(const std::string& model) override;

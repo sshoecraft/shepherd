@@ -2,6 +2,7 @@
 #include "shepherd.h"
 #include "cli.h"
 #include "api_server.h"
+#include "anthropic_server.h"
 #include "cli_server.h"
 #include "json_frontend.h"
 #include "tui.h"
@@ -67,10 +68,13 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
         frontend = std::make_unique<TUI>();
     }
     else if (mode == "api-server") {
-        frontend = std::make_unique<APIServer>(host, port, f.no_mcp, f.no_tools);
+        frontend = std::make_unique<APIServer>(host, port, f.no_mcp, f.no_tools, f.ssl_cert, f.ssl_key);
+    }
+    else if (mode == "anthropic-server") {
+        frontend = std::make_unique<AnthropicServer>(host, port, f.ssl_cert, f.ssl_key, f.passthrough);
     }
     else if (mode == "cli-server") {
-        frontend = std::make_unique<CLIServer>(host, port);
+        frontend = std::make_unique<CLIServer>(host, port, f.ssl_cert, f.ssl_key);
     }
     else if (mode == "json") {
         frontend = std::make_unique<JsonFrontend>();
@@ -1000,6 +1004,15 @@ bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {
         return true;
     }
 
+    // /smcp command
+    if (cmd == "/smcp") {
+        auto out = [this](const std::string& msg) {
+            callback(CallbackEvent::CONTENT, msg, "", "");
+        };
+        handle_smcp_args(args, out);
+        return true;
+    }
+
     // /help - show available commands
     if (cmd == "/help") {
         std::string help =
@@ -1011,6 +1024,7 @@ bool Frontend::handle_slash_commands(const std::string& input, Tools& tools) {
             "  /sched              - Scheduler management\n"
             "  /tools              - Tool management\n"
             "  /mcp                - MCP server management\n"
+            "  /smcp               - SMCP server management\n"
             "  /help               - Show this help\n";
         callback(CallbackEvent::CONTENT, help, "", "");
         return true;

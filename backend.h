@@ -137,6 +137,18 @@ public:
     /// Default no-op for local backends (session.clear() handles local state)
     virtual void clear_session() {}
 
+    /// @brief Get API endpoint URL (API backends only)
+    /// @return Endpoint URL or empty string for non-API backends
+    virtual std::string get_api_endpoint() { return ""; }
+
+    /// @brief Get API key (API backends only)
+    /// @return API key or empty string for non-API backends
+    virtual std::string get_api_key() { return ""; }
+
+    /// @brief Get API headers including auth (API backends only)
+    /// @return Headers map or empty for non-API backends
+    virtual std::map<std::string, std::string> get_api_headers() { return {}; }
+
     /// @brief Acquire a lock for serialized backend access (GPU backends only)
     /// Returns nullptr for API backends (no locking needed)
     /// Returns a unique_lock for GPU backends (llama_decode not thread-safe)

@@ -20,9 +20,13 @@ public:
     /// @param port Port to listen on
     /// @param no_mcp If true, skip MCP tool initialization
     /// @param no_tools If true, skip all tool initialization
+    /// @param ssl_cert Path to TLS certificate (empty for plain HTTP)
+    /// @param ssl_key Path to TLS private key (empty for plain HTTP)
     APIServer(const std::string& host, int port,
               bool no_mcp = false,
-              bool no_tools = false);
+              bool no_tools = false,
+              const std::string& ssl_cert = "",
+              const std::string& ssl_key = "");
     ~APIServer();
 
     /// @brief Initialize tools and RAG

@@ -44,7 +44,8 @@ int handle_ctl_args(const std::vector<std::string>& args);
 /// Manages HTTP server lifecycle, control socket, and common endpoints
 class Server : public Frontend {
 public:
-    Server(const std::string& host, int port, const std::string& server_type);
+    Server(const std::string& host, int port, const std::string& server_type,
+           const std::string& ssl_cert = "", const std::string& ssl_key = "");
     virtual ~Server();
 
     /// @brief Run the server - starts TCP and control socket listeners
@@ -86,8 +87,8 @@ protected:
     // API key authentication store
     std::unique_ptr<KeyStore> key_store;
 
-    // TCP server for main API endpoints
-    httplib::Server tcp_server;
+    // TCP server for main API endpoints (may be SSLServer if TLS enabled)
+    std::unique_ptr<httplib::Server> tcp_server;
 
     // Control socket server (Unix domain socket)
     httplib::Server control_server;
@@ -97,10 +98,13 @@ protected:
     std::chrono::steady_clock::time_point start_time;
     std::atomic<uint64_t> requests_processed{0};
 
-    // Configuration
+    // Configuration (order must match initializer list)
     std::string host;
     int port;
     std::string server_type;
+    std::string ssl_cert_path;
+    std::string ssl_key_path;
+    bool tls_enabled = false;
     std::string control_socket_path;
 
 private:

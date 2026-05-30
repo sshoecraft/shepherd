@@ -75,8 +75,9 @@ void CliServerState::unregister_observer(ClientOutputs::StreamingOutput* observe
 }
 
 // CLIServer class implementation
-CLIServer::CLIServer(const std::string& host, int port)
-    : Server(host, port, "cli") {
+CLIServer::CLIServer(const std::string& host, int port,
+                     const std::string& ssl_cert, const std::string& ssl_key)
+    : Server(host, port, "cli", ssl_cert, ssl_key) {
 }
 
 CLIServer::~CLIServer() {
@@ -448,7 +449,7 @@ void CLIServer::on_server_start() {
 }
 
 void CLIServer::on_shutdown() {
-    // Signal SSE threads and processor to exit BEFORE tcp_server.stop()
+    // Signal SSE threads and processor to exit BEFORE tcp_server->stop()
     state.running = false;
     state.queue_cv.notify_all();
 }
@@ -493,7 +494,7 @@ void CLIServer::register_endpoints() {
     }
 
     // POST /request - Main request endpoint
-    tcp_server.Post("/request", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Post("/request", [this](const httplib::Request& req, httplib::Response& res) {
         // Parse request
         json request_json;
         std::string prompt;
@@ -612,7 +613,7 @@ void CLIServer::register_endpoints() {
     });
 
     // POST /clear - Reset conversation
-    tcp_server.Post("/clear", [this](const httplib::Request&, httplib::Response& res) {
+    tcp_server->Post("/clear", [this](const httplib::Request&, httplib::Response& res) {
         state.session->messages.clear();
         state.session->last_prompt_tokens = 0;
         state.session->total_tokens = 0;
@@ -628,7 +629,7 @@ void CLIServer::register_endpoints() {
     });
 
     // GET /session - Get full session state
-    tcp_server.Get("/session", [this](const httplib::Request&, httplib::Response& res) {
+    tcp_server->Get("/session", [this](const httplib::Request&, httplib::Response& res) {
         json response;
         response["success"] = true;
 
@@ -678,7 +679,7 @@ void CLIServer::register_endpoints() {
     });
 
     // GET /updates - SSE endpoint for live session updates (observers)
-    tcp_server.Get("/updates", [this](const httplib::Request& req, httplib::Response& res) {
+    tcp_server->Get("/updates", [this](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Content-Type", "text/event-stream");
         res.set_header("Cache-Control", "no-cache");
         res.set_header("X-Accel-Buffering", "no");

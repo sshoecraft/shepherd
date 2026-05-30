@@ -59,3 +59,9 @@ public:
 // callback: function to emit output
 int handle_mcp_args(const std::vector<std::string>& args,
                     std::function<void(const std::string&)> callback);
+
+// Common SMCP command implementation (takes parsed args)
+// Returns 0 on success, 1 on error
+// callback: function to emit output
+int handle_smcp_args(const std::vector<std::string>& args,
+                     std::function<void(const std::string&)> callback);

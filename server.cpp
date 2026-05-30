@@ -184,8 +184,10 @@ int handle_ctl_args(const std::vector<std::string>& args) {
 }
 
 // Server base class implementation
-Server::Server(const std::string& host, int port, const std::string& server_type)
-    : Frontend(), host(host), port(port), server_type(server_type) {
+Server::Server(const std::string& host, int port, const std::string& server_type,
+               const std::string& ssl_cert, const std::string& ssl_key)
+    : Frontend(), host(host), port(port), server_type(server_type),
+      ssl_cert_path(ssl_cert), ssl_key_path(ssl_key) {
     // Set control socket path based on port (allows multiple servers)
     // Prefer /var/tmp (persistent, user-writable) over /tmp
     std::string socket_name = "shepherd-" + std::to_string(port) + ".sock";
@@ -194,6 +196,30 @@ Server::Server(const std::string& host, int port, const std::string& server_type
     } else {
         control_socket_path = "/tmp/" + socket_name;
     }
+
+    // Create TCP server - TLS if cert/key provided, plain HTTP otherwise
+    tls_enabled = !ssl_cert_path.empty() && !ssl_key_path.empty();
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+    if (tls_enabled) {
+        auto ssl_server = new httplib::SSLServer(ssl_cert_path.c_str(), ssl_key_path.c_str());
+        if (!ssl_server->is_valid()) {
+            std::cerr << "Failed to initialize TLS server - check certificate and key files" << std::endl;
+            delete ssl_server;
+            tcp_server = std::make_unique<httplib::Server>();
+            tls_enabled = false;
+        } else {
+            tcp_server.reset(ssl_server);
+        }
+    } else {
+        tcp_server = std::make_unique<httplib::Server>();
+    }
+#else
+    if (tls_enabled) {
+        std::cerr << "TLS support not compiled in - falling back to plain HTTP" << std::endl;
+        tls_enabled = false;
+    }
+    tcp_server = std::make_unique<httplib::Server>();
+#endif
 
     // Initialize API key authentication from config
     // Eager-load keys now so the DB connection isn't needed after chroot
@@ -222,11 +248,22 @@ bool Server::check_auth(const httplib::Request& req, httplib::Response& res) {
         return true;  // No auth required
     }
 
-    // Extract Bearer token from Authorization header
+    // Extract API key from Authorization: Bearer or x-api-key header
+    std::string received_key;
     std::string auth_header = req.get_header_value("Authorization");
+    std::string x_api_key = req.get_header_value("x-api-key");
     std::string prefix = "Bearer ";
 
-    if (auth_header.empty()) {
+    if (!auth_header.empty()) {
+        if (auth_header.length() >= prefix.length() &&
+            auth_header.substr(0, prefix.length()) == prefix) {
+            received_key = auth_header.substr(prefix.length());
+        }
+    } else if (!x_api_key.empty()) {
+        received_key = x_api_key;
+    }
+
+    if (received_key.empty()) {
         res.status = 401;
         json error = {
             {"error", {
@@ -238,22 +275,6 @@ bool Server::check_auth(const httplib::Request& req, httplib::Response& res) {
         res.set_content(error.dump(), "application/json");
         return false;
     }
-
-    if (auth_header.length() < prefix.length() ||
-        auth_header.substr(0, prefix.length()) != prefix) {
-        res.status = 401;
-        json error = {
-            {"error", {
-                {"message", "Invalid API key format"},
-                {"type", "authentication_error"},
-                {"code", "401"}
-            }}
-        };
-        res.set_content(error.dump(), "application/json");
-        return false;
-    }
-
-    std::string received_key = auth_header.substr(prefix.length());
 
     if (!key_store->validate_key(received_key)) {
         res.status = 401;
@@ -283,13 +304,13 @@ void Server::shutdown() {
     // Let subclass signal threads to exit before stopping server
     on_shutdown();
 
-    tcp_server.stop();
+    tcp_server->stop();
     control_server.stop();
 }
 
 void Server::register_common_endpoints() {
     // GET /health - Health check
-    tcp_server.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
+    tcp_server->Get("/health", [this](const httplib::Request&, httplib::Response& res) {
         json response = {
             {"status", "ok"},
             {"server_type", server_type},
@@ -299,7 +320,7 @@ void Server::register_common_endpoints() {
     });
 
     // GET /status - Server status
-    tcp_server.Get("/status", [this](const httplib::Request&, httplib::Response& res) {
+    tcp_server->Get("/status", [this](const httplib::Request&, httplib::Response& res) {
         auto now = std::chrono::steady_clock::now();
         auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
 
@@ -470,7 +491,7 @@ int Server::run(Provider* cmdline_provider) {
 
     // Set up authentication middleware if enabled
     if (key_store->is_enabled()) {
-        tcp_server.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+        tcp_server->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
             // Public endpoints - no auth required
             if (req.path == "/health" || req.path == "/v1/models") {
                 return httplib::Server::HandlerResponse::Unhandled;
@@ -494,16 +515,17 @@ int Server::run(Provider* cmdline_provider) {
     on_server_start();
 
     // Set up HTTP access logging
-    tcp_server.set_logger([](const httplib::Request& req, const httplib::Response& res) {
+    tcp_server->set_logger([](const httplib::Request& req, const httplib::Response& res) {
         std::cout << "[http] " << req.remote_addr << " - \""
                   << req.method << " " << req.path << " HTTP/1.1\" "
                   << res.status << std::endl;
     });
 
-    std::cout << server_type << " server listening on " << host << ":" << port << std::endl;
+    std::cout << server_type << " server listening on "
+              << (tls_enabled ? "https://" : "http://") << host << ":" << port << std::endl;
 
     // Start TCP server (blocks until stopped)
-    bool success = tcp_server.listen(host.c_str(), port);
+    bool success = tcp_server->listen(host.c_str(), port);
 
     // Server stopped - cleanup
     running = false;

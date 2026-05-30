@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.42.5
+    VERSION 2.42.6
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -58,6 +58,7 @@ set(SHEPHERD_SOURCES
     frontends/cli.cpp
     frontends/tui.cpp
     frontends/api_server.cpp
+    frontends/anthropic_server.cpp
     frontends/cli_server.cpp
     frontends/client_output.cpp
     frontends/json_frontend.cpp
@@ -237,11 +238,15 @@ target_link_directories(shepherd PRIVATE ${NCURSES_LIBRARY_DIRS})
 target_link_libraries(shepherd PRIVATE
     ${SQLITE3_LIBRARIES}
     ${CURL_LIBRARIES}
+    OpenSSL::SSL
     OpenSSL::Crypto
     pthread
     dl
     ${NCURSES_LIBRARIES}
 )
+
+# Enable TLS support in httplib (requires OpenSSL)
+target_compile_definitions(shepherd PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # PostgreSQL backend (optional)
 if(ENABLE_POSTGRESQL)

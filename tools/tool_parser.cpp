@@ -7,8 +7,9 @@
 
 namespace ToolParser {
 
-// Forward declaration
+// Forward declarations
 std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content);
+std::optional<ToolCall> parse_anthropic_xml_tool_call(const std::string& response);
 
 // Convert non-standard string delimiters to JSON double-quoted strings
 // Handles: {'key': 'value'} -> {"key": "value"}  (Python single quotes)
@@ -376,6 +377,72 @@ std::optional<ToolCall> parse_xml_function_block(const std::string& xml_content)
     return ToolCall(tool_name, tool_params, params_json.dump(), "");
 }
 
+// Parse Anthropic/Claude XML format:
+// Format: <function_calls><invoke name="x"><parameter name="y">value</parameter></invoke></function_calls>
+// Also handles antml: prefixed variants
+std::optional<ToolCall> parse_anthropic_xml_tool_call(const std::string& response) {
+    // Look for function_calls block (with or without antml: prefix)
+    size_t fc_start = response.find("<function_calls>");
+    if (fc_start == std::string::npos) {
+        fc_start = response.find("<antml:function_calls>");
+    }
+    if (fc_start == std::string::npos) {
+        return std::nullopt;
+    }
+
+    // Extract content before the tool call
+    std::string content_before;
+    if (fc_start > 0) {
+        content_before = trim(response.substr(0, fc_start));
+    }
+
+    // Find the invoke tag (with or without antml: prefix)
+    std::regex invoke_regex(R"(<(?:antml:)?invoke\s+name=["']([^"']+)["']>)");
+    std::smatch invoke_match;
+    if (!std::regex_search(response, invoke_match, invoke_regex)) {
+        dout(1) << "Found function_calls but no invoke tag" << std::endl;
+        return std::nullopt;
+    }
+
+    std::string tool_name = invoke_match[1].str();
+    dout(1) << "Found Anthropic XML tool call: " + tool_name << std::endl;
+
+    // Extract parameters: <parameter name="key">value</parameter>
+    // or <antml:parameter name="key">value</antml:parameter>
+    std::map<std::string, std::any> tool_params;
+    std::regex param_regex(R"(<(?:antml:)?parameter\s+name=["']([^"']+)["']>([\s\S]*?)</(?:antml:)?parameter>)");
+    std::sregex_iterator param_it(response.begin(), response.end(), param_regex);
+    std::sregex_iterator param_end;
+
+    for (; param_it != param_end; ++param_it) {
+        std::string param_name = (*param_it)[1].str();
+        std::string param_value = (*param_it)[2].str();
+
+        // Trim leading/trailing whitespace
+        param_value = trim(param_value);
+
+        tool_params[param_name] = param_value;
+        dout(1) << "  Parameter: " + param_name + " = " + param_value.substr(0, 50) + (param_value.length() > 50 ? "..." : "") << std::endl;
+    }
+
+    dout(1) << "Successfully parsed Anthropic XML tool call with " + std::to_string(tool_params.size()) + " parameters" << std::endl;
+
+    // Build JSON from parameters
+    nlohmann::json params_json;
+    for (const auto& [key, value] : tool_params) {
+        params_json[key] = std::any_cast<std::string>(value);
+    }
+
+    ToolCall tc;
+    tc.name = tool_name;
+    tc.parameters = tool_params;
+    tc.raw_json = params_json.dump();
+    tc.tool_call_id = "";
+    tc.content = content_before;
+
+    return tc;
+}
+
 // Parse <tools> block with JSON inside (possibly in markdown code fence)
 // Format: <tools>\n```json\n{ "name": "...", "arguments": {...} }\n```
 std::optional<ToolCall> parse_tools_block(const std::string& response) {
@@ -707,6 +774,12 @@ std::optional<ToolCall> parse_simple_xml_tag(const std::string& response) {
 
 std::optional<ToolCall> parse_tool_call(const std::string& response,
                                         const std::vector<std::string>& tool_call_markers) {
+    // Try Anthropic/Claude XML format first (function_calls/invoke/parameter)
+    auto anthropic_result = parse_anthropic_xml_tool_call(response);
+    if (anthropic_result.has_value()) {
+        return anthropic_result;
+    }
+
     // Try <tools> block format (e.g., <tools>```json { "name": "...", "arguments": {...} }```)
     auto tools_block_result = parse_tools_block(response);
     if (tools_block_result.has_value()) {

@@ -191,6 +191,8 @@ static void print_usage(int, char** argv) {
 	printf("	--template		   Custom chat template file (Jinja format, llamacpp only)\n");
 	printf("	--apiserver		   Start HTTP API server mode (OpenAI-compatible)\n");
 	printf("	--server		   Alias for --apiserver\n");
+	printf("	--anthropic-server   Start Anthropic API server mode (/v1/messages)\n");
+	printf("	--passthrough        Passthrough mode: proxy requests without conversion (for --anthropic-server)\n");
 	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
 	printf("	--json			   Start JSON line mode (stdin/stdout, for machine integration)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
@@ -866,6 +868,7 @@ int main(int argc, char** argv) {
 	std::string server_host = "0.0.0.0";
 	std::string apikey_store;
 	std::string frontend_mode = "cli";
+	bool passthrough_mode = false;
 
 	// Temporary storage for command-line overrides (applied to config after load)
 	struct {
@@ -941,6 +944,8 @@ int main(int argc, char** argv) {
 		{"template", required_argument, 0, 1006},
 		{"apiserver", no_argument, 0, 1015},
 		{"server", no_argument, 0, 1015},  // Alias for --apiserver
+		{"anthropic-server", no_argument, 0, 1073},
+		{"passthrough", no_argument, 0, 1074},
 		{"cliserver", no_argument, 0, 1036},
 		{"json", no_argument, 0, 1069},
 		{"port", required_argument, 0, 1016},
@@ -1097,6 +1102,13 @@ int main(int argc, char** argv) {
 			case 1015: // --apiserver
 				frontend_mode = "api-server";
 				g_server_mode = true;
+				break;
+			case 1073: // --anthropic-server
+				frontend_mode = "anthropic-server";
+				g_server_mode = true;
+				break;
+			case 1074: // --passthrough
+				passthrough_mode = true;
 				break;
 			case 1036: // --cliserver
 				frontend_mode = "cli-server";
@@ -1596,6 +1608,7 @@ int main(int argc, char** argv) {
 		frontend_flags.disable_tools = disable_tools;
 		frontend_flags.enable_tools = enable_tools;
 		frontend_flags.continue_session = continue_session;
+		frontend_flags.passthrough = passthrough_mode;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 

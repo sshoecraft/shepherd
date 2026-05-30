@@ -202,7 +202,17 @@ std::string Config::get_default_config_path() {
     } else {
         config_home = get_home_directory() + "/.config";
     }
-    return config_home + "/shepherd/config.json";
+    std::string user_path = config_home + "/shepherd/config.json";
+
+    // Fall back to system-wide config when the user path doesn't exist.
+    // Once a user config is created it takes precedence again automatically.
+    if (!std::filesystem::exists(user_path)) {
+        const std::string system_path = "/etc/shepherd/config.json";
+        if (std::filesystem::exists(system_path)) {
+            return system_path;
+        }
+    }
+    return user_path;
 }
 
 std::string Config::get_default_memory_db_path() {

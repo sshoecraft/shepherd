@@ -754,6 +754,15 @@ nlohmann::json OpenAIBackend::build_request_from_session(const Session& session,
         dout(1) << "Added reasoning_effort: " + reasoning << std::endl;
     }
 
+    // vLLM/SGLang chat-template thinking toggle. Mirrors reasoning level:
+    // "off" -> false, low/medium/high -> true. Skipped when reasoning is unset
+    // (don't interfere) and on strict OpenAI/Azure endpoints (would 400).
+    if (!reasoning.empty() && !openai_strict) {
+        bool enable = (reasoning != "off");
+        request["chat_template_kwargs"]["enable_thinking"] = enable;
+        dout(1) << "Added chat_template_kwargs.enable_thinking=" + std::string(enable ? "true" : "false") << std::endl;
+    }
+
     // Add stop sequences if configured
     dout(1) << "stop_sequences.size()=" + std::to_string(stop_sequences.size()) << std::endl;
     if (!stop_sequences.empty()) {
@@ -902,6 +911,15 @@ nlohmann::json OpenAIBackend::build_request(const Session& session,
     if (!reasoning.empty() && reasoning != "off") {
         request["reasoning_effort"] = reasoning;
         dout(1) << "Added reasoning_effort: " + reasoning << std::endl;
+    }
+
+    // vLLM/SGLang chat-template thinking toggle. Mirrors reasoning level:
+    // "off" -> false, low/medium/high -> true. Skipped when reasoning is unset
+    // (don't interfere) and on strict OpenAI/Azure endpoints (would 400).
+    if (!reasoning.empty() && !openai_strict) {
+        bool enable = (reasoning != "off");
+        request["chat_template_kwargs"]["enable_thinking"] = enable;
+        dout(1) << "Added chat_template_kwargs.enable_thinking=" + std::string(enable ? "true" : "false") << std::endl;
     }
 
     // Add stop sequences if configured

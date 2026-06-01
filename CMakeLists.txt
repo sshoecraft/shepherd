@@ -18,10 +18,16 @@ option(ENABLE_TENSORRT "Enable TensorRT-LLM backend" OFF)
 option(ENABLE_LLAMACPP "Enable llama.cpp backend" OFF)
 option(ENABLE_API_BACKENDS "Enable API backends (OpenAI, Anthropic, etc)" ON)
 option(ENABLE_POSTGRESQL "Enable PostgreSQL RAG backend" OFF)
+option(ENABLE_SSL "Enable TLS/SSL support for HTTPS servers (requires OpenSSL 3.0+)" OFF)
 
 # Find required packages
 find_package(PkgConfig REQUIRED)
-find_package(OpenSSL REQUIRED)
+# Always need libcrypto for SHA256 hashing in RAG backend
+# Only need full OpenSSL (libssl) for HTTPS server support
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+if(ENABLE_SSL)
+    find_package(OpenSSL REQUIRED COMPONENTS SSL)
+endif()
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(NCURSES REQUIRED ncursesw)
@@ -136,9 +142,11 @@ target_include_directories(shepherd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/frontends
     ${SQLITE3_INCLUDE_DIRS}
     ${CURL_INCLUDE_DIRS}
-    ${OPENSSL_INCLUDE_DIR}
     ${NCURSES_INCLUDE_DIRS}
 )
+if(ENABLE_SSL)
+    target_include_directories(shepherd PRIVATE ${OPENSSL_INCLUDE_DIR})
+endif()
 
 # TensorRT-LLM setup - find Python first
 if(ENABLE_TENSORRT)
@@ -241,15 +249,17 @@ target_link_directories(shepherd PRIVATE ${NCURSES_LIBRARY_DIRS})
 target_link_libraries(shepherd PRIVATE
     ${SQLITE3_LIBRARIES}
     ${CURL_LIBRARIES}
-    OpenSSL::SSL
     OpenSSL::Crypto
     pthread
     dl
     ${NCURSES_LIBRARIES}
 )
 
-# Enable TLS support in httplib (requires OpenSSL)
-target_compile_definitions(shepherd PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+# TLS/SSL support for HTTPS servers (requires OpenSSL 3.0+)
+if(ENABLE_SSL)
+    target_link_libraries(shepherd PRIVATE OpenSSL::SSL)
+    target_compile_definitions(shepherd PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+endif()
 
 # PostgreSQL backend (optional)
 if(ENABLE_POSTGRESQL)
@@ -498,6 +508,7 @@ message(STATUS "Shepherd configuration:")
 message(STATUS "  TensorRT backend: ${ENABLE_TENSORRT}")
 message(STATUS "  llama.cpp backend: ${ENABLE_LLAMACPP}")
 message(STATUS "  API backends: ${ENABLE_API_BACKENDS}")
+message(STATUS "  SSL/TLS support: ${ENABLE_SSL}")
 
 # Set capabilities for chroot support (best-effort, non-interactive)
 set(SETCAP_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/setcap.sh")

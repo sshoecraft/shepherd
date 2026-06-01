@@ -352,7 +352,9 @@ std::unique_ptr<Backend> Provider::connect(Session& session, Backend::EventCallb
         if (config->presence_penalty_override >= 0) config->json["presence_penalty"] = config->presence_penalty_override;
         else if (presence_penalty >= 0.0f) config->json["presence_penalty"] = presence_penalty;
         if (max_tokens > 0) config->json["max_tokens"] = max_tokens;
-        config->json["ssl_verify"] = ssl_verify;
+        if (!config->json.contains("ssl_verify") || config->json["ssl_verify"].get<bool>()) {
+            config->json["ssl_verify"] = ssl_verify;
+        }
         if (!ca_bundle_path.empty()) config->json["ca_bundle_path"] = ca_bundle_path;
         if (!client_id.empty()) config->json["client_id"] = client_id;
         if (!client_secret.empty()) config->json["client_secret"] = client_secret;

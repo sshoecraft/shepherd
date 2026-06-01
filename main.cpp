@@ -155,6 +155,7 @@ static void print_usage(int, char** argv) {
 	printf("	--backend		   Backend (llamacpp, tensorrt, openai, anthropic, gemini, ollama, cli)\n");
 	printf("	--api-key		   API key for cloud backends\n");
 	printf("	--api-base		   API base URL (for OpenAI-compatible APIs)\n");
+	printf("	-k, --insecure	   Skip SSL certificate verification for API connections\n");
 	printf("	--context-size	   Set context window size (0 = use model's full context, default: from config)\n");
 	printf("	--gpu-layers N	   Number of model layers to offload to GPU (-1=auto/all, 0=CPU only, >0=specific count)\n");
 	printf("	--tp N			   Tensor parallelism size (llamacpp only, default: 1)\n");
@@ -197,8 +198,10 @@ static void print_usage(int, char** argv) {
 	printf("	--json			   Start JSON line mode (stdin/stdout, for machine integration)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
 	printf("	--ssl-cert PATH	   Path to TLS certificate file (enables HTTPS)\n");
 	printf("	--ssl-key PATH	   Path to TLS private key file (enables HTTPS)\n");
+#endif
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
 	printf("	--use-tools	   Execute tools server-side in API server\n");
 	printf("	--show-tool-calls=BOOL  Show tool calls in output (default: true)\n");
@@ -870,6 +873,7 @@ int main(int argc, char** argv) {
 	std::string server_host = "0.0.0.0";
 	std::string ssl_cert_path;
 	std::string ssl_key_path;
+	bool insecure_ssl = false;
 	std::string apikey_store;
 	std::string frontend_mode = "cli";
 	bool passthrough_mode = false;
@@ -991,6 +995,7 @@ int main(int argc, char** argv) {
 		{"list-models", no_argument, 0, 1065},
 		{"ssl-cert", required_argument, 0, 1075},
 		{"ssl-key", required_argument, 0, 1076},
+		{"insecure", no_argument, 0, 'k'},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -999,9 +1004,9 @@ int main(int argc, char** argv) {
 	int opt;
 	int option_index = 0;
 #ifdef _DEBUG
-	while ((opt = getopt_long(argc, argv, "c:d::e:m:p:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:d::e:km:p:vh", long_options, &option_index)) != -1) {
 #else
-	while ((opt = getopt_long(argc, argv, "c:e:m:p:vh", long_options, &option_index)) != -1) {
+	while ((opt = getopt_long(argc, argv, "c:e:km:p:vh", long_options, &option_index)) != -1) {
 #endif
 		switch (opt) {
 			case 'c':
@@ -1137,6 +1142,9 @@ int main(int argc, char** argv) {
 				break;
 			case 1076: // --ssl-key
 				ssl_key_path = optarg;
+				break;
+			case 'k': // --insecure
+				insecure_ssl = true;
 				break;
 			case 1045: // --apikey-store
 				apikey_store = optarg;
@@ -1398,6 +1406,10 @@ int main(int argc, char** argv) {
 	}
 	if (!override.api_base.empty()) {
 		config->api_base = override.api_base;
+	}
+	if (insecure_ssl) {
+		config->json["ssl_verify"] = false;
+		dout(1) << "SSL verification disabled via --insecure" << std::endl;
 	}
 	if (!override.model.empty()) {
 		config->model = override.model;

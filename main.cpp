@@ -197,6 +197,8 @@ static void print_usage(int, char** argv) {
 	printf("	--json			   Start JSON line mode (stdin/stdout, for machine integration)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
+	printf("	--ssl-cert PATH	   Path to TLS certificate file (enables HTTPS)\n");
+	printf("	--ssl-key PATH	   Path to TLS private key file (enables HTTPS)\n");
 	printf("	--server-tools	   Expose /v1/tools endpoints (requires --apiserver)\n");
 	printf("	--use-tools	   Execute tools server-side in API server\n");
 	printf("	--show-tool-calls=BOOL  Show tool calls in output (default: true)\n");
@@ -866,6 +868,8 @@ int main(int argc, char** argv) {
 	std::string run_as_user;
 	int server_port = 8000;
 	std::string server_host = "0.0.0.0";
+	std::string ssl_cert_path;
+	std::string ssl_key_path;
 	std::string apikey_store;
 	std::string frontend_mode = "cli";
 	bool passthrough_mode = false;
@@ -985,6 +989,8 @@ int main(int argc, char** argv) {
 		{"run-as", required_argument, 0, 1060},
 		{"user", required_argument, 0, 1060},  // Alias for --run-as
 		{"list-models", no_argument, 0, 1065},
+		{"ssl-cert", required_argument, 0, 1075},
+		{"ssl-key", required_argument, 0, 1076},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
@@ -1125,6 +1131,12 @@ int main(int argc, char** argv) {
 				break;
 			case 1017: // --host
 				server_host = optarg;
+				break;
+			case 1075: // --ssl-cert
+				ssl_cert_path = optarg;
+				break;
+			case 1076: // --ssl-key
+				ssl_key_path = optarg;
 				break;
 			case 1045: // --apikey-store
 				apikey_store = optarg;
@@ -1609,6 +1621,8 @@ int main(int argc, char** argv) {
 		frontend_flags.enable_tools = enable_tools;
 		frontend_flags.continue_session = continue_session;
 		frontend_flags.passthrough = passthrough_mode;
+		frontend_flags.ssl_cert = ssl_cert_path;
+		frontend_flags.ssl_key = ssl_key_path;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 

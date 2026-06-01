@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(shepherd
-    VERSION 2.42.7
+    VERSION 2.42.8
     DESCRIPTION "Shepherd LLM Server"
     HOMEPAGE_URL "https://github.com/sshoecraft/shepherd"
     LANGUAGES CXX
@@ -234,6 +234,9 @@ if(ENABLE_TENSORRT)
 endif()
 
 # Link standard libraries
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    target_link_directories(shepherd PRIVATE /usr/local/lib)
+endif()
 target_link_directories(shepherd PRIVATE ${NCURSES_LIBRARY_DIRS})
 target_link_libraries(shepherd PRIVATE
     ${SQLITE3_LIBRARIES}

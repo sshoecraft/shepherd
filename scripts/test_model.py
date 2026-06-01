@@ -100,7 +100,9 @@ except ImportError:
 # ============================================================================
 
 # Use SHEPHERD_BINARY env var if set, otherwise default
-SHEPHERD_BINARY = os.environ.get("SHEPHERD_BINARY", "/home/steve/src/shepherd/build/shepherd")
+SHEPHERD_BINARY = shutil.which("shepherd")
+if not SHEPHERD_BINARY:
+    sys.exit("ERROR: shepherd binary not found in PATH")
 SHEPHERD_SAFETY_WRAPPER = "/home/steve/src/shepherd/swebench_safety_wrapper.sh"
 #DEFAULT_CONFIG = os.path.expanduser("~/.shepherd/config.json")
 DEFAULT_CONFIG = ""

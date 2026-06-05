@@ -27,6 +27,7 @@ struct FrontendFlags {
     std::string ssl_cert;      // --ssl-cert: path to TLS certificate file
     std::string ssl_key;       // --ssl-key: path to TLS private key file
     bool passthrough = false;  // --passthrough: proxy requests without conversion (anthropic-server)
+    std::string openapi_base_url;  // --openapi-base-url: override servers[0].url in /openapi.json
 };
 
 /// @brief Logical colors for frontend output

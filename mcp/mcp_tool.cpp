@@ -16,6 +16,10 @@ std::string MCPToolAdapter::description() const {
     return mcp_tool.description;
 }
 
+std::string MCPToolAdapter::source() const {
+    return client->server->server_config.name;
+}
+
 std::string MCPToolAdapter::parameters() const {
     // Return the JSON schema directly for API backends
     // API backends need the actual JSON schema, not human-readable format

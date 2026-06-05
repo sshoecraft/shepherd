@@ -7,6 +7,7 @@
 #include "../backends/api.h"
 #include "../tools/tool_parser.h"
 #include "../tools/utf8_sanitizer.h"
+#include "../tools/json_schema.h"
 #include "../config.h"
 #include "../provider.h"
 #include "../rag.h"
@@ -1575,32 +1576,10 @@ void APIServer::register_endpoints() {
             for (const auto& name : tools.list()) {
                 Tool* tool = tools.get(name);
                 if (tool && tools.is_enabled(name)) {
-                    // Build parameters JSON schema
-                    auto params = tool->get_parameters_schema();
-                    json schema;
-                    schema["type"] = "object";
-                    schema["properties"] = json::object();
-                    json required_arr = json::array();
-
-                    for (const auto& param : params) {
-                        json param_schema;
-                        param_schema["type"] = param.type;
-                        if (!param.description.empty()) {
-                            param_schema["description"] = param.description;
-                        }
-                        schema["properties"][param.name] = param_schema;
-                        if (param.required) {
-                            required_arr.push_back(param.name);
-                        }
-                    }
-                    if (!required_arr.empty()) {
-                        schema["required"] = required_arr;
-                    }
-
                     json tool_json = {
                         {"name", tool->name()},
                         {"description", tool->description()},
-                        {"parameters", schema}
+                        {"parameters", tool_schema::params_to_object_schema(tool->get_parameters_schema())}
                     };
                     tools_array.push_back(tool_json);
                 }

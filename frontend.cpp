@@ -4,6 +4,7 @@
 #include "api_server.h"
 #include "anthropic_server.h"
 #include "cli_server.h"
+#include "openapi_server.h"
 #include "json_frontend.h"
 #include "tui.h"
 #include "tools/tools.h"
@@ -75,6 +76,9 @@ std::unique_ptr<Frontend> Frontend::create(const std::string& mode, const std::s
     }
     else if (mode == "cli-server") {
         frontend = std::make_unique<CLIServer>(host, port, f.ssl_cert, f.ssl_key);
+    }
+    else if (mode == "openapi-server") {
+        frontend = std::make_unique<OpenAPIServer>(host, port, f.ssl_cert, f.ssl_key, f.openapi_base_url);
     }
     else if (mode == "json") {
         frontend = std::make_unique<JsonFrontend>();

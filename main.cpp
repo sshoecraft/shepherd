@@ -195,6 +195,8 @@ static void print_usage(int, char** argv) {
 	printf("	--anthropic-server   Start Anthropic API server mode (/v1/messages)\n");
 	printf("	--passthrough        Passthrough mode: proxy requests without conversion (for --anthropic-server)\n");
 	printf("	--cliserver		   Start CLI server mode (local tool execution)\n");
+	printf("	--openapi-server   Start OpenAPI tool server mode (no model loaded; serves MCP tools to Open WebUI etc.)\n");
+	printf("	--openapi-base-url URL  Override servers[0].url in /openapi.json (useful behind a reverse proxy)\n");
 	printf("	--json			   Start JSON line mode (stdin/stdout, for machine integration)\n");
 	printf("	--port PORT		   Server port (default: 8000, requires --apiserver or --cliserver)\n");
 	printf("	--host HOST		   Server host to bind to (default: 0.0.0.0, requires --apiserver or --cliserver)\n");
@@ -877,6 +879,7 @@ int main(int argc, char** argv) {
 	std::string apikey_store;
 	std::string frontend_mode = "cli";
 	bool passthrough_mode = false;
+	std::string openapi_base_url;
 
 	// Temporary storage for command-line overrides (applied to config after load)
 	struct {
@@ -995,6 +998,8 @@ int main(int argc, char** argv) {
 		{"list-models", no_argument, 0, 1065},
 		{"ssl-cert", required_argument, 0, 1075},
 		{"ssl-key", required_argument, 0, 1076},
+		{"openapi-server", no_argument, 0, 1077},
+		{"openapi-base-url", required_argument, 0, 1078},
 		{"insecure", no_argument, 0, 'k'},
 		{"version", no_argument, 0, 'v'},
 		{"help", no_argument, 0, 'h'},
@@ -1142,6 +1147,13 @@ int main(int argc, char** argv) {
 				break;
 			case 1076: // --ssl-key
 				ssl_key_path = optarg;
+				break;
+			case 1077: // --openapi-server
+				frontend_mode = "openapi-server";
+				g_server_mode = true;
+				break;
+			case 1078: // --openapi-base-url
+				openapi_base_url = optarg;
 				break;
 			case 'k': // --insecure
 				insecure_ssl = true;
@@ -1635,6 +1647,7 @@ int main(int argc, char** argv) {
 		frontend_flags.passthrough = passthrough_mode;
 		frontend_flags.ssl_cert = ssl_cert_path;
 		frontend_flags.ssl_key = ssl_key_path;
+		frontend_flags.openapi_base_url = openapi_base_url;
 		auto frontend = Frontend::create(frontend_mode, server_host, server_port,
 		                                 cmdline_provider_ptr, override.provider, frontend_flags);
 

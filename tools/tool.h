@@ -37,6 +37,10 @@ public:
     /// @return Vector of parameter definitions (empty vector = not yet implemented, will fall back to legacy parameters())
     virtual std::vector<ParameterDef> get_parameters_schema() const { return {}; }
 
+    /// @brief Source identifier for grouping (e.g., "core", or SMCP server name)
+    /// Used for OpenAPI tags in the openapi-server frontend.
+    virtual std::string source() const { return "core"; }
+
     // The actual sanitized name to use (set during registration)
     std::string name() const { return sanitized_name; }
     void set_sanitized_name(const std::string& name) { sanitized_name = name; }

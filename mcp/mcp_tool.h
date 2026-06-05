@@ -13,6 +13,7 @@ public:
     std::string description() const override;
     std::string parameters() const override;
     std::vector<ParameterDef> get_parameters_schema() const override;
+    std::string source() const override;
     std::map<std::string, std::any> execute(const std::map<std::string, std::any>& args) override;
 
     std::shared_ptr<MCPClient> client;
